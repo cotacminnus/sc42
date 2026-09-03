@@ -1,0 +1,65 @@
+from __future__ import annotations
+
+import argparse
+import random
+from collections.abc import Sequence
+
+from .engine import Game, GameConfig
+from .players import HumanPlayer, Player, RandomPlayer
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Play Texas 42 against three placeholder bots.")
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="reveal every player's dominoes at the beginning of each hand",
+    )
+    parser.add_argument("--seed", type=int, help="use a reproducible shuffle and bot seed")
+    parser.add_argument(
+        "--target-marks",
+        type=int,
+        default=7,
+        help="marks needed to win (default: 7)",
+    )
+    parser.add_argument(
+        "--all-ai",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
+    return parser
+
+
+def make_players(seed: int | None, all_ai: bool = False) -> list[Player]:
+    master = random.Random(seed)
+    players: list[Player] = []
+    for seat in range(4):
+        if seat == 0 and not all_ai:
+            players.append(HumanPlayer())
+        else:
+            players.append(RandomPlayer(f"Dummy AI {seat + 1}", random.Random(master.getrandbits(64))))
+    return players
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    try:
+        config = GameConfig(
+            target_marks=args.target_marks,
+            debug=args.debug,
+            seed=args.seed,
+        )
+    except ValueError as error:
+        raise SystemExit(str(error)) from error
+    game = Game(make_players(args.seed, args.all_ai), config)
+    try:
+        game.play_match()
+    except (EOFError, KeyboardInterrupt):
+        print("\nGame ended.")
+        return 130
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+
