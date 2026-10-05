@@ -31,6 +31,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def make_players(seed: int | None, all_ai: bool = False) -> list[Player]:
+    # Separate bot RNGs keep one player's choices from consuming another's stream.
     master = random.Random(seed)
     players: list[Player] = []
     for seat in range(4):

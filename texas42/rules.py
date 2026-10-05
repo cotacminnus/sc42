@@ -27,6 +27,7 @@ def is_trump(domino: Domino, trump: Trump) -> bool:
 
 
 def led_suit(domino: Domino, trump: Trump) -> Suit:
+    """A trump lead calls trump; any other lead calls its higher numbered end."""
     if is_trump(domino, trump):
         assert trump is not None
         return trump
@@ -34,6 +35,7 @@ def led_suit(domino: Domino, trump: Trump) -> Suit:
 
 
 def follows_suit(domino: Domino, suit: Suit, trump: Trump) -> bool:
+    """Trump dominoes belong exclusively to trump when deciding who must follow."""
     if suit == DOUBLE_TRUMP:
         return domino.is_double
     if trump == suit:
@@ -42,6 +44,7 @@ def follows_suit(domino: Domino, suit: Suit, trump: Trump) -> bool:
 
 
 def legal_plays(hand: Sequence[Domino], lead: Domino | None, trump: Trump) -> tuple[Domino, ...]:
+    """Require following suit when possible; otherwise allow any domino."""
     if lead is None:
         return tuple(hand)
     suit = led_suit(lead, trump)
@@ -57,10 +60,12 @@ def suit_rank(domino: Domino, suit: Suit) -> tuple[int, int]:
         return (1, domino.high)
     if not domino.contains(suit):
         raise ValueError(f"{domino} is not in suit {suit}")
+    # Compare the double flag first, then the other end for non-doubles.
     return (1 if domino.is_double else 0, domino.other_end(suit))
 
 
 def trick_winner(plays: Sequence[tuple[int, Domino]], trump: Trump) -> int:
+    """Return the winning seat from plays in lead order, preferring any trump."""
     if not plays:
         raise ValueError("cannot score an empty trick")
     lead = plays[0][1]
@@ -83,5 +88,6 @@ def trick_winner(plays: Sequence[tuple[int, Domino]], trump: Trump) -> int:
 
 
 def trick_points(plays: Sequence[tuple[int, Domino]]) -> int:
+    # Seven trick points plus 35 counter points make 42 points in a full hand.
     return 1 + sum(domino.count_value for _, domino in plays)
 

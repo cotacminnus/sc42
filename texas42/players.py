@@ -11,6 +11,8 @@ from .rules import is_legal_bid
 
 @dataclass(frozen=True)
 class BidView:
+    """Bidding snapshot; forced is true when the shaker is last and all have passed."""
+
     seat: int
     shaker: int
     hand: tuple[Domino, ...]
@@ -21,6 +23,8 @@ class BidView:
 
 @dataclass(frozen=True)
 class TrumpView:
+    """The winning bidder's hand and contract, before any dominoes are played."""
+
     seat: int
     hand: tuple[Domino, ...]
     bid: Bid
@@ -28,6 +32,12 @@ class TrumpView:
 
 @dataclass(frozen=True)
 class PlayView:
+    """Decision snapshot with zero-based seats and team totals in seat-parity order.
+
+    Each trick stores (seat, domino) pairs in play order; completed_tricks is
+    chronological. legal_plays retains the order of the player's remaining hand.
+    """
+
     seat: int
     hand: tuple[Domino, ...]
     legal_plays: tuple[Domino, ...]
@@ -52,7 +62,7 @@ class Player(ABC):
 
     @abstractmethod
     def choose_bid(self, view: BidView) -> Bid | None:
-        """Return a bid or None to pass."""
+        """Return a legal raise or None; the engine turns a forced pass into 30."""
 
     @abstractmethod
     def choose_trump(self, view: TrumpView) -> Trump:

@@ -5,6 +5,7 @@ from typing import Literal, TypeAlias
 
 
 DOUBLE_TRUMP = "doubles"
+# Numbered trump uses 0-6 (including blanks); None means Follow Me/no trump.
 Trump: TypeAlias = int | Literal["doubles"] | None
 Suit: TypeAlias = int | Literal["doubles"]
 
@@ -34,6 +35,7 @@ class Domino:
 
     @property
     def count_value(self) -> int:
+        """Return counter points; only dominoes totaling five or ten count."""
         return self.pip_total if self.pip_total in (5, 10) else 0
 
     def contains(self, suit: int) -> bool:
@@ -69,6 +71,7 @@ class Bid:
 
     @property
     def strength(self) -> int:
+        """Order bids with every mark bid above every point bid."""
         if self.points is not None:
             return self.points
         assert self.marks is not None
@@ -76,6 +79,7 @@ class Bid:
 
     @property
     def target_points(self) -> int:
+        # Every mark bid requires all 42 points, regardless of the marks at stake.
         return self.points if self.points is not None else 42
 
     @property

@@ -22,6 +22,8 @@ class GameConfig:
 
 @dataclass(frozen=True)
 class HandResult:
+    """Hand summary: seats are 0-3 and team totals are ordered by seat parity."""
+
     bidder: int
     bid: Bid
     trump: Trump
@@ -48,9 +50,11 @@ class Game:
 
     @staticmethod
     def team_for(seat: int) -> int:
+        # Opposite seats partner: (0, 2) are team 0 and (1, 3) are team 1.
         return seat % 2
 
     def play_match(self) -> int:
+        """Play to the configured mark target, rotating the shaker after each hand."""
         self.write("Texas 42 - you and Player 3 versus Players 2 and 4")
         self.write(f"{self.players[self.shaker].name} shakes first.")
         while max(self.marks) < self.config.target_marks:
@@ -62,6 +66,7 @@ class Game:
         return winner
 
     def play_hand(self) -> HandResult:
+        """Play seven tricks and update match marks without rotating the shaker."""
         hands = self._deal()
         self.write(f"\n--- New hand: {self.players[self.shaker].name} shakes ---")
         if self.config.debug:
@@ -115,6 +120,7 @@ class Game:
 
         bidding_team = self.team_for(bidder)
         made = team_points[bidding_team] >= bid.target_points
+        # Award the contract's stake to bidders if made, or defenders if set.
         scoring_team = bidding_team if made else 1 - bidding_team
         self.marks[scoring_team] += bid.value_in_marks
         outcome = "made" if made else "was set on"
@@ -138,6 +144,7 @@ class Game:
         return [deck[seat * 7 : (seat + 1) * 7] for seat in range(4)]
 
     def _run_bidding(self, hands: list[list[Domino]]) -> tuple[int, Bid]:
+        """Give each seat one bid, starting after the shaker and ending with them."""
         current_bid: Bid | None = None
         current_bidder: int | None = None
         first = (self.shaker + 1) % 4
@@ -154,6 +161,7 @@ class Game:
             )
             candidate = self.players[seat].choose_bid(view)
             if candidate is None and forced:
+                # Also supplies a valid contract for bots that always return a pass.
                 candidate = Bid(points=30)
                 self.write(f"{self.players[seat].name} is forced to bid 30.")
             elif candidate is None:
