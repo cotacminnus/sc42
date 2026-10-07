@@ -8,6 +8,8 @@ from .players import BidView, PlayView, TrumpView
 
 @dataclass(frozen=True, slots=True)
 class TrainingView:
+    """Private actor snapshot; hand entries are permanent IDs, not positions."""
+
     seat: int
     hand: tuple[int, ...]
     match_marks: tuple[int, int]
@@ -30,6 +32,8 @@ class TrainingTrumpView(TrainingView):
 
 @dataclass(frozen=True, slots=True)
 class TrainingPlayView(TrainingView):
+    """Tricks retain chronological (seat, domino_id) pairs for policy recall."""
+
     legal_plays: tuple[int, ...]
     trick: tuple[tuple[int, int], ...]
     completed_tricks: tuple[tuple[tuple[int, int], ...], ...]
@@ -40,6 +44,7 @@ class TrainingPlayView(TrainingView):
 
 
 def training_view(view: BidView | TrumpView | PlayView) -> TrainingView:
+    """Encode an existing private view without exposing simulator hands."""
     common = dict(seat=view.seat, hand=tuple(domino.id for domino in view.hand),
                   match_marks=view.match_marks, bid_history=view.bid_history,
                   target_marks=view.target_marks)

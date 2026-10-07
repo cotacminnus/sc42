@@ -7,7 +7,7 @@ from dataclasses import FrozenInstanceError, fields
 from texas42 import (
     BID_ACTIONS, PLAY_ACTIONS, TRUMP_ACTIONS, Bid, Game, GameConfig, SelfPlayEnv,
 )
-from texas42.players import BidView, PlayView, Player, TrumpView
+from texas42.players import Player
 from texas42.rules import is_legal_bid, legal_plays, trick_points, trick_winner
 from texas42.training import TrainingTrumpView, training_view
 

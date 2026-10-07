@@ -97,6 +97,8 @@ class SelfPlayEnv:
             raise RuntimeError("Call reset() before observing or stepping an episode")
         transition = self._session.apply(action_id)
         if self._session.needs_deal:
+            # Native self-play samples chance automatically. The returned
+            # observation is from the next hand, but hand_result is the old one.
             self._deal()
         return StepResult(None if transition.terminated else self.observe(), transition.rewards,
                           transition.terminated, transition.hand_result, transition.match_winner)

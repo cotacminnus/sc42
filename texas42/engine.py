@@ -19,8 +19,8 @@ class GameConfig:
     seed: int | None = None
 
     def __post_init__(self) -> None:
-        if self.target_marks < 1:
-            raise ValueError("target_marks must be positive")
+        if type(self.target_marks) is not int or self.target_marks < 1:
+            raise ValueError("target_marks must be a positive integer")
 
 
 class Game:
@@ -95,16 +95,20 @@ class Game:
                 raise ValueError(f"{player.name} returned an invalid {state.phase} action: {action!r}")
             completed_before = len(state.completed)
             if self.log_state is not None:
+                # Capture the actor's private snapshot BEFORE applying its move;
+                # the rest of this record describes the resulting transition.
                 legal = state.legal_action_ids()
                 observation = Observation(state.seat, state.phase, training_view(view), legal,
                                           tuple(i in legal for i in range(len(state.actions()))))
             state.apply(action_id)
             if self.log_state is not None:
+                # Marks are committed once below, after the hand finishes. Use a
+                # projected copy so the terminal record includes that award.
                 marks = list(self.marks)
                 result = state.result
                 if result is not None:
                     marks[result.scoring_team] += result.marks_awarded
-                terminated = max(marks) >= self.config.target_marks
+                terminated = result is not None and max(marks) >= self.config.target_marks
                 winner = result.scoring_team if terminated else None
                 self.log_state({
                     "schema_version": 2,

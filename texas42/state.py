@@ -59,6 +59,7 @@ class HandState:
         return self.phase == "bid" and len(self.bid_history) == 3 and self.bid is None
 
     def view(self) -> DecisionView:
+        """Copy public history and the actor's hand into immutable snapshots."""
         if self.result is not None:
             raise RuntimeError("The hand is complete")
         common = dict(seat=self.seat, hand=tuple(self.hands[self.seat]),
@@ -84,6 +85,7 @@ class HandState:
                 "play": PLAY_ACTIONS}[self.phase]
 
     def legal_action_ids(self) -> tuple[int, ...]:
+        """Return sorted phase-local IDs, independent of the hand's ordering."""
         if self.result is not None:
             return ()
         if self.phase == "bid":
@@ -94,6 +96,7 @@ class HandState:
         return tuple(sorted(domino.id for domino in self.legal_dominoes()))
 
     def apply(self, action_id: int) -> None:
+        """Validate before mutating so rejected actions leave the state intact."""
         if self.result is not None:
             raise RuntimeError("The hand is complete")
         if type(action_id) is not int or action_id not in self.legal_action_ids():
@@ -104,6 +107,8 @@ class HandState:
             if action is not None:
                 self.bid, self.bidder = action, self.seat
             if len(self.bid_history) == 4:
+                # The shaker bids last and cannot pass when all others pass,
+                # so every completed auction has a bidder and a contract.
                 assert self.bidder is not None
                 self.phase, self.seat = "trump", self.bidder
             else:
@@ -118,6 +123,7 @@ class HandState:
                 self.seat = (self.seat + 1) % 4
                 return
             self.seat = trick_winner(self.trick, self.trump)
+            # The winning seat leads next; seat parity also identifies its team.
             self.points[self.seat % 2] += trick_points(self.trick)
             self.completed.append(tuple(self.trick))
             self.trick = []

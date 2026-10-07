@@ -15,6 +15,8 @@ from .state import BID_ACTIONS, PLAY_ACTIONS, TRUMP_ACTIONS
 
 
 PLAY_OFFSET = 0
+# OpenSpiel uses one action vocabulary; the native engine uses phase-local IDs.
+# Preserve domino IDs and put bids/trumps into disjoint ranges above them.
 BID_OFFSET = 28
 TRUMP_OFFSET = 46
 NUM_ACTIONS = 55
@@ -42,6 +44,8 @@ class Texas42Game(pyspiel.Game):
     """One hand (signed mark stakes) or one match (signed unit returns)."""
 
     def __init__(self, params=None):
+        # Materialize defaults so direct construction and deserialization have
+        # identical game strings and tensor capacities.
         params = {"episode": "hand", "target_marks": 7, "shaker": -1, **(params or {})}
         self.episode = params.get("episode", "hand")
         self.target_marks = params.get("target_marks", 7)
@@ -50,6 +54,7 @@ class Texas42Game(pyspiel.Game):
         EpisodeState(self.episode, self.target_marks, 0)
         if type(self.shaker) is not int or self.shaker not in range(-1, 4):
             raise ValueError("shaker must be -1 (chance) or a seat from 0 to 3")
+        # Every hand awards at least one mark: after 2*T-1 hands some team has T.
         self.max_hands = 1 if self.episode == "hand" else 2 * self.target_marks - 1
         utility = 5.0 if self.episode == "hand" else 1.0
         info = pyspiel.GameInfo(
@@ -63,6 +68,7 @@ class Texas42Game(pyspiel.Game):
         return Texas42State(self)
 
     def max_chance_nodes_in_history(self):
+        # max_game_length counts player decisions; chance has a separate bound.
         return 28 * self.max_hands + int(self.shaker == -1)
 
     def make_py_observer(self, iig_obs_type=None, params=None):
@@ -131,6 +137,8 @@ class Texas42State(pyspiel.State):
             return
         hand = self.session.hand
         actor = hand.seat
+        # Delegate validation before appending public history: an illegal move
+        # must change neither the engine state nor the adapter's event stream.
         transition = self.session.apply(action - OFFSETS[hand.phase])
         self.events[-1].append((actor, action))
         if transition.terminated:
@@ -194,6 +202,7 @@ class Texas42Observer:
         offset = 0
         for name, shape in pieces:
             length = int(np.prod(shape))
+            # Named arrays share the flat tensor; set_from updates both at once.
             self.dict[name] = self.tensor[offset:offset + length].reshape(shape)
             offset += length
 
@@ -214,12 +223,16 @@ class Texas42Observer:
                 for slot, index in enumerate(indexes):
                     ids = state.deals[index][seat * 7:(seat + 1) * 7]
                     if self.obs_type.perfect_recall:
+                        # Retain own draw order: earlier partial-deal observations
+                        # cannot be reconstructed from an unordered set alone.
                         for turn, domino_id in enumerate(ids):
                             self.dict["private_deals"][slot, private_seat, turn, domino_id] = 1
                     else:
                         self.dict["private_deals"][slot, private_seat, ids] = 1
         if "history" in self.dict:
             actor = state.current_player()
+            # OpenSpiel uses negative sentinel IDs; tensor slots 4/5 represent
+            # chance/terminal and must not be addressed with negative indexing.
             self.dict["actor"][actor if actor >= 0 else 4 if state.is_chance_node() else 5] = 1
             hand = state.session.hand if state.session and not state.session.needs_deal else None
             phase = (4 if state.is_terminal() else 0 if state.is_chance_node()
