@@ -100,6 +100,8 @@ python -m unittest discover -s tests -v
 | `texas42/models.py` | Dominoes, bids, and trump representations |
 | `texas42/rules.py` | Legal bids and plays, suit ranking, and trick scoring |
 | `texas42/engine.py` | Dealing, bidding, hand progression, and match scoring |
+| `texas42/state.py` | Shared turn transitions and stable action vocabularies |
+| `texas42/selfplay.py` | Silent reset/step API for hand or match training episodes |
 | `texas42/players.py` | Player interface, immutable decision views, human input, and bots |
 | `texas42/cli.py` | Command-line options and player setup |
 | `tests/test_game.py` | Rule checks and automated game smoke tests |
@@ -140,6 +142,89 @@ winning_team = game.play_match()  # Returns team 0 or 1.
 `GameConfig.seed` controls the engine's shuffle and initial shaker; custom players
 manage their own randomness. `play_hand()` returns a `HandResult` and updates
 match marks, but only `play_match()` automatically rotates the shaker.
+
+### Self-play training interface
+
+`SelfPlayEnv` runs without player objects, console output, or third-party
+dependencies. Both it and `Game` use the same hand transition logic. This is a
+native turn-based API, not a Gymnasium or PettingZoo adapter.
+
+```python
+import random
+from texas42 import SelfPlayEnv
+
+env = SelfPlayEnv(episode="hand", seed=42)
+policy_rng = random.Random(123)
+
+for episode in range(100):
+    observation = env.reset()
+    trajectories = [[] for _ in range(4)]
+    while True:
+        # Replace this with masked sampling from your policy network.
+        action_id = policy_rng.choice(observation.legal_action_ids)
+        trajectories[observation.seat].append((observation, action_id))
+        transition = env.step(action_id)
+        if transition.terminated:
+            # Hand mode: assign each seat's terminal team reward to its own
+            # trajectory. A PPO collector should also store log-probs/values.
+            for seat, trajectory in enumerate(trajectories):
+                reward = transition.rewards[seat]
+                # train/store (trajectory, reward) here
+            break
+        observation = transition.observation
+```
+
+`reset(seed=42)` restarts the deal random stream; `reset()` continues it.
+`reset(shaker=0)` optionally selects the starting shaker. A reset discards any
+previous episode, clears marks, and deals a fresh hand. Policy sampling needs
+its own seeded RNG for complete reproducibility.
+
+Each immutable `Observation` contains the acting `seat`, `phase`, player `view`,
+`legal_action_ids`, and a boolean `action_mask`. Views expose only that seat's
+hand and public information, including chronological bids/passes, match marks,
+and the target mark count. Play views also contain the current trick and all
+completed tricks. Do not pass the environment's private simulator state to a
+policy. An observation remains unchanged after later steps.
+
+Action IDs are **local to the current phase**, suitable for three policy heads:
+
+| Phase | IDs | Exported lookup tuple |
+| --- | --- | --- |
+| `bid` | 0 = pass; 1–12 = 30–41 points; 13–17 = 1–5 marks | `BID_ACTIONS` |
+| `trump` | 0–6 = numbered trump; 7 = doubles; 8 = no trump | `TRUMP_ACTIONS` |
+| `play` | 0–27 = permanent domino IDs, independent of hand ordering | `PLAY_ACTIONS` |
+
+For normalized domino `[high|low]`, the play ID is `high*(high+1)//2 + low`.
+Use `PLAY_ACTIONS[action_id]` to decode it. Mask illegal logits before sampling.
+The environment rejects illegal IDs with `ValueError` without changing state.
+Use Python `int` IDs (convert tensor/NumPy scalars first). Pass is masked out for
+a forced bidder; the legacy `Player` API still converts a forced `None` into 30.
+
+`step(action_id)` returns a `StepResult`:
+
+- `observation` belongs to the **next acting seat**, or is `None` at episode end.
+- `rewards` is ordered by seats 0, 1, 2, 3. Partners receive equal rewards and
+  opponents receive opposite rewards. These are transition rewards, not totals.
+- `hand_result` is present only on a hand-ending transition and includes points,
+  contract, scoring team, and marks awarded.
+- `terminated` marks episode completion. Call `reset()` before stepping again.
+- `match_winner` is a team index when the target marks have been reached.
+
+With `episode="hand"` (the default), an episode is exactly one hand: four bids,
+one trump choice, and 28 plays. Only the final step pays rewards: positive marks
+awarded for the scoring team, negative marks for its opponents.
+
+With `episode="match", target_marks=7`, hands continue automatically, marks
+persist, and the shaker rotates between hands. Intermediate hand boundaries
+return both `hand_result` and the next hand's bidding observation; they do not
+terminate the episode. All rewards are zero until the match ends, then winners
+receive +1 and losers -1. Reset hand-specific policy memory at hand boundaries
+if appropriate, but keep match returns connected through those boundaries.
+
+Keep separate trajectories for each seat. Terminal rewards apply to all four
+seats, including seats that did not take the final action. This API provides
+simulation and observations; a feature encoder, neural network, and optimizer
+remain training-code responsibilities.
 
 ## License
 

@@ -4,9 +4,10 @@ import random
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
-from .models import Bid, Domino, Trump, double_six_set, trump_name
-from .players import BidView, PlayView, Player, TrumpView, format_hand
-from .rules import is_legal_bid, legal_plays, trick_points, trick_winner
+from .models import Bid, Domino, double_six_set, trump_name
+from .players import BidView, Player, TrumpView, format_hand
+from .rules import trick_points, trick_winner
+from .state import HandResult, HandState
 
 
 @dataclass(frozen=True)
@@ -18,18 +19,6 @@ class GameConfig:
     def __post_init__(self) -> None:
         if self.target_marks < 1:
             raise ValueError("target_marks must be positive")
-
-
-@dataclass(frozen=True)
-class HandResult:
-    """Hand summary: seats are 0-3 and team totals are ordered by seat parity."""
-
-    bidder: int
-    bid: Bid
-    trump: Trump
-    team_points: tuple[int, int]
-    scoring_team: int
-    marks_awarded: int
 
 
 class Game:
@@ -74,113 +63,58 @@ class Game:
             for seat, hand in enumerate(hands):
                 self.write(f"  P{seat + 1} {self.players[seat].name}: {format_hand(hand)}")
 
-        bidder, bid = self._run_bidding(hands)
-        trump = self._choose_trump(bidder, bid, hands)
-        self.write(
-            f"{self.players[bidder].name} wins the bid at {bid} "
-            f"and calls {trump_name(trump)}."
-        )
-
-        team_points = [0, 0]
-        completed: list[tuple[tuple[int, Domino], ...]] = []
-        leader = bidder
-        for trick_number in range(1, 8):
-            trick: list[tuple[int, Domino]] = []
-            for offset in range(4):
-                seat = (leader + offset) % 4
-                legal = legal_plays(hands[seat], trick[0][1] if trick else None, trump)
-                view = PlayView(
-                    seat=seat,
-                    hand=tuple(hands[seat]),
-                    legal_plays=legal,
-                    trick=tuple(trick),
-                    completed_tricks=tuple(completed),
-                    bidder=bidder,
-                    bid=bid,
-                    trump=trump,
-                    team_points=tuple(team_points),
-                    match_marks=tuple(self.marks),
+        state = HandState(hands, self.shaker, tuple(self.marks), self.config.target_marks)
+        while state.result is None:
+            view = state.view()
+            player = self.players[view.seat]
+            if isinstance(view, BidView):
+                action = player.choose_bid(view)
+                if action is None and view.forced:
+                    action = Bid(points=30)
+                    message = f"{player.name} is forced to bid 30."
+                elif action is None:
+                    message = f"{player.name} passes."
+                else:
+                    message = f"{player.name} bids {action}."
+            elif isinstance(view, TrumpView):
+                action = player.choose_trump(view)
+                message = ""  # Format the trump name after validating the action.
+            else:
+                action = player.choose_domino(view)
+                message = f"P{view.seat + 1} {player.name} plays {action}"
+            # Match types as well as values: bool/float are not numbered trumps.
+            action_id = next((i for i, candidate in enumerate(state.actions())
+                              if type(action) is type(candidate) and action == candidate), None)
+            if action_id is None:
+                raise ValueError(f"{player.name} returned an invalid {state.phase} action: {action!r}")
+            completed_before = len(state.completed)
+            state.apply(action_id)
+            if isinstance(view, TrumpView):
+                message = (
+                    f"{player.name} wins the bid at {view.bid} "
+                    f"and calls {trump_name(action)}."
                 )
-                domino = self.players[seat].choose_domino(view)
-                if domino not in legal:
-                    raise ValueError(f"{self.players[seat].name} returned an illegal play: {domino}")
-                hands[seat].remove(domino)
-                trick.append((seat, domino))
-                self.write(f"P{seat + 1} {self.players[seat].name} plays {domino}")
+            self.write(message)
+            if len(state.completed) != completed_before:
+                trick = state.completed[-1]
+                winner = trick_winner(trick, state.trump)
+                points = trick_points(trick)
+                self.write(
+                    f"Trick {len(state.completed)}: {self.players[winner].name} wins "
+                    f"{points} point{'s' if points != 1 else ''}."
+                )
 
-            winner = trick_winner(trick, trump)
-            points = trick_points(trick)
-            team_points[self.team_for(winner)] += points
-            completed.append(tuple(trick))
-            leader = winner
-            self.write(
-                f"Trick {trick_number}: {self.players[winner].name} wins "
-                f"{points} point{'s' if points != 1 else ''}."
-            )
-
-        bidding_team = self.team_for(bidder)
-        made = team_points[bidding_team] >= bid.target_points
-        # Award the contract's stake to bidders if made, or defenders if set.
-        scoring_team = bidding_team if made else 1 - bidding_team
-        self.marks[scoring_team] += bid.value_in_marks
-        outcome = "made" if made else "was set on"
+        result = state.result
+        self.marks[result.scoring_team] += result.marks_awarded
+        outcome = "made" if result.scoring_team == result.bidder % 2 else "was set on"
         self.write(
-            f"The bidding team {outcome} {bid}; hand points "
-            f"{team_points[0]}-{team_points[1]}."
+            f"The bidding team {outcome} {result.bid}; hand points "
+            f"{result.team_points[0]}-{result.team_points[1]}."
         )
         self.write(f"Match marks: {self.marks[0]}-{self.marks[1]}")
-        return HandResult(
-            bidder=bidder,
-            bid=bid,
-            trump=trump,
-            team_points=tuple(team_points),
-            scoring_team=scoring_team,
-            marks_awarded=bid.value_in_marks,
-        )
+        return result
 
     def _deal(self) -> list[list[Domino]]:
         deck = list(double_six_set())
         self.rng.shuffle(deck)
         return [deck[seat * 7 : (seat + 1) * 7] for seat in range(4)]
-
-    def _run_bidding(self, hands: list[list[Domino]]) -> tuple[int, Bid]:
-        """Give each seat one bid, starting after the shaker and ending with them."""
-        current_bid: Bid | None = None
-        current_bidder: int | None = None
-        first = (self.shaker + 1) % 4
-        for offset in range(4):
-            seat = (first + offset) % 4
-            forced = offset == 3 and current_bid is None
-            view = BidView(
-                seat=seat,
-                shaker=self.shaker,
-                hand=tuple(hands[seat]),
-                current_bid=current_bid,
-                current_bidder=current_bidder,
-                forced=forced,
-            )
-            candidate = self.players[seat].choose_bid(view)
-            if candidate is None and forced:
-                # Also supplies a valid contract for bots that always return a pass.
-                candidate = Bid(points=30)
-                self.write(f"{self.players[seat].name} is forced to bid 30.")
-            elif candidate is None:
-                self.write(f"{self.players[seat].name} passes.")
-                continue
-
-            if not is_legal_bid(candidate, current_bid):
-                raise ValueError(f"{self.players[seat].name} returned an illegal bid: {candidate}")
-            current_bid = candidate
-            current_bidder = seat
-            self.write(f"{self.players[seat].name} bids {candidate}.")
-
-        assert current_bid is not None and current_bidder is not None
-        return current_bidder, current_bid
-
-    def _choose_trump(self, bidder: int, bid: Bid, hands: list[list[Domino]]) -> Trump:
-        trump = self.players[bidder].choose_trump(
-            TrumpView(seat=bidder, hand=tuple(hands[bidder]), bid=bid)
-        )
-        if trump not in {*range(7), "doubles", None}:
-            raise ValueError(f"{self.players[bidder].name} returned invalid trump: {trump}")
-        return trump

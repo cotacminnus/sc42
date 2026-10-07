@@ -19,6 +19,9 @@ class BidView:
     current_bid: Bid | None
     current_bidder: int | None
     forced: bool
+    match_marks: tuple[int, int] = (0, 0)
+    bid_history: tuple[tuple[int, Bid | None], ...] = ()
+    target_marks: int = 7
 
 
 @dataclass(frozen=True)
@@ -28,6 +31,9 @@ class TrumpView:
     seat: int
     hand: tuple[Domino, ...]
     bid: Bid
+    match_marks: tuple[int, int] = (0, 0)
+    bid_history: tuple[tuple[int, Bid | None], ...] = ()
+    target_marks: int = 7
 
 
 @dataclass(frozen=True)
@@ -48,6 +54,8 @@ class PlayView:
     trump: Trump
     team_points: tuple[int, int]
     match_marks: tuple[int, int]
+    bid_history: tuple[tuple[int, Bid | None], ...] = ()
+    target_marks: int = 7
 
 
 class Player(ABC):
