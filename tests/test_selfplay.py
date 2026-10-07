@@ -5,19 +5,20 @@ import unittest
 from dataclasses import FrozenInstanceError, fields
 
 from texas42 import (
-    BID_ACTIONS, PLAY_ACTIONS, TRUMP_ACTIONS, Bid, Game, GameConfig, SelfPlayEnv,
+    ACTIONS, BID_ACTIONS, BID_OFFSET, PLAY_ACTIONS, TRUMP_ACTIONS, TRUMP_OFFSET,
+    NUM_ACTIONS, Bid, Game, GameConfig, SelfPlayEnv,
 )
-from texas42.players import BidView, PlayView, Player, TrumpView
+from texas42.players import Player
 from texas42.rules import is_legal_bid, legal_plays, trick_points, trick_winner
 from texas42.training import TrainingTrumpView, training_view
 
 
-def finish_hand(env, observation, *, trump=8, bid_id=1):
+def finish_hand(env, observation, *, trump=54, bid_id=29):
     """Use a specified forced bid and trump, then deterministic legal play."""
     transitions = []
     while True:
         if observation.phase == "bid":
-            action = bid_id if observation.view.forced else 0
+            action = bid_id if observation.view.forced else BID_OFFSET
         elif observation.phase == "trump":
             action = trump
         else:
@@ -54,7 +55,7 @@ class SelfPlayTests(unittest.TestCase):
     def test_lifecycle_and_configuration(self):
         env = SelfPlayEnv()
         with self.assertRaises(RuntimeError):
-            env.step(0)
+            env.step(BID_OFFSET)
         with self.assertRaises(RuntimeError):
             env.observe()
         for kwargs in ({"episode": "other"}, {"target_marks": 0}, {"target_marks": True}):
@@ -67,7 +68,7 @@ class SelfPlayTests(unittest.TestCase):
         self.assertTrue(result.terminated)
         self.assertIsNone(result.observation)
         with self.assertRaises(RuntimeError):
-            env.step(0)
+            env.step(BID_OFFSET)
         with self.assertRaises(RuntimeError):
             env.observe()
         self.assertEqual(env.reset().phase, "bid")
@@ -89,24 +90,24 @@ class SelfPlayTests(unittest.TestCase):
     def test_auction_order_forced_pass_mask_and_history(self):
         env = SelfPlayEnv()
         obs = env.reset(seed=42, shaker=1)
-        self.assertEqual(len(obs.action_mask), 18)
+        self.assertEqual(len(obs.action_mask), NUM_ACTIONS)
         for seat in (2, 3, 0):
             self.assertEqual(obs.seat, seat)
-            self.assertIn(0, obs.legal_action_ids)
-            obs = env.step(0).observation
+            self.assertIn(BID_OFFSET, obs.legal_action_ids)
+            obs = env.step(BID_OFFSET).observation
         self.assertEqual(obs.seat, 1)
         self.assertTrue(obs.view.forced)
-        self.assertNotIn(0, obs.legal_action_ids)
+        self.assertNotIn(BID_OFFSET, obs.legal_action_ids)
         self.assertEqual(obs.view.bid_history, ((2, None), (3, None), (0, None)))
         with self.assertRaises(ValueError):
-            env.step(0)
+            env.step(BID_OFFSET)
         self.assertEqual(env.observe(), obs)
-        obs = env.step(1).observation
+        obs = env.step(BID_OFFSET + 1).observation
         self.assertIsInstance(obs.view, TrainingTrumpView)
         self.assertEqual(obs.seat, 1)
         self.assertEqual(obs.view.bid, Bid(points=30))
         self.assertEqual(obs.view.bid_history[-1], (1, Bid(points=30)))
-        obs = env.step(8).observation
+        obs = env.step(TRUMP_OFFSET + 8).observation
         self.assertEqual(obs.phase, "play")
         self.assertEqual(obs.seat, 1)
         self.assertIsNone(obs.view.trump)
@@ -114,8 +115,8 @@ class SelfPlayTests(unittest.TestCase):
     def test_bid_masks_follow_raise_limits(self):
         env = SelfPlayEnv()
         obs = env.reset(seed=5)
-        for chosen in (14, 15, 16, 17):  # 2, 3, 4, 5 marks
-            expected = tuple(i for i, bid in enumerate(BID_ACTIONS)
+        for chosen in (42, 43, 44, 45):  # 2, 3, 4, 5 marks
+            expected = tuple(BID_OFFSET + i for i, bid in enumerate(BID_ACTIONS)
                              if (not obs.view.forced if bid is None
                                  else is_legal_bid(bid, obs.view.current_bid)))
             self.assertEqual(obs.legal_action_ids, expected)
@@ -127,7 +128,7 @@ class SelfPlayTests(unittest.TestCase):
         obs = env.reset(seed=9)
         for phase in ("bid", "trump", "play"):
             while obs.phase != phase:
-                action = (1 if obs.view.forced else 0) if obs.phase == "bid" else 8
+                action = (BID_OFFSET + 1 if obs.view.forced else BID_OFFSET) if obs.phase == "bid" else TRUMP_OFFSET + 8
                 obs = env.step(action).observation
             invalid = [-1, len(obs.action_mask), True, 1.0, None, "0"]
             invalid.extend(i for i, allowed in enumerate(obs.action_mask) if not allowed)
@@ -148,7 +149,7 @@ class SelfPlayTests(unittest.TestCase):
             self.assertFalse(any(field.name == "hands" for field in fields(obs.view)))
             with self.assertRaises(FrozenInstanceError):
                 obs.view.seat = 4
-            obs = env.step(1 if obs.view.forced else 0).observation
+            obs = env.step(BID_OFFSET + 1 if obs.view.forced else BID_OFFSET).observation
         self.assertEqual(len(set(hands)), 28)
         self.assertEqual(old.view.bid_history, ())
         self.assertEqual(len(old.view.hand), 7)
@@ -159,8 +160,8 @@ class SelfPlayTests(unittest.TestCase):
             env = SelfPlayEnv()
             obs = env.reset(seed=trump_id)
             while obs.phase == "bid":
-                obs = env.step(1 if obs.view.forced else 0).observation
-            obs = env.step(trump_id).observation
+                obs = env.step(BID_OFFSET + 1 if obs.view.forced else BID_OFFSET).observation
+            obs = env.step(TRUMP_OFFSET + trump_id).observation
             played = set()
             completed = []
             while True:
@@ -202,7 +203,7 @@ class SelfPlayTests(unittest.TestCase):
 
     def test_hand_rewards_include_mark_stakes_for_both_partners(self):
         env = SelfPlayEnv()
-        trace = finish_hand(env, env.reset(seed=12), bid_id=14)
+        trace = finish_hand(env, env.reset(seed=12), bid_id=42)
         self.assertEqual(len(trace), 33)  # 4 bids + 1 trump + 28 plays
         self.assertTrue(all(step.rewards == (0, 0, 0, 0) for step in trace[:-1]))
         last = trace[-1]
@@ -247,8 +248,7 @@ class SelfPlayTests(unittest.TestCase):
         rng = random.Random(42)
         while True:
             action_id = rng.choice(obs.legal_action_ids)
-            actions = {"bid": BID_ACTIONS, "trump": TRUMP_ACTIONS, "play": PLAY_ACTIONS}
-            expected.append((obs.view, actions[obs.phase][action_id]))
+            expected.append((obs.view, ACTIONS[action_id].value))
             transition = env.step(action_id)
             if transition.terminated:
                 break

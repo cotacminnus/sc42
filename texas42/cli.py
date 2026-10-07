@@ -3,9 +3,9 @@ from __future__ import annotations
 import argparse
 import json
 import random
+from collections.abc import Sequence
 from contextlib import ExitStack
 from pathlib import Path
-from collections.abc import Sequence
 
 from .engine import Game, GameConfig
 from .players import HumanPlayer, Player, RandomPlayer
@@ -70,6 +70,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
             def log_state(record: dict) -> None:
                 log_file.write(json.dumps(record) + "\n")
+                # Preserve completed transitions if a long match is interrupted.
                 log_file.flush()
 
         game = Game(make_players(args.seed, args.all_ai), config, log_state=log_state)

@@ -5,9 +5,11 @@ from __future__ import annotations
 import random
 from dataclasses import dataclass
 from typing import Literal
+from .actions import ACTION_REGISTRY, ACTION_SPACE_VERSION, NUM_ACTIONS
 
 from .models import double_six_set
-from .state import HandResult, HandState, Phase
+from .episodes import EpisodeState
+from .state import HandResult, Phase
 from .training import TrainingView, training_view
 
 
@@ -20,6 +22,8 @@ class Observation:
     view: TrainingView
     legal_action_ids: tuple[int, ...]
     action_mask: tuple[bool, ...]
+    action_space_version: int = ACTION_SPACE_VERSION
+    num_actions: int = NUM_ACTIONS
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,18 +58,15 @@ class SelfPlayEnv:
         self.episode = episode
         self.target_marks = target_marks
         self._rng = random.Random(seed)
-        self._state: HandState | None = None
-        self._marks = [0, 0]
-        self._shaker = 0
-        self._terminated = False
+        self._session: EpisodeState | None = None
 
     @property
     def match_marks(self) -> tuple[int, int]:
-        return tuple(self._marks)
+        return tuple(self._session.marks) if self._session else (0, 0)
 
     @property
     def shaker(self) -> int:
-        return self._shaker
+        return self._session.shaker if self._session else 0
 
     def reset(self, *, seed: int | None = None, shaker: int | None = None) -> Observation:
         """Discard the previous episode and deal; optional shaker is a seat 0-3."""
@@ -73,9 +74,8 @@ class SelfPlayEnv:
             raise ValueError("shaker must be a seat from 0 to 3")
         if seed is not None:
             self._rng.seed(seed)
-        self._shaker = self._rng.randrange(4) if shaker is None else shaker
-        self._marks = [0, 0]
-        self._terminated = False
+        self._session = EpisodeState(self.episode, self.target_marks,
+                                     self._rng.randrange(4) if shaker is None else shaker)
         self._deal()
         return self.observe()
 
@@ -83,36 +83,25 @@ class SelfPlayEnv:
         deck = list(double_six_set())
         self._rng.shuffle(deck)
         hands = [deck[seat * 7:(seat + 1) * 7] for seat in range(4)]
-        self._state = HandState(hands, self._shaker, tuple(self._marks), self.target_marks)
+        self._session.deal(hands)
 
     def observe(self) -> Observation:
         """Return the current actor's snapshot; unavailable outside an episode."""
-        if self._state is None or self._terminated:
+        if self._session is None or self._session.terminated:
             raise RuntimeError("Call reset() before observing or stepping an episode")
-        legal = self._state.legal_action_ids()
-        return Observation(self._state.seat, self._state.phase, training_view(self._state.view()), legal,
-                           tuple(i in legal for i in range(len(self._state.actions()))))
+        state = self._session.hand
+        legal = state.legal_action_ids()
+        return Observation(state.seat, state.phase, training_view(state.view()), legal,
+                           ACTION_REGISTRY.mask(legal))
 
     def step(self, action_id: int) -> StepResult:
-        """Apply one legal, phase-local ID. Invalid actions leave state unchanged."""
-        if self._state is None or self._terminated:
+        """Apply one legal global ID. Invalid actions leave state unchanged."""
+        if self._session is None or self._session.terminated:
             raise RuntimeError("Call reset() before observing or stepping an episode")
-        self._state.apply(action_id)
-        result = self._state.result
-        rewards = (0, 0, 0, 0)
-        winner = None
-        if result is not None:
-            self._marks[result.scoring_team] += result.marks_awarded
-            if max(self._marks) >= self.target_marks:
-                winner = result.scoring_team
-            self._terminated = self.episode == "hand" or winner is not None
-            if self.episode == "hand":
-                rewards = tuple(result.marks_awarded if seat % 2 == result.scoring_team
-                                else -result.marks_awarded for seat in range(4))
-            elif winner is not None:
-                rewards = tuple(1 if seat % 2 == winner else -1 for seat in range(4))
-            if not self._terminated:
-                self._shaker = (self._shaker + 1) % 4
-                self._deal()
-        return StepResult(None if self._terminated else self.observe(), rewards,
-                          self._terminated, result, winner)
+        transition = self._session.apply(action_id)
+        if self._session.needs_deal:
+            # Native self-play samples chance automatically. The returned
+            # observation is from the next hand, but hand_result is the old one.
+            self._deal()
+        return StepResult(None if transition.terminated else self.observe(), transition.rewards,
+                          transition.terminated, transition.hand_result, transition.match_winner)

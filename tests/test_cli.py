@@ -2,11 +2,12 @@ import io
 import json
 import tempfile
 import unittest
+from copy import deepcopy
 from contextlib import redirect_stdout, redirect_stderr
 from dataclasses import asdict
 from pathlib import Path
 
-from texas42 import SelfPlayEnv
+from texas42 import SelfPlayEnv, upgrade_selfplay_record, BID_OFFSET, TRUMP_OFFSET
 from texas42.cli import main
 
 
@@ -24,7 +25,21 @@ class SelfPlayLogTests(unittest.TestCase):
         observation = env.reset()
         hand = 1
         for record in records:
-            self.assertEqual(record["schema_version"], 2)
+            self.assertEqual(record["schema_version"], 3)
+            # A full old-format dataset can be upgraded and replayed without
+            # changing rewards or private/public decision information.
+            legacy = deepcopy(record)
+            legacy["schema_version"] = 2
+            view = legacy["observation"]
+            offset, size = {"play": (0, 28), "bid": (BID_OFFSET, 18),
+                            "trump": (TRUMP_OFFSET, 9)}[view["phase"]]
+            legacy["action_id"] -= offset
+            view["legal_action_ids"] = [i - offset for i in view["legal_action_ids"]]
+            view["action_mask"] = view["action_mask"][offset:offset + size]
+            del view["action_space_version"], view["num_actions"]
+            original = deepcopy(legacy)
+            self.assertEqual(upgrade_selfplay_record(legacy), record)
+            self.assertEqual(legacy, original)
             if record["observation"]["phase"] == "play":
                 self.assertEqual(record["action"], record["action_id"])
             self.assertEqual(record["hand"], hand)

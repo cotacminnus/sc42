@@ -5,11 +5,22 @@ import unittest
 
 from texas42.engine import Game, GameConfig
 from texas42.models import Bid, Domino, double_six_set
-from texas42.players import RandomPlayer
+from texas42.players import HumanPlayer, PlayView, RandomPlayer
 from texas42.rules import legal_plays, trick_points, trick_winner
 
 
 class RulesTests(unittest.TestCase):
+    def test_models_reject_noninteger_values(self) -> None:
+        # Numeric equality is insufficient when values become permanent IDs or
+        # index entries in the fixed action vocabulary.
+        for high, low in ((1.0, 0), (1, 0.0), (True, 0), (1, False), ("1", 0)):
+            with self.subTest(high=high, low=low), self.assertRaises(ValueError):
+                Domino(high, low)
+        for kwargs in ({"points": 30.0}, {"points": "30"}, {"marks": 1.0},
+                       {"marks": True}, {"marks": "1"}):
+            with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
+                Bid(**kwargs)
+
     def test_double_six_set_has_28_unique_dominoes_and_35_counter_points(self) -> None:
         dominoes = double_six_set()
         self.assertEqual(len(dominoes), 28)
@@ -46,6 +57,11 @@ class RulesTests(unittest.TestCase):
 
 
 class EngineTests(unittest.TestCase):
+    def test_target_marks_requires_a_positive_integer(self) -> None:
+        for target in (0, -1, True, 1.5, "7"):
+            with self.subTest(target=target), self.assertRaises(ValueError):
+                GameConfig(target_marks=target)
+
     def test_all_ai_match_completes_and_preserves_42_points_per_hand(self) -> None:
         players = [RandomPlayer(f"Bot {seat}", random.Random(seat)) for seat in range(4)]
         output: list[str] = []
@@ -63,6 +79,19 @@ class EngineTests(unittest.TestCase):
         game.play_hand()
         self.assertIn("DEBUG - all hands:", output)
         self.assertEqual(sum(line.startswith("  P") for line in output), 4)
+
+
+class HumanPlayerTests(unittest.TestCase):
+    def test_play_numbers_reject_zero_negative_and_out_of_range(self) -> None:
+        hand = (Domino.make(0, 0), Domino.make(1, 0))
+        view = PlayView(seat=0, hand=hand, legal_plays=hand, trick=(), completed_tricks=(),
+                        bidder=0, bid=Bid(points=30), trump=None, team_points=(0, 0),
+                        match_marks=(0, 0))
+        answers = iter(("0", "-1", "3", "2"))
+        output = []
+        player = HumanPlayer(read=lambda _: next(answers), write=output.append)
+        self.assertEqual(player.choose_domino(view), hand[1])
+        self.assertEqual(output.count("Choose one of the displayed domino numbers."), 3)
 
 
 if __name__ == "__main__":

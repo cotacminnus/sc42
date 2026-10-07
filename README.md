@@ -63,15 +63,16 @@ python -m texas42 --all-ai --seed 42 --self-play-log logs/match.jsonl
 ```
 
 Each JSON line records the acting seat's observation before its action (including
-its hand, public state, legal action IDs, and mask), the chosen phase-local action
+its hand, public state, legal action IDs, and mask), the chosen global action
 ID and decoded action, and the resulting marks, hand result, match termination,
 winner, and per-seat rewards. Match rewards are zero until the final action, then
 +1 for winners and -1 for opponents. Seats are zero-based. The next line contains
 the next acting seat's observation. Logs are overwritten on each run; `logs/` and
 `*.jsonl` are ignored by Git. Logging requires `--all-ai` and does not train a model.
-Logs use `schema_version: 2`: every domino in hands, legal plays, current and
-completed tricks, and decoded play actions is an integer ID from 0 through 27.
-Older logs stored dominoes as objects with `high` and `low` fields.
+Logs use `schema_version: 3` and share action IDs with training and OpenSpiel.
+Every domino is still an integer ID from 0 through 27. Schema-2 logs used
+phase-local action IDs; `upgrade_selfplay_record(record)` migrates those records,
+including their legal-action masks. See [action compatibility](docs/action-space.md).
 
 ## Implemented rules
 
@@ -119,9 +120,12 @@ python -m unittest discover -s tests -v
 | `texas42/engine.py` | Dealing, bidding, hand progression, and match scoring |
 | `texas42/state.py` | Shared turn transitions and stable action vocabularies |
 | `texas42/selfplay.py` | Silent reset/step API for hand or match training episodes |
+| `texas42/episodes.py` | Shared hand/match episode progression and rewards |
+| `texas42/openspiel.py` | Optional OpenSpiel game/state/observer adapter backed by the engine |
 | `texas42/players.py` | Player interface, immutable decision views, human input, and bots |
 | `texas42/cli.py` | Command-line options and player setup |
 | `tests/test_game.py` | Rule checks and automated game smoke tests |
+| `tests/test_openspiel.py` | OpenSpiel simulation, engine parity, privacy, and serialization checks |
 
 ### Adding a real AI
 
@@ -213,13 +217,21 @@ Code consuming earlier self-play observations must now decode IDs before calling
 rules helpers that expect domino objects. Bids and trump calls retain their
 existing representations.
 
-Action IDs are **local to the current phase**, suitable for three policy heads:
+Action IDs are **global and append-only**, shared by the engine and OpenSpiel:
 
 | Phase | IDs | Exported lookup tuple |
 | --- | --- | --- |
-| `bid` | 0 = pass; 1–12 = 30–41 points; 13–17 = 1–5 marks | `BID_ACTIONS` |
-| `trump` | 0–6 = numbered trump; 7 = doubles; 8 = no trump | `TRUMP_ACTIONS` |
+| `bid` | 28 = pass; 29–40 = 30–41 points; 41–45 = 1–5 marks | `BID_ACTIONS[id - 28]` |
+| `trump` | 46–52 = numbered trump; 53 = doubles; 54 = no trump | `TRUMP_ACTIONS[id - 46]` |
 | `play` | 0–27 = permanent domino IDs, independent of hand ordering | `PLAY_ACTIONS` |
+| Future contracts | 55 = Nil, 56 = Splash, 57 = Plunge; all reserved and masked out | `ACTIONS[id]` |
+
+All masks have `NUM_ACTIONS` entries (currently 58), regardless of phase. Decode
+any player action with `ACTIONS[id].value`, or encode a decision with
+`ACTION_REGISTRY.encode(phase, value)`. Observations include `num_actions` and
+`action_space_version`. Save `ACTION_REGISTRY.manifest()` with checkpoints.
+Future actions append after existing entries; they must never shift old IDs.
+Reserved contract tokens do not implement bidding, eligibility, or scoring rules.
 
 For normalized domino `[high|low]`, the play ID is `high*(high+1)//2 + low`.
 Use `PLAY_ACTIONS[action_id]` to decode it. Mask illegal logits before sampling.
@@ -252,6 +264,37 @@ Keep separate trajectories for each seat. Terminal rewards apply to all four
 seats, including seats that did not take the final action. This API provides
 simulation and observations; a feature encoder, neural network, and optimizer
 remain training-code responsibilities.
+
+### OpenSpiel integration
+
+The optional `python_texas42` OpenSpiel game supports hand and match episodes.
+It delegates rules and transitions to this engine; the base CLI and native
+self-play API still have no third-party runtime dependencies.
+
+```console
+python3 -m venv .venv
+.venv/bin/python -m pip install -e '.[openspiel]'
+.venv/bin/python -m examples.openspiel_selfplay --episode match --seed 42
+```
+
+```python
+import pyspiel
+import texas42.openspiel  # Register the adapter before loading a game.
+
+game = pyspiel.load_game("python_texas42(episode=match,target_marks=7)")
+state = game.new_initial_state()
+```
+
+The adapter provides explicit chance dealing, legal-action masks, private
+observations, perfect-recall information states, cloning, and serialization.
+Domino play IDs remain 0–27; bid IDs are 28–45 and trump IDs are 46–54 in its
+58-action vocabulary, including three disabled contract reservations. Native
+self-play, logs, and OpenSpiel use identical player action IDs and masks.
+
+See [OpenSpiel integration](docs/openspiel.md) for the research references,
+architecture, parameter and tensor layouts, and validation details. Run
+`.venv/bin/python -m unittest discover -s tests -v` to include integration tests;
+they skip when OpenSpiel is not installed. Training is not implemented.
 
 ## License
 
