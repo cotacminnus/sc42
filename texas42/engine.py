@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import random
 from collections.abc import Callable, Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, is_dataclass
 from .actions import ACTION_REGISTRY
 
 from .models import Bid, Domino, double_six_set, trump_name
@@ -11,6 +11,7 @@ from .rules import trick_points, trick_winner
 from .state import HandResult, HandState
 from .selfplay import Observation
 from .training import training_view
+from .rulesets import RULESET_ID, validate_ruleset
 
 
 @dataclass(frozen=True)
@@ -18,8 +19,10 @@ class GameConfig:
     target_marks: int = 7
     debug: bool = False
     seed: int | None = None
+    ruleset_id: str = RULESET_ID
 
     def __post_init__(self) -> None:
+        validate_ruleset(self.ruleset_id)
         if type(self.target_marks) is not int or self.target_marks < 1:
             raise ValueError("target_marks must be a positive integer")
 
@@ -70,7 +73,8 @@ class Game:
             for seat, hand in enumerate(hands):
                 self.write(f"  P{seat + 1} {self.players[seat].name}: {format_hand(hand)}")
 
-        state = HandState(hands, self.shaker, tuple(self.marks), self.config.target_marks)
+        state = HandState(hands, self.shaker, tuple(self.marks), self.config.target_marks,
+                          self.config.ruleset_id)
         while state.result is None:
             view = state.view()
             player = self.players[view.seat]
@@ -100,7 +104,7 @@ class Game:
                 # the rest of this record describes the resulting transition.
                 legal = state.legal_action_ids()
                 observation = Observation(state.seat, state.phase, training_view(view), legal,
-                                          ACTION_REGISTRY.mask(legal))
+                                          ACTION_REGISTRY.mask(legal), ruleset_id=self.config.ruleset_id)
             state.apply(action_id)
             if self.log_state is not None:
                 # Marks are committed once below, after the hand finishes. Use a
@@ -112,13 +116,15 @@ class Game:
                 terminated = result is not None and max(marks) >= self.config.target_marks
                 winner = result.scoring_team if terminated else None
                 self.log_state({
-                    "schema_version": 3,
+                    "schema_version": 4,
+                    "ruleset_id": self.config.ruleset_id,
                     "hand": self._hand_number,
                     "shaker": self.shaker,
                     "observation": asdict(observation),
                     "action_id": action_id,
+                    "action_key": ACTION_REGISTRY[action_id].key,
                     "action": action.id if isinstance(action, Domino) else
-                              asdict(action) if isinstance(action, Bid) else action,
+                              asdict(action) if is_dataclass(action) else action,
                     "hand_result": asdict(result) if result is not None else None,
                     "match_marks": marks,
                     "terminated": terminated,

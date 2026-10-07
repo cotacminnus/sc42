@@ -7,7 +7,9 @@ from contextlib import redirect_stdout, redirect_stderr
 from dataclasses import asdict
 from pathlib import Path
 
-from texas42 import SelfPlayEnv, upgrade_selfplay_record, BID_OFFSET, TRUMP_OFFSET
+from texas42 import (
+    ACTION_REGISTRY, RULESET_ID, SelfPlayEnv, upgrade_selfplay_record, BID_OFFSET, TRUMP_OFFSET,
+)
 from texas42.cli import main
 
 
@@ -25,10 +27,20 @@ class SelfPlayLogTests(unittest.TestCase):
         observation = env.reset()
         hand = 1
         for record in records:
-            self.assertEqual(record["schema_version"], 3)
+            self.assertEqual(record["schema_version"], 4)
+            self.assertEqual(record["ruleset_id"], RULESET_ID)
+            self.assertEqual(record["action_key"], ACTION_REGISTRY[record["action_id"]].key)
+            global_legacy = deepcopy(record)
+            global_legacy["schema_version"] = 3
+            del global_legacy["ruleset_id"], global_legacy["action_key"]
+            del global_legacy["observation"]["ruleset_id"]
+            del global_legacy["observation"]["view"]["contract"]
+            if global_legacy["hand_result"]:
+                del global_legacy["hand_result"]["contract"]
+            self.assertEqual(upgrade_selfplay_record(global_legacy), record)
             # A full old-format dataset can be upgraded and replayed without
             # changing rewards or private/public decision information.
-            legacy = deepcopy(record)
+            legacy = deepcopy(global_legacy)
             legacy["schema_version"] = 2
             view = legacy["observation"]
             offset, size = {"play": (0, 28), "bid": (BID_OFFSET, 18),

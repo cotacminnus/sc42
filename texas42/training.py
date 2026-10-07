@@ -1,13 +1,15 @@
 """Immutable policy inputs with stable integer domino IDs."""
 
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from .actions import (
     ACTION_REGISTRY, ACTION_SPACE_VERSION, NUM_ACTIONS, BID_ACTIONS,
     TRUMP_ACTIONS, PLAY_ACTIONS, legacy_action_id,
 )
-from .models import Bid, Trump
+from .models import Bid, Contract, Trump
+from .phases import Phase
+from .rulesets import RULESET_ID, validate_ruleset
 from .players import BidView, PlayView, TrumpView
 
 
@@ -20,6 +22,7 @@ class TrainingView:
     match_marks: tuple[int, int]
     bid_history: tuple[tuple[int, Bid | None], ...]
     target_marks: int
+    contract: Contract | None = field(default=None, kw_only=True)
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,7 +55,7 @@ def training_view(view: BidView | TrumpView | PlayView) -> TrainingView:
     """Encode an existing private view without exposing simulator hands."""
     common = dict(seat=view.seat, hand=tuple(domino.id for domino in view.hand),
                   match_marks=view.match_marks, bid_history=view.bid_history,
-                  target_marks=view.target_marks)
+                  target_marks=view.target_marks, contract=view.contract)
     if isinstance(view, BidView):
         return TrainingBidView(**common, shaker=view.shaker, current_bid=view.current_bid,
                                current_bidder=view.current_bidder, forced=view.forced)
@@ -67,34 +70,80 @@ def training_view(view: BidView | TrumpView | PlayView) -> TrainingView:
     )
 
 
-def upgrade_selfplay_record(record: dict) -> dict:
-    """Copy a schema-2 JSONL record into schema 3 without changing its meaning.
+def training_metadata(ruleset_id: str = RULESET_ID) -> dict:
+    """Persist rules identity and neural-head layout with experiments/checkpoints."""
+    return {
+        "ruleset_id": validate_ruleset(ruleset_id),
+        "action_space_version": ACTION_SPACE_VERSION,
+        "num_actions": NUM_ACTIONS,
+        "action_manifest": ACTION_REGISTRY.manifest(),
+        "phase_slots": {phase.value: [entry.action_id for entry in ACTION_REGISTRY.phase_slots(phase)]
+                        for phase in Phase},
+    }
+
+
+def upgrade_selfplay_record(record: dict, *, source_ruleset_id: str = RULESET_ID) -> dict:
+    """Copy schema-2/3 base-engine records into schema 4.
 
     Old data used phase-local IDs and masks. Convert both together; converting
     only the chosen action would silently mislabel the policy's legal choices.
     This migrates datasets, not network weights or optimizer checkpoints.
     """
-    if record.get("schema_version") != 2:
-        raise ValueError("Expected a schema-2 self-play record")
+    schema = record.get("schema_version")
+    if schema not in (2, 3):
+        raise ValueError("Expected a schema-2 or schema-3 self-play record")
+    # Old logs did not record a ruleset. Their provenance must be the known base
+    # engine; do not guess the semantics of data from other house-rule variants.
+    validate_ruleset(source_ruleset_id)
+    if record.get("ruleset_id", source_ruleset_id) != source_ruleset_id:
+        raise ValueError("Conflicting ruleset identity in source record")
     upgraded = deepcopy(record)
     observation = upgraded["observation"]
+    if observation.get("ruleset_id", source_ruleset_id) != source_ruleset_id:
+        raise ValueError("Conflicting ruleset identity in source observation")
     phase = observation["phase"]
     tables = {"bid": BID_ACTIONS, "trump": TRUMP_ACTIONS, "play": PLAY_ACTIONS}
     if phase not in tables:
         raise ValueError("Unknown observation phase")
     old_mask = observation["action_mask"]
     old_legal = observation["legal_action_ids"]
-    if (len(old_mask) != len(tables[phase]) or any(type(bit) is not bool for bit in old_mask)
+    expected_size = len(tables[phase]) if schema == 2 else NUM_ACTIONS
+    if (len(old_mask) != expected_size or any(type(bit) is not bool for bit in old_mask)
             or list(old_legal) != [i for i, bit in enumerate(old_mask) if bit]):
         raise ValueError("Legacy mask and legal action IDs disagree")
-    legal = tuple(legacy_action_id(phase, local_id) for local_id in old_legal)
-    chosen = legacy_action_id(phase, upgraded["action_id"])
+    legal = (tuple(legacy_action_id(phase, local_id) for local_id in old_legal)
+             if schema == 2 else tuple(old_legal))
+    chosen = (legacy_action_id(phase, upgraded["action_id"]) if schema == 2
+              else upgraded["action_id"])
+    ACTION_REGISTRY[chosen]  # Validate types even when bool compares equal to an ID.
+    if upgraded.get("action_key", ACTION_REGISTRY[chosen].key) != ACTION_REGISTRY[chosen].key:
+        raise ValueError("Source action key disagrees with its ID")
+    if schema == 3:
+        if observation.get("action_space_version") != ACTION_SPACE_VERSION:
+            raise ValueError("Unknown source action-space version")
+        if observation.get("num_actions") != NUM_ACTIONS:
+            raise ValueError("Source vocabulary size disagrees with its mask")
+    if any(ACTION_REGISTRY[action_id].phase != phase for action_id in legal):
+        raise ValueError("Source legal IDs include another phase")
     if chosen not in legal:
         raise ValueError("Chosen action is not legal in the legacy observation")
     observation["legal_action_ids"] = list(legal)
     observation["action_mask"] = list(ACTION_REGISTRY.mask(legal))
     observation["action_space_version"] = ACTION_SPACE_VERSION
     observation["num_actions"] = NUM_ACTIONS
+    observation["ruleset_id"] = source_ruleset_id
+    view = observation.get("view")
+    if view is not None and "contract" not in view:
+        view["contract"] = (None if phase == "bid" else {
+            "kind": "normal", "bidder": view["seat"] if phase == "trump" else view["bidder"],
+            "bid": deepcopy(view["bid"]),
+        })
+    result = upgraded.get("hand_result")
+    if result is not None and "contract" not in result:
+        result["contract"] = {"kind": "normal", "bidder": result["bidder"],
+                              "bid": deepcopy(result["bid"])}
     upgraded["action_id"] = chosen
-    upgraded["schema_version"] = 3
+    upgraded["action_key"] = ACTION_REGISTRY[chosen].key
+    upgraded["ruleset_id"] = source_ruleset_id
+    upgraded["schema_version"] = 4
     return upgraded

@@ -15,6 +15,7 @@ from .actions import (
 )
 from .models import trump_name
 from .actions import PLAY_ACTIONS
+from .rulesets import RULESET_ID, validate_ruleset
 
 
 # Re-export range boundaries for callers; do not translate engine action IDs.
@@ -33,7 +34,8 @@ _GAME_TYPE = pyspiel.GameType(
     provides_information_state_tensor=True,
     provides_observation_string=True,
     provides_observation_tensor=True,
-    parameter_specification={"episode": "hand", "target_marks": 7, "shaker": -1},
+    parameter_specification={"episode": "hand", "target_marks": 7, "shaker": -1,
+                             "ruleset_id": RULESET_ID},
 )
 
 
@@ -45,12 +47,14 @@ class Texas42Game(pyspiel.Game):
     def __init__(self, params=None):
         # Materialize defaults so direct construction and deserialization have
         # identical game strings and tensor capacities.
-        params = {"episode": "hand", "target_marks": 7, "shaker": -1, **(params or {})}
+        params = {"episode": "hand", "target_marks": 7, "shaker": -1,
+                  "ruleset_id": RULESET_ID, **(params or {})}
+        self.ruleset_id = validate_ruleset(params["ruleset_id"])
         self.episode = params.get("episode", "hand")
         self.target_marks = params.get("target_marks", 7)
         self.shaker = params.get("shaker", -1)
         # Reuse the engine's configuration validation.
-        EpisodeState(self.episode, self.target_marks, 0)
+        EpisodeState(self.episode, self.target_marks, 0, self.ruleset_id)
         if type(self.shaker) is not int or self.shaker not in range(-1, 4):
             raise ValueError("shaker must be -1 (chance) or a seat from 0 to 3")
         # Every hand awards at least one mark: after 2*T-1 hands some team has T.
@@ -80,7 +84,7 @@ class Texas42State(pyspiel.State):
     def __init__(self, game):
         super().__init__(game)
         self.session = None if game.shaker == -1 else EpisodeState(
-            game.episode, game.target_marks, game.shaker,
+            game.episode, game.target_marks, game.shaker, game.ruleset_id,
         )
         self.deals = [[]]  # Chance actions, grouped into contiguous seven-domino hands.
         self.events = [[]]  # Public (actor, global action) pairs per hand.
@@ -125,7 +129,7 @@ class Texas42State(pyspiel.State):
                 raise ValueError(f"Illegal chance action: {action}")
             if self.session is None:
                 game = self.get_game()
-                self.session = EpisodeState(game.episode, game.target_marks, action)
+                self.session = EpisodeState(game.episode, game.target_marks, action, game.ruleset_id)
                 self.shakers[-1] = action
             else:
                 self.deals[-1].append(action)

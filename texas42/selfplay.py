@@ -11,6 +11,7 @@ from .models import double_six_set
 from .episodes import EpisodeState
 from .state import HandResult, Phase
 from .training import TrainingView, training_view
+from .rulesets import RULESET_ID, validate_ruleset
 
 
 @dataclass(frozen=True, slots=True)
@@ -24,6 +25,7 @@ class Observation:
     action_mask: tuple[bool, ...]
     action_space_version: int = ACTION_SPACE_VERSION
     num_actions: int = NUM_ACTIONS
+    ruleset_id: str = RULESET_ID
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,7 +52,9 @@ class SelfPlayEnv:
     """
 
     def __init__(self, *, episode: Literal["hand", "match"] = "hand",
-                 target_marks: int = 7, seed: int | None = None) -> None:
+                 target_marks: int = 7, seed: int | None = None,
+                 ruleset_id: str = RULESET_ID) -> None:
+        self.ruleset_id = validate_ruleset(ruleset_id)
         if episode not in ("hand", "match"):
             raise ValueError("episode must be 'hand' or 'match'")
         if type(target_marks) is not int or target_marks < 1:
@@ -75,7 +79,8 @@ class SelfPlayEnv:
         if seed is not None:
             self._rng.seed(seed)
         self._session = EpisodeState(self.episode, self.target_marks,
-                                     self._rng.randrange(4) if shaker is None else shaker)
+                                     self._rng.randrange(4) if shaker is None else shaker,
+                                     self.ruleset_id)
         self._deal()
         return self.observe()
 
@@ -92,7 +97,7 @@ class SelfPlayEnv:
         state = self._session.hand
         legal = state.legal_action_ids()
         return Observation(state.seat, state.phase, training_view(state.view()), legal,
-                           ACTION_REGISTRY.mask(legal))
+                           ACTION_REGISTRY.mask(legal), ruleset_id=self.ruleset_id)
 
     def step(self, action_id: int) -> StepResult:
         """Apply one legal global ID. Invalid actions leave state unchanged."""

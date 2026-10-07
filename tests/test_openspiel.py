@@ -32,7 +32,10 @@ class OpenSpielTests(unittest.TestCase):
         self.assertEqual(game.max_game_length(), 33)
         self.assertEqual(game.max_chance_nodes_in_history(), 29)
         self.assertEqual(game.min_utility(), -5)
-        for params in ({"episode": "other"}, {"target_marks": 0}, {"shaker": 4}):
+        self.assertEqual(game.ruleset_id, "cadets_base_v1")
+        self.assertEqual(game.get_parameters()["ruleset_id"], game.ruleset_id)
+        for params in ({"episode": "other"}, {"target_marks": 0}, {"shaker": 4},
+                       {"ruleset_id": "cadets_nil_v1"}):
             with self.assertRaises(ValueError):
                 Texas42Game(params)
 

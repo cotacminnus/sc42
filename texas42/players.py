@@ -5,7 +5,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from .models import DOUBLE_TRUMP, Bid, Domino, Trump, trump_name
+from .models import DOUBLE_TRUMP, Bid, Contract, Domino, Trump, trump_name
 from .rules import is_legal_bid
 
 
@@ -22,6 +22,7 @@ class BidView:
     match_marks: tuple[int, int] = (0, 0)
     bid_history: tuple[tuple[int, Bid | None], ...] = ()
     target_marks: int = 7
+    contract: Contract | None = None
 
 
 @dataclass(frozen=True)
@@ -34,6 +35,7 @@ class TrumpView:
     match_marks: tuple[int, int] = (0, 0)
     bid_history: tuple[tuple[int, Bid | None], ...] = ()
     target_marks: int = 7
+    contract: Contract | None = None
 
 
 @dataclass(frozen=True)
@@ -56,6 +58,7 @@ class PlayView:
     match_marks: tuple[int, int]
     bid_history: tuple[tuple[int, Bid | None], ...] = ()
     target_marks: int = 7
+    contract: Contract | None = None
 
 
 class Player(ABC):

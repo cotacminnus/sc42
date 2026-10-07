@@ -69,9 +69,9 @@ winner, and per-seat rewards. Match rewards are zero until the final action, the
 +1 for winners and -1 for opponents. Seats are zero-based. The next line contains
 the next acting seat's observation. Logs are overwritten on each run; `logs/` and
 `*.jsonl` are ignored by Git. Logging requires `--all-ai` and does not train a model.
-Logs use `schema_version: 3` and share action IDs with training and OpenSpiel.
+Logs use `schema_version: 4` and share action IDs with training and OpenSpiel.
 Every domino is still an integer ID from 0 through 27. Schema-2 logs used
-phase-local action IDs; `upgrade_selfplay_record(record)` migrates those records,
+phase-local action IDs; `upgrade_selfplay_record(record)` migrates schema-2/3 records,
 including their legal-action masks. See [action compatibility](docs/action-space.md).
 
 ## Implemented rules
@@ -229,7 +229,10 @@ Action IDs are **global and append-only**, shared by the engine and OpenSpiel:
 All masks have `NUM_ACTIONS` entries (currently 58), regardless of phase. Decode
 any player action with `ACTIONS[id].value`, or encode a decision with
 `ACTION_REGISTRY.encode(phase, value)`. Observations include `num_actions` and
-`action_space_version`. Save `ACTION_REGISTRY.manifest()` with checkpoints.
+`action_space_version` plus `ruleset_id`. Save `training_metadata()` with checkpoints
+and experiments. `phase_slots()` defines fixed neural heads: bid 21, trump 9,
+play 28. `phase_mask()`, `global_id()`, and `phase_slot()` translate their choices
+to persistent IDs. Logs also include stable `action_key` and resolved contracts.
 Future actions append after existing entries; they must never shift old IDs.
 Reserved contract tokens do not implement bidding, eligibility, or scoring rules.
 

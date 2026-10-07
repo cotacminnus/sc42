@@ -7,11 +7,9 @@ Chance outcomes are a separate OpenSpiel vocabulary, not player actions.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
+from .models import Bid, ContractKind, Domino, Trump, double_six_set
+from .phases import Phase
 
-from .models import Bid, Domino, Trump, double_six_set
-
-Phase = Literal["bid", "trump", "play"]
 PLAY_OFFSET = 0
 BID_OFFSET = 28
 TRUMP_OFFSET = 46
@@ -32,6 +30,11 @@ class ContractAction:
     """Reserved declaration token; it supplies no eligibility or scoring rules."""
 
     name: str
+
+    @property
+    def kind(self) -> ContractKind:
+        """Known contract identity, without eligibility or scoring behavior."""
+        return ContractKind(self.name)
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,7 +59,7 @@ class ActionRegistry:
                 raise ValueError("action IDs must be contiguous and match their permanent positions")
             if type(entry.key) is not str or not entry.key or entry.key in keys:
                 raise ValueError("action keys must be nonempty and unique")
-            if entry.phase not in ("bid", "trump", "play"):
+            if entry.phase not in tuple(Phase):
                 raise ValueError("unknown action phase")
             if type(entry.implemented) is not bool:
                 raise ValueError("implemented must be a boolean")
@@ -73,9 +76,41 @@ class ActionRegistry:
             raise ValueError(f"Unknown action ID: {action_id!r}")
         return self.entries[action_id]
 
-    def for_phase(self, phase: Phase) -> tuple[ActionSpec, ...]:
+    def phase_slots(self, phase: Phase) -> tuple[ActionSpec, ...]:
+        """Stable neural-head order, including disabled declarations."""
+        phase = Phase(phase)
+        return tuple(entry for entry in self.entries if entry.phase == phase)
+
+    def implemented_for_phase(self, phase: Phase) -> tuple[ActionSpec, ...]:
         """Exclude declarations whose rules have not been implemented."""
-        return tuple(entry for entry in self.entries if entry.phase == phase and entry.implemented)
+        return tuple(entry for entry in self.phase_slots(phase) if entry.implemented)
+
+    def for_phase(self, phase: Phase) -> tuple[ActionSpec, ...]:
+        """Compatibility alias; neural-head sizing must use phase_slots."""
+        return self.implemented_for_phase(phase)
+
+    def global_id(self, phase: Phase, slot: int) -> int:
+        slots = self.phase_slots(phase)
+        if type(slot) is not int or not 0 <= slot < len(slots):
+            raise ValueError("Invalid phase-head slot")
+        return slots[slot].action_id
+
+    def phase_slot(self, phase: Phase, action_id: int) -> int:
+        entry = self[action_id]
+        for slot, candidate in enumerate(self.phase_slots(phase)):
+            if candidate == entry:
+                return slot
+        raise ValueError("Action belongs to a different phase")
+
+    def phase_mask(self, phase: Phase, legal_action_ids: tuple[int, ...]) -> tuple[bool, ...]:
+        # Capacity and legality differ: reserved logits exist before enabling
+        # rules, so enabling a contract cannot move its neural-head slot.
+        self.mask(legal_action_ids)
+        legal = set(legal_action_ids)
+        slots = self.phase_slots(phase)
+        if not legal <= {entry.action_id for entry in slots}:
+            raise ValueError("Legal actions include another phase")
+        return tuple(entry.action_id in legal for entry in slots)
 
     def encode(self, phase: Phase, value) -> int:
         # Pass and no-trump both decode to None; phase disambiguates them.

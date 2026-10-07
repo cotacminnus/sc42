@@ -38,13 +38,9 @@ OpenSpiel games expose `action_space_version`. Store the registry's manifest
 with each dataset or model checkpoint:
 
 ```python
-from texas42 import ACTION_REGISTRY, ACTION_SPACE_VERSION, NUM_ACTIONS
+from texas42 import training_metadata
 
-metadata = {
-    "action_space_version": ACTION_SPACE_VERSION,
-    "num_actions": NUM_ACTIONS,
-    "action_manifest": ACTION_REGISTRY.manifest(),
-}
+metadata = training_metadata()  # Ruleset, global IDs, and per-head slot ordering.
 ```
 
 OpenSpiel derives its action count and public-history one-hot width from the
@@ -53,8 +49,10 @@ IDs 0–3 or domino IDs 0–27, as before.
 
 ## Migrating earlier data
 
-Schema-3 JSONL logs use global IDs and full masks. Schema-2 logs used local IDs
-for bidding and trump. Convert a record without mutating the original:
+Schema-4 JSONL logs add ruleset identity, resolved-contract metadata, and stable
+`action_key` alongside the global ID and decoded value. Schema-2 logs used local
+IDs; schema-3 logs used global IDs but omitted these semantic fields. Convert
+either base-engine format without mutating the original:
 
 ```python
 import json
@@ -65,10 +63,11 @@ with open("logs/old.jsonl") as source, open("logs/upgraded.jsonl", "w") as outpu
         output.write(json.dumps(upgrade_selfplay_record(json.loads(line))) + "\n")
 ```
 
-The migration validates the old legal IDs and mask, translates the selected
-action and legal choices, expands the mask, and adds vocabulary metadata.
-Domino IDs, views, rewards, and hand results retain their meanings. It accepts
-schema 2 only; logs with older domino-object encodings need a separate conversion.
+The migration validates old IDs/masks, translates local IDs when needed, and
+adds ruleset and resolved-contract metadata. It assumes known base-engine
+provenance (`source_ruleset_id="cadets_base_v1"`) and rejects unsupported rulesets.
+Domino IDs, rewards, and recorded public/private information retain their meanings.
+It accepts schemas 2 and 3; older domino-object encodings need separate conversion.
 `legacy_action_id(phase, local_id)` is available for individual decisions.
 
 Old phase-specific policy heads need their output rows mapped into the new global
@@ -109,3 +108,38 @@ This helper does not change a running game. Wire the new registry into the modul
 when adding the actual feature so all front ends get the same capacity. A wider
 vocabulary preserves old action identities, but model output/input shapes and
 metadata must still be migrated deliberately.
+
+## Phase heads, contracts, and rules identity
+
+Global persistence IDs do not require a 58-output network. `phase_slots(phase)`
+includes reserved declarations, so heads have fixed capacities of **bid 21,
+trump 9, play 28**. `implemented_for_phase(phase)` is the separate eligibility
+view; `for_phase()` remains its compatibility alias.
+
+```python
+from texas42 import ACTION_REGISTRY
+
+mask = ACTION_REGISTRY.phase_mask(observation.phase, observation.legal_action_ids)
+# Sample a local head slot with this mask, then persist/apply its global ID:
+action_id = ACTION_REGISTRY.global_id(observation.phase, sampled_slot)
+slot = ACTION_REGISTRY.phase_slot(observation.phase, action_id)  # inverse codec
+```
+
+Bid slots 18, 19, 20 identify Nil, Splash, Plunge and remain false today.
+Enabling those rules does not resize the head. Additional declarations still
+require a larger head and checkpoint migration. Slot order follows global-ID
+order, including noncontiguous IDs (bid includes 28–45 followed by 55–57).
+
+`RULESET_ID = "cadets_base_v1"` identifies game semantics independently of action
+IDs. It is recorded in `GameConfig`, native environments/observations, OpenSpiel
+parameters, logs, and `training_metadata()` for datasets, checkpoints, and
+experiments. Unknown identifiers are rejected. Changed house rules need a distinct
+ruleset identity even if actions and head sizes remain unchanged.
+
+`ContractKind` models normal/Nil/Splash/Plunge identity separately from `Bid`.
+`Contract` resolves after the auction and appears in player/training views and
+hand results. Special kinds are metadata, not implemented eligibility or scoring.
+`Phase` lives in `phases.py` as a string enum. Future setup phases require explicit
+transitions, views, and observer encoding; unhandled phases fail rather than
+being treated as ordinary plays. Phase-head stability does not guarantee identical
+observations if new decisions or rules change the game flow.

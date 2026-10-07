@@ -31,6 +31,7 @@ Parameters:
 | --- | --- | --- |
 | `episode` | `hand` | `hand` or `match` |
 | `target_marks` | `7` | Positive match target, also included in game parameters for hand episodes |
+| `ruleset_id` | `cadets_base_v1` | Versioned engine rules; other variants are rejected until implemented |
 | `shaker` | `-1` | Random starting shaker through chance; `0`–`3` fixes the starting seat |
 
 ## Engine ownership
@@ -78,7 +79,7 @@ Player action IDs use one fixed vocabulary:
 Chance actions reuse 0–3 for a shaker or 0–27 for a domino, distinguished by the
 chance state. Legal actions are sorted, phase-specific, and empty for inactive
 players and terminal states. `state.legal_actions_mask()` has `NUM_ACTIONS`
-entries (currently 58). Native `SelfPlayEnv`, schema-3 JSONL logs, and OpenSpiel
+entries (currently 58). Native `SelfPlayEnv`, schema-4 JSONL logs, and OpenSpiel
 now share these IDs directly; no phase offset is added at the adapter boundary.
 The shared registry is append-only. See [action compatibility](action-space.md)
 for dataset migration and the extension procedure.
@@ -152,3 +153,8 @@ define state methods and metadata. Observer integration follows
 Validation follows the upstream
 [game simulation tests](https://github.com/google-deepmind/open_spiel/blob/master/open_spiel/python/tests/games_sim_test.py)
 and [RL environment](https://github.com/google-deepmind/open_spiel/blob/master/open_spiel/python/rl_environment.py).
+
+Ruleset identity is a game parameter and is preserved by serialization.
+Use `training_metadata(game.ruleset_id)` to record matching dataset/checkpoint
+provenance. See [action compatibility](action-space.md) for stable 21/9/28 phase
+heads, resolved-contract types, and schema-2/3 log migration.
