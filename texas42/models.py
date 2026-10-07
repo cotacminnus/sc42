@@ -30,6 +30,11 @@ class Domino:
         return self.high == self.low
 
     @property
+    def id(self) -> int:
+        """Stable ID 0-27, also used by the self-play action vocabulary."""
+        return self.high * (self.high + 1) // 2 + self.low
+
+    @property
     def pip_total(self) -> int:
         return self.high + self.low
 
@@ -119,4 +124,3 @@ def trump_name(trump: Trump) -> str:
         return "doubles"
     names = ("blanks", "ones", "twos", "threes", "fours", "fives", "sixes")
     return names[trump]
-

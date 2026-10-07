@@ -49,12 +49,29 @@ python -m texas42 --target-marks 3
 shuffle and bot choices reproducible when the same player decisions are made.
 `--target-marks` must be positive and defaults to 7.
 
-For a quick noninteractive smoke run, use the internal `--all-ai` option (hidden
-from `--help`):
+For a noninteractive self-play run, use `--all-ai`:
 
 ```console
 python -m texas42 --all-ai --seed 42 --target-marks 1
 ```
+
+Add `--self-play-log` to write `logs/selfplay.jsonl`, or supply a custom path:
+
+```console
+python -m texas42 --all-ai --seed 42 --self-play-log
+python -m texas42 --all-ai --seed 42 --self-play-log logs/match.jsonl
+```
+
+Each JSON line records the acting seat's observation before its action (including
+its hand, public state, legal action IDs, and mask), the chosen phase-local action
+ID and decoded action, and the resulting marks, hand result, match termination,
+winner, and per-seat rewards. Match rewards are zero until the final action, then
++1 for winners and -1 for opponents. Seats are zero-based. The next line contains
+the next acting seat's observation. Logs are overwritten on each run; `logs/` and
+`*.jsonl` are ignored by Git. Logging requires `--all-ai` and does not train a model.
+Logs use `schema_version: 2`: every domino in hands, legal plays, current and
+completed tricks, and decoded play actions is an integer ID from 0 through 27.
+Older logs stored dominoes as objects with `high` and `low` fields.
 
 ## Implemented rules
 
@@ -185,6 +202,16 @@ hand and public information, including chronological bids/passes, match marks,
 and the target mark count. Play views also contain the current trick and all
 completed tricks. Do not pass the environment's private simulator state to a
 policy. An observation remains unchanged after later steps.
+
+Self-play views are slotted `TrainingBidView`, `TrainingTrumpView`, and
+`TrainingPlayView` snapshots. They store every domino as an integer ID, including
+`hand`, `legal_plays`, and the domino component of `(seat, domino_id)` entries in
+`trick` and `completed_tricks`. Decode an ID with `PLAY_ACTIONS[id]`; convert a
+`Domino` to its stable ID with `domino.id`. For example, `[0|0]` is 0, `[3|2]` is
+8, and `[6|6]` is 27. Existing `Player` decision views still use `Domino` objects.
+Code consuming earlier self-play observations must now decode IDs before calling
+rules helpers that expect domino objects. Bids and trump calls retain their
+existing representations.
 
 Action IDs are **local to the current phase**, suitable for three policy heads:
 

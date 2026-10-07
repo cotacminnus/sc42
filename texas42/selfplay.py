@@ -7,21 +7,22 @@ from dataclasses import dataclass
 from typing import Literal
 
 from .models import double_six_set
-from .state import DecisionView, HandResult, HandState, Phase
+from .state import HandResult, HandState, Phase
+from .training import TrainingView, training_view
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Observation:
     """An immutable snapshot for the acting seat, with no other players' hands."""
 
     seat: int
     phase: Phase
-    view: DecisionView
+    view: TrainingView
     legal_action_ids: tuple[int, ...]
     action_mask: tuple[bool, ...]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class StepResult:
     """Rewards are for seats 0, 1, 2, 3, and apply only to this transition.
 
@@ -89,7 +90,7 @@ class SelfPlayEnv:
         if self._state is None or self._terminated:
             raise RuntimeError("Call reset() before observing or stepping an episode")
         legal = self._state.legal_action_ids()
-        return Observation(self._state.seat, self._state.phase, self._state.view(), legal,
+        return Observation(self._state.seat, self._state.phase, training_view(self._state.view()), legal,
                            tuple(i in legal for i in range(len(self._state.actions()))))
 
     def step(self, action_id: int) -> StepResult:

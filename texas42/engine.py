@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import random
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 
 from .models import Bid, Domino, double_six_set, trump_name
 from .players import BidView, Player, TrumpView, format_hand
 from .rules import trick_points, trick_winner
 from .state import HandResult, HandState
+from .selfplay import Observation
+from .training import training_view
 
 
 @dataclass(frozen=True)
@@ -27,12 +29,15 @@ class Game:
         players: Sequence[Player],
         config: GameConfig | None = None,
         write: Callable[[str], None] = print,
+        log_state: Callable[[dict], None] | None = None,
     ) -> None:
         if len(players) != 4:
             raise ValueError("Texas 42 requires exactly four players")
         self.players = tuple(players)
         self.config = config or GameConfig()
         self.write = write
+        self.log_state = log_state
+        self._hand_number = 0
         self.rng = random.Random(self.config.seed)
         self.shaker = self.rng.randrange(4)
         self.marks = [0, 0]
@@ -57,6 +62,7 @@ class Game:
     def play_hand(self) -> HandResult:
         """Play seven tricks and update match marks without rotating the shaker."""
         hands = self._deal()
+        self._hand_number += 1
         self.write(f"\n--- New hand: {self.players[self.shaker].name} shakes ---")
         if self.config.debug:
             self.write("DEBUG - all hands:")
@@ -88,7 +94,33 @@ class Game:
             if action_id is None:
                 raise ValueError(f"{player.name} returned an invalid {state.phase} action: {action!r}")
             completed_before = len(state.completed)
+            if self.log_state is not None:
+                legal = state.legal_action_ids()
+                observation = Observation(state.seat, state.phase, training_view(view), legal,
+                                          tuple(i in legal for i in range(len(state.actions()))))
             state.apply(action_id)
+            if self.log_state is not None:
+                marks = list(self.marks)
+                result = state.result
+                if result is not None:
+                    marks[result.scoring_team] += result.marks_awarded
+                terminated = max(marks) >= self.config.target_marks
+                winner = result.scoring_team if terminated else None
+                self.log_state({
+                    "schema_version": 2,
+                    "hand": self._hand_number,
+                    "shaker": self.shaker,
+                    "observation": asdict(observation),
+                    "action_id": action_id,
+                    "action": action.id if isinstance(action, Domino) else
+                              asdict(action) if isinstance(action, Bid) else action,
+                    "hand_result": asdict(result) if result is not None else None,
+                    "match_marks": marks,
+                    "terminated": terminated,
+                    "match_winner": winner,
+                    "rewards": [1 if seat % 2 == winner else -1 for seat in range(4)]
+                               if terminated else [0, 0, 0, 0],
+                })
             if isinstance(view, TrumpView):
                 message = (
                     f"{player.name} wins the bid at {view.bid} "

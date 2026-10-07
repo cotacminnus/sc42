@@ -9,6 +9,7 @@ from texas42 import (
 )
 from texas42.players import BidView, PlayView, Player, TrumpView
 from texas42.rules import is_legal_bid, legal_plays, trick_points, trick_winner
+from texas42.training import TrainingTrumpView, training_view
 
 
 def finish_hand(env, observation, *, trump=8, bid_id=1):
@@ -29,6 +30,27 @@ def finish_hand(env, observation, *, trump=8, bid_id=1):
 
 
 class SelfPlayTests(unittest.TestCase):
+    def test_domino_ids_cover_the_deck_and_training_views(self):
+        self.assertEqual(tuple(domino.id for domino in PLAY_ACTIONS), tuple(range(28)))
+        env = SelfPlayEnv(seed=42)
+        obs = env.reset()
+        while True:
+            self.assertFalse(hasattr(obs, "__dict__"))
+            self.assertFalse(hasattr(obs.view, "__dict__"))
+            for domino_id in obs.view.hand:
+                self.assertIs(type(domino_id), int)
+                self.assertEqual(PLAY_ACTIONS[domino_id].id, domino_id)
+            if obs.phase == "play":
+                self.assertEqual(set(obs.view.legal_plays), set(obs.legal_action_ids))
+                for trick in (*obs.view.completed_tricks, obs.view.trick):
+                    for seat, domino_id in trick:
+                        self.assertIs(type(domino_id), int)
+                        self.assertIn(domino_id, range(28))
+            result = env.step(obs.legal_action_ids[0])
+            if result.terminated:
+                break
+            obs = result.observation
+
     def test_lifecycle_and_configuration(self):
         env = SelfPlayEnv()
         with self.assertRaises(RuntimeError):
@@ -80,7 +102,7 @@ class SelfPlayTests(unittest.TestCase):
             env.step(0)
         self.assertEqual(env.observe(), obs)
         obs = env.step(1).observation
-        self.assertIsInstance(obs.view, TrumpView)
+        self.assertIsInstance(obs.view, TrainingTrumpView)
         self.assertEqual(obs.seat, 1)
         self.assertEqual(obs.view.bid, Bid(points=30))
         self.assertEqual(obs.view.bid_history[-1], (1, Bid(points=30)))
@@ -144,7 +166,8 @@ class SelfPlayTests(unittest.TestCase):
             while True:
                 view = obs.view
                 self.assertEqual(view.trump, TRUMP_ACTIONS[trump_id])
-                expected = legal_plays(view.hand, view.trick[0][1] if view.trick else None,
+                expected = legal_plays(tuple(PLAY_ACTIONS[i] for i in view.hand),
+                                       PLAY_ACTIONS[view.trick[0][1]] if view.trick else None,
                                        view.trump)
                 self.assertEqual({PLAY_ACTIONS[i] for i in obs.legal_action_ids}, set(expected))
                 self.assertEqual(tuple(i for i, legal in enumerate(obs.action_mask) if legal),
@@ -153,7 +176,7 @@ class SelfPlayTests(unittest.TestCase):
                 domino = PLAY_ACTIONS[action]
                 self.assertNotIn(domino, played)
                 played.add(domino)
-                trick = view.trick + ((obs.seat, domino),)
+                trick = tuple((seat, PLAY_ACTIONS[i]) for seat, i in view.trick) + ((obs.seat, domino),)
                 transition = env.step(action)
                 if len(trick) == 4:
                     completed.append(trick)
@@ -166,7 +189,9 @@ class SelfPlayTests(unittest.TestCase):
                 self.assertEqual(transition.rewards, (0, 0, 0, 0))
                 obs = transition.observation
                 self.assertEqual(obs.seat, next_seat)
-                self.assertEqual(obs.view.completed_tricks, tuple(completed))
+                self.assertEqual(obs.view.completed_tricks,
+                                 tuple(tuple((seat, domino.id) for seat, domino in trick)
+                                       for trick in completed))
             totals = [0, 0]
             for trick in completed:
                 totals[trick_winner(trick, view.trump) % 2] += trick_points(trick)
@@ -234,7 +259,7 @@ class SelfPlayTests(unittest.TestCase):
         class ReplayPlayer(Player):
             def choose_bid(self, view):
                 wanted, action = next(decisions)
-                case.assertEqual(view, wanted)
+                case.assertEqual(training_view(view), wanted)
                 return action
             choose_trump = choose_bid
             choose_domino = choose_bid

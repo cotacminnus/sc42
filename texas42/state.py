@@ -91,8 +91,7 @@ class HandState:
                          if (not self.forced if bid is None else is_legal_bid(bid, self.bid)))
         if self.phase == "trump":
             return tuple(range(len(TRUMP_ACTIONS)))
-        legal = self.legal_dominoes()
-        return tuple(i for i, domino in enumerate(PLAY_ACTIONS) if domino in legal)
+        return tuple(sorted(domino.id for domino in self.legal_dominoes()))
 
     def apply(self, action_id: int) -> None:
         if self.result is not None:
