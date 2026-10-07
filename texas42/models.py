@@ -18,7 +18,10 @@ class Domino:
     low: int
 
     def __post_init__(self) -> None:
-        if not 0 <= self.low <= self.high <= 6:
+        # Reject bools/floats even when they compare equal to integer pip values:
+        # permanent IDs must remain valid integer indices in PLAY_ACTIONS.
+        if (type(self.high) is not int or type(self.low) is not int
+                or not 0 <= self.low <= self.high <= 6):
             raise ValueError("domino ends must satisfy 0 <= low <= high <= 6")
 
     @classmethod
@@ -32,6 +35,7 @@ class Domino:
     @property
     def id(self) -> int:
         """Stable ID 0-27, also used by the self-play action vocabulary."""
+        # Each high end starts after the triangular count of preceding rows.
         return self.high * (self.high + 1) // 2 + self.low
 
     @property
@@ -69,9 +73,9 @@ class Bid:
     def __post_init__(self) -> None:
         if (self.points is None) == (self.marks is None):
             raise ValueError("a bid must specify exactly one of points or marks")
-        if self.points is not None and not 30 <= self.points <= 41:
+        if self.points is not None and (type(self.points) is not int or not 30 <= self.points <= 41):
             raise ValueError("point bids must be between 30 and 41")
-        if self.marks is not None and not 1 <= self.marks <= 5:
+        if self.marks is not None and (type(self.marks) is not int or not 1 <= self.marks <= 5):
             raise ValueError("mark bids must be between 1 and 5")
 
     @property

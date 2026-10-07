@@ -119,9 +119,12 @@ python -m unittest discover -s tests -v
 | `texas42/engine.py` | Dealing, bidding, hand progression, and match scoring |
 | `texas42/state.py` | Shared turn transitions and stable action vocabularies |
 | `texas42/selfplay.py` | Silent reset/step API for hand or match training episodes |
+| `texas42/episodes.py` | Shared hand/match episode progression and rewards |
+| `texas42/openspiel.py` | Optional OpenSpiel game/state/observer adapter backed by the engine |
 | `texas42/players.py` | Player interface, immutable decision views, human input, and bots |
 | `texas42/cli.py` | Command-line options and player setup |
 | `tests/test_game.py` | Rule checks and automated game smoke tests |
+| `tests/test_openspiel.py` | OpenSpiel simulation, engine parity, privacy, and serialization checks |
 
 ### Adding a real AI
 
@@ -252,6 +255,36 @@ Keep separate trajectories for each seat. Terminal rewards apply to all four
 seats, including seats that did not take the final action. This API provides
 simulation and observations; a feature encoder, neural network, and optimizer
 remain training-code responsibilities.
+
+### OpenSpiel integration
+
+The optional `python_texas42` OpenSpiel game supports hand and match episodes.
+It delegates rules and transitions to this engine; the base CLI and native
+self-play API still have no third-party runtime dependencies.
+
+```console
+python3 -m venv .venv
+.venv/bin/python -m pip install -e '.[openspiel]'
+.venv/bin/python -m examples.openspiel_selfplay --episode match --seed 42
+```
+
+```python
+import pyspiel
+import texas42.openspiel  # Register the adapter before loading a game.
+
+game = pyspiel.load_game("python_texas42(episode=match,target_marks=7)")
+state = game.new_initial_state()
+```
+
+The adapter provides explicit chance dealing, legal-action masks, private
+observations, perfect-recall information states, cloning, and serialization.
+Domino play IDs remain 0–27; bid IDs are 28–45 and trump IDs are 46–54 in its
+55-action vocabulary. Native self-play IDs remain phase-local.
+
+See [OpenSpiel integration](docs/openspiel.md) for the research references,
+architecture, parameter and tensor layouts, and validation details. Run
+`.venv/bin/python -m unittest discover -s tests -v` to include integration tests;
+they skip when OpenSpiel is not installed. Training is not implemented.
 
 ## License
 

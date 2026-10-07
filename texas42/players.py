@@ -165,6 +165,10 @@ class HumanPlayer(Player):
             raw = self.read(f"Play a domino {legal_indices}: ").strip()
             try:
                 index = int(raw) - 1
+                # Python accepts negative indices, but the displayed choices are
+                # strictly one-based; 0 must never silently select the last tile.
+                if not 0 <= index < len(view.hand):
+                    raise IndexError("play number is outside the displayed hand")
                 domino = view.hand[index]
             except (ValueError, IndexError):
                 self.write("Choose one of the displayed domino numbers.")
@@ -185,4 +189,3 @@ def format_hand(hand: tuple[Domino, ...] | list[Domino], numbered: bool = False)
 
 def describe_trump(trump: Trump) -> str:
     return trump_name(trump)
-
