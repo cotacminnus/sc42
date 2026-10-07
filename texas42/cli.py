@@ -9,6 +9,7 @@ from pathlib import Path
 
 from .engine import Game, GameConfig
 from .players import HumanPlayer, Player, RandomPlayer
+from .rulesets import RULESET_ID
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -19,6 +20,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="reveal every player's dominoes at the beginning of each hand",
     )
     parser.add_argument("--seed", type=int, help="use a reproducible shuffle and bot seed")
+    parser.add_argument("--ruleset-id", default=RULESET_ID, choices=(RULESET_ID,),
+                        help="versioned house rules (currently only cadets_base_v1)")
     parser.add_argument(
         "--target-marks",
         type=int,
@@ -59,6 +62,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             target_marks=args.target_marks,
             debug=args.debug,
             seed=args.seed,
+            ruleset_id=args.ruleset_id,
         )
     except ValueError as error:
         raise SystemExit(str(error)) from error

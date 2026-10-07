@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import random
 from collections.abc import Callable, Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, is_dataclass
+from .features import FEATURE_SCHEMA_VERSION
+from .actions import ACTION_REGISTRY
 
 from .models import Bid, Domino, double_six_set, trump_name
 from .players import BidView, Player, TrumpView, format_hand
@@ -10,6 +12,7 @@ from .rules import trick_points, trick_winner
 from .state import HandResult, HandState
 from .selfplay import Observation
 from .training import training_view
+from .rulesets import RULESET_ID, validate_ruleset
 
 
 @dataclass(frozen=True)
@@ -17,8 +20,10 @@ class GameConfig:
     target_marks: int = 7
     debug: bool = False
     seed: int | None = None
+    ruleset_id: str = RULESET_ID
 
     def __post_init__(self) -> None:
+        validate_ruleset(self.ruleset_id)
         if type(self.target_marks) is not int or self.target_marks < 1:
             raise ValueError("target_marks must be a positive integer")
 
@@ -69,7 +74,8 @@ class Game:
             for seat, hand in enumerate(hands):
                 self.write(f"  P{seat + 1} {self.players[seat].name}: {format_hand(hand)}")
 
-        state = HandState(hands, self.shaker, tuple(self.marks), self.config.target_marks)
+        state = HandState(hands, self.shaker, tuple(self.marks), self.config.target_marks,
+                          self.config.ruleset_id)
         while state.result is None:
             view = state.view()
             player = self.players[view.seat]
@@ -89,17 +95,17 @@ class Game:
                 action = player.choose_domino(view)
                 message = f"P{view.seat + 1} {player.name} plays {action}"
             # Match types as well as values: bool/float are not numbered trumps.
-            action_id = next((i for i, candidate in enumerate(state.actions())
-                              if type(action) is type(candidate) and action == candidate), None)
-            if action_id is None:
-                raise ValueError(f"{player.name} returned an invalid {state.phase} action: {action!r}")
+            try:
+                action_id = ACTION_REGISTRY.encode(state.phase, action)
+            except ValueError as error:
+                raise ValueError(f"{player.name} returned an invalid {state.phase} action: {action!r}") from error
             completed_before = len(state.completed)
             if self.log_state is not None:
                 # Capture the actor's private snapshot BEFORE applying its move;
                 # the rest of this record describes the resulting transition.
                 legal = state.legal_action_ids()
                 observation = Observation(state.seat, state.phase, training_view(view), legal,
-                                          tuple(i in legal for i in range(len(state.actions()))))
+                                          ACTION_REGISTRY.mask(legal), ruleset_id=self.config.ruleset_id)
             state.apply(action_id)
             if self.log_state is not None:
                 # Marks are committed once below, after the hand finishes. Use a
@@ -111,13 +117,16 @@ class Game:
                 terminated = result is not None and max(marks) >= self.config.target_marks
                 winner = result.scoring_team if terminated else None
                 self.log_state({
-                    "schema_version": 2,
+                    "schema_version": 5,
+                    "feature_schema_version": FEATURE_SCHEMA_VERSION,
+                    "ruleset_id": self.config.ruleset_id,
                     "hand": self._hand_number,
                     "shaker": self.shaker,
                     "observation": asdict(observation),
                     "action_id": action_id,
+                    "action_key": ACTION_REGISTRY[action_id].key,
                     "action": action.id if isinstance(action, Domino) else
-                              asdict(action) if isinstance(action, Bid) else action,
+                              asdict(action) if is_dataclass(action) else action,
                     "hand_result": asdict(result) if result is not None else None,
                     "match_marks": marks,
                     "terminated": terminated,

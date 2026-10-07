@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import Literal, TypeAlias
 
 
@@ -119,6 +120,50 @@ class Bid:
         if 1 <= number <= 5:
             return cls(marks=number)
         raise ValueError("enter 30-41, 42, or 1m-5m")
+
+
+class ContractKind(StrEnum):
+    NORMAL = "normal"
+    NIL = "nil"
+    SPLASH = "splash"
+    PLUNGE = "plunge"
+
+
+@dataclass(frozen=True, slots=True)
+class ContractDeclaration:
+    """Auction declaration only; eligibility and ranking belong to the ruleset."""
+
+    name: str
+
+    @property
+    def kind(self) -> ContractKind:
+        return ContractKind(self.name)
+
+
+# None is a pass. Declarations are not normal bids and have no implicit strength.
+AuctionCall: TypeAlias = Bid | ContractDeclaration | None
+
+
+@dataclass(frozen=True, slots=True)
+class Contract:
+    """Resolved auction identity, independent of normal point/mark bids.
+
+    Special kinds are metadata only; rulesets still define eligibility, partner
+    participation, and scoring. Constructing this object does not enable rules.
+    """
+
+    kind: ContractKind
+    bidder: int
+    bid: Bid | None = None
+
+    def __post_init__(self):
+        object.__setattr__(self, "kind", ContractKind(self.kind))
+        if type(self.bidder) is not int or self.bidder not in range(4):
+            raise ValueError("contract bidder must be a seat from 0 to 3")
+        if self.kind == ContractKind.NORMAL and not isinstance(self.bid, Bid):
+            raise ValueError("normal contracts require a point/mark bid")
+        if self.bid is not None and not isinstance(self.bid, Bid):
+            raise ValueError("contract bid must be a Bid or None")
 
 
 def trump_name(trump: Trump) -> str:
