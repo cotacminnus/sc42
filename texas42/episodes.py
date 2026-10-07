@@ -44,7 +44,11 @@ class EpisodeState:
         return not self.terminated and (self.hand is None or self.hand.result is not None)
 
     def deal(self, hands: list[list[Domino]]) -> None:
-        """Validate a complete double-six deal without consuming an RNG stream."""
+        """Validate a complete double-six deal without consuming an RNG stream.
+
+        Supplying deals externally also enables duplicate evaluation: replay the
+        same deal with partnerships swapped to cancel luck (roadmap step 11).
+        """
         if not self.needs_deal:
             raise RuntimeError("Cannot deal during a hand or after episode termination")
         deck = [domino for hand in hands for domino in hand]

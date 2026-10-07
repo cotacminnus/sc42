@@ -1,4 +1,8 @@
-"""Dependency-free, turn-based self-play API (not a Gymnasium adapter)."""
+"""Dependency-free, turn-based self-play API (not a Gymnasium adapter).
+
+Typical loop: obs = env.reset(); encode obs with texas42.encoding; pick an ID
+from obs.legal_action_ids; env.step(id) -> StepResult with the next obs.
+"""
 
 from __future__ import annotations
 

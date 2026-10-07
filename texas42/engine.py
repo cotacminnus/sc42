@@ -1,3 +1,8 @@
+"""Interactive/console match runner: deals, asks Player objects, prints, and logs.
+
+Uses the same HandState transitions as SelfPlayEnv, so CLI play and training
+episodes cannot drift apart.
+"""
 from __future__ import annotations
 
 import random
@@ -116,6 +121,8 @@ class Game:
                     marks[result.scoring_team] += result.marks_awarded
                 terminated = result is not None and max(marks) >= self.config.target_marks
                 winner = result.scoring_team if terminated else None
+                # Records hold only the actor's view. Belief-model labels would
+                # need the full deal in a separate, never-observed field.
                 self.log_state({
                     "schema_version": 5,
                     "feature_schema_version": FEATURE_SCHEMA_VERSION,

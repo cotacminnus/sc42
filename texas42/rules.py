@@ -1,3 +1,8 @@
+"""Pure rule functions with no state: legality, suits, trick winners, and points.
+
+Everything that needs Texas 42 rules (engine, future oracle solver, belief
+tracking, encoders) should call these instead of re-implementing them.
+"""
 from __future__ import annotations
 
 from collections.abc import Sequence
@@ -35,7 +40,11 @@ def led_suit(domino: Domino, trump: Trump) -> Suit:
 
 
 def follows_suit(domino: Domino, suit: Suit, trump: Trump) -> bool:
-    """Trump dominoes belong exclusively to trump when deciding who must follow."""
+    """Trump dominoes belong exclusively to trump when deciding who must follow.
+
+    A player who does not follow a led suit has revealed a void in it; the
+    encoder's void features are derived from this function.
+    """
     if suit == DOUBLE_TRUMP:
         return domino.is_double
     if trump == suit:

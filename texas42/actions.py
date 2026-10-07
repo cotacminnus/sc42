@@ -97,6 +97,8 @@ class ActionRegistry:
     def phase_mask(self, phase: Phase, legal_action_ids: tuple[int, ...]) -> tuple[bool, ...]:
         # Capacity and legality differ: reserved logits exist before enabling
         # rules, so enabling a contract cannot move its neural-head slot.
+        # Policies set masked-out logits to a large negative value before
+        # sampling (Huang & Ontanon, https://arxiv.org/abs/2006.14171).
         self.mask(legal_action_ids)
         legal = set(legal_action_ids)
         slots = self.phase_slots(phase)

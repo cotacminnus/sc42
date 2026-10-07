@@ -1,5 +1,9 @@
-"""Texas 42 command-line game."""
+"""Texas 42 engine, command-line game, and self-play research interfaces.
 
+Start with README.md (project map) and docs/roadmap.md (research plan).
+"""
+
+from .encoding import ENCODER_LAYOUT_VERSION, FEATURE_SIZE, encode
 from .engine import Game, GameConfig
 from .features import FEATURE_SCHEMA_VERSION
 from .models import AuctionCall, ContractDeclaration, Bid, Contract, ContractKind, Domino
@@ -19,6 +23,7 @@ from .actions import (
 
 __all__ = [
     "AuctionCall", "ContractDeclaration", "FEATURE_SCHEMA_VERSION",
+    "ENCODER_LAYOUT_VERSION", "FEATURE_SIZE", "encode",
     "Bid", "Domino", "Game", "GameConfig", "HandResult", "SelfPlayEnv",
     "Observation", "StepResult", "BID_ACTIONS", "TRUMP_ACTIONS", "PLAY_ACTIONS",
     "TrainingView", "TrainingBidView", "TrainingTrumpView", "TrainingPlayView",

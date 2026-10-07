@@ -105,7 +105,7 @@ observer exposes a flat float32 tensor and named NumPy views through `dict`:
 | `phase` | Deal/bid/trump/play/terminal one-hot |
 | `hand_index` | Zero-based hand number |
 | `marks`, `points` | Two team totals each |
-| `deal_counts` | Number of dominoes dealt to each seat, with no opponent IDs |
+| `deal_counts` | Intended: dominoes dealt to each seat. Currently always zero (known issue; see [roadmap](roadmap.md)) |
 | `shakers` | Four-seat one-hot per retained hand |
 | `history` | 33 ordered public decision slots per retained hand; each slot has a four-seat one-hot and `NUM_ACTIONS`-action one-hot |
 

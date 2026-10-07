@@ -33,6 +33,8 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="run self-play with four placeholder bots",
     )
+    # nargs="?" + const: a bare flag uses the default path, a value overrides it
+    # (https://docs.python.org/3/library/argparse.html#nargs).
     parser.add_argument(
         "--self-play-log", nargs="?", const=Path("logs/selfplay.jsonl"), type=Path,
         metavar="PATH", help="write self-play states as JSONL (default: logs/selfplay.jsonl); requires --all-ai",
@@ -66,6 +68,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     except ValueError as error:
         raise SystemExit(str(error)) from error
+    # ExitStack closes the log file only if one was opened
+    # (https://docs.python.org/3/library/contextlib.html#contextlib.ExitStack).
     with ExitStack() as stack:
         log_state = None
         if args.self_play_log is not None:

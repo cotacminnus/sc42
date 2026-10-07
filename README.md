@@ -8,6 +8,46 @@ The repository is `sc42`, the Python package is `texas42`, and the optional inst
 command is `tx42`. Running from source requires Python 3.11 or newer and no
 third-party runtime dependencies.
 
+The engine also serves as a research testbed for self-play learning under imperfect
+information. See the [research roadmap](docs/roadmap.md) for goals, status, and
+planned steps.
+
+## Project map
+
+```text
+ Front ends        cli.py -> engine.Game -> players.Player (human, random bot)
+                   selfplay.SelfPlayEnv  -> episodes.EpisodeState
+                   openspiel.py (optional) -> episodes.EpisodeState
+                                   |
+ One hand          state.HandState: bid -> trump -> seven tricks (global action IDs)
+                                   |
+ Pure rules        rules.py (legality, trick winner, points), models.py (value types)
+
+ Shared formats    actions.py (58 permanent action IDs), training.py (ID-based views,
+                   checkpoint metadata, log migration), encoding.py (feature vectors),
+                   features.py / rulesets.py / phases.py (version and rules identity)
+```
+
+| File | Responsibility |
+| --- | --- |
+| `texas42/models.py` | Dominoes, bids, trump, and contract value types |
+| `texas42/rules.py` | Legal bids and plays, suit ranking, and trick scoring |
+| `texas42/state.py` | One hand's transitions, legal action IDs, and hand results |
+| `texas42/episodes.py` | Hand or match episodes: marks, shaker rotation, and rewards |
+| `texas42/engine.py` | Console match runner for `Player` objects, with optional JSONL logging |
+| `texas42/players.py` | Player interface, immutable decision views, human input, and the random bot |
+| `texas42/cli.py` | Command-line options and player setup |
+| `texas42/selfplay.py` | Silent reset/step API for training episodes |
+| `texas42/training.py` | Integer-ID training views, `training_metadata()`, and log migration |
+| `texas42/encoding.py` | Fixed-length feature vectors for neural policies |
+| `texas42/actions.py` | Append-only action vocabulary and neural-head slots |
+| `texas42/features.py`, `rulesets.py`, `phases.py` | Feature/encoder versions, ruleset identity, and phase names |
+| `texas42/openspiel.py` | Optional OpenSpiel game, state, and observer backed by the engine |
+| `tests/` | One test module per area (`test_game`, `test_selfplay`, `test_encoding`, `test_openspiel`, ...) |
+| `docs/` | [Roadmap](docs/roadmap.md), [encoder](docs/encoding.md), [action IDs](docs/action-space.md), [OpenSpiel](docs/openspiel.md) |
+
+Seats are zero-based everywhere: team 0 is seats 0 and 2, and team 1 is seats 1 and 3.
+
 ## Play
 
 Run commands from the repository root (the directory containing `pyproject.toml`):
@@ -99,7 +139,8 @@ including their legal-action masks. See [action compatibility](docs/action-space
 
 The three dummy AIs pass every optional bid and play a random legal domino. If a
 dummy AI is the forced bidder, the engine assigns it a bid of 30; it then chooses
-a random trump call.
+a random trump call. As a result, `--all-ai` logs contain no real bidding; use
+`SelfPlayEnv` for training data that covers the full auction.
 
 Nello, Sevens, Splash, and Plunge are not implemented. The rules above describe
 the current implementation; additional Singing Cadets house rules may need to be
@@ -113,19 +154,9 @@ Run the standard-library test suite from the repository root:
 python -m unittest discover -s tests -v
 ```
 
-| File | Responsibility |
-| --- | --- |
-| `texas42/models.py` | Dominoes, bids, and trump representations |
-| `texas42/rules.py` | Legal bids and plays, suit ranking, and trick scoring |
-| `texas42/engine.py` | Dealing, bidding, hand progression, and match scoring |
-| `texas42/state.py` | Shared turn transitions and stable action vocabularies |
-| `texas42/selfplay.py` | Silent reset/step API for hand or match training episodes |
-| `texas42/episodes.py` | Shared hand/match episode progression and rewards |
-| `texas42/openspiel.py` | Optional OpenSpiel game/state/observer adapter backed by the engine |
-| `texas42/players.py` | Player interface, immutable decision views, human input, and bots |
-| `texas42/cli.py` | Command-line options and player setup |
-| `tests/test_game.py` | Rule checks and automated game smoke tests |
-| `tests/test_openspiel.py` | OpenSpiel simulation, engine parity, privacy, and serialization checks |
+Tests also run in GitHub Actions on pushes and pull requests: a dependency-free
+core job and an OpenSpiel integration job. OpenSpiel tests skip when `pyspiel`
+is not installed.
 
 ### Adding a real AI
 
@@ -265,8 +296,18 @@ if appropriate, but keep match returns connected through those boundaries.
 
 Keep separate trajectories for each seat. Terminal rewards apply to all four
 seats, including seats that did not take the final action. This API provides
-simulation and observations; a feature encoder, neural network, and optimizer
-remain training-code responsibilities.
+simulation and observations; the neural network and optimizer remain
+training-code responsibilities.
+
+### Feature encoder
+
+`texas42.encoding.encode(observation)` turns an `Observation` into a list of
+`FEATURE_SIZE` (387) floats from the acting seat's perspective: its own hand,
+who played what, the current trick, revealed voids, trump, the auction, points,
+and marks. `to_numpy(observations)` batches features and legal-action masks when
+NumPy is installed. Save `training_metadata()` (which includes
+`encoder_layout_version`) with every model. See [feature encoder](docs/encoding.md)
+for the layout.
 
 ### OpenSpiel integration
 
@@ -297,12 +338,10 @@ self-play, logs, and OpenSpiel use identical player action IDs and masks.
 See [OpenSpiel integration](docs/openspiel.md) for the research references,
 architecture, parameter and tensor layouts, and validation details. Run
 `.venv/bin/python -m unittest discover -s tests -v` to include integration tests;
-they skip when OpenSpiel is not installed. Training is not implemented.
+they skip when OpenSpiel is not installed. OpenSpiel publishes wheels for Linux
+and macOS; on Windows, use WSL2. Training is not implemented yet; see the
+[research roadmap](docs/roadmap.md).
 
 ## License
 
 [MIT](LICENSE).
-
-Tests run in GitHub Actions on pushes and pull requests, including a dependency-free
-core job and an OpenSpiel integration job. Run locally with
-`python -m unittest discover -s tests -v` (install `.[openspiel]` for adapter tests).

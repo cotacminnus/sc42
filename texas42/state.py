@@ -1,4 +1,8 @@
-"""Shared hand transitions for the CLI and self-play environment."""
+"""Shared hand transitions for the CLI and self-play environment.
+
+HandState is the single source of truth for one hand (bid -> trump -> 7 tricks).
+Game, EpisodeState, and the OpenSpiel adapter all drive it with global action IDs.
+"""
 
 from __future__ import annotations
 
@@ -35,7 +39,11 @@ class HandResult:
 
 
 class HandState:
-    """Internal mutable state. Only decision views belong in policy inputs."""
+    """Internal mutable state. Only decision views belong in policy inputs.
+
+    `hands` holds all four private hands. Only privileged code (a perfect-
+    information oracle, or training labels for belief models) may read it.
+    """
 
     def __init__(self, hands: list[list[Domino]], shaker: int,
                  marks: tuple[int, int], target_marks: int, ruleset_id: str = RULESET_ID) -> None:
@@ -117,6 +125,8 @@ class HandState:
         if type(action_id) is not int or action_id not in self.legal_action_ids():
             raise ValueError(f"Illegal {self.phase} action ID: {action_id!r}")
         action = ACTION_REGISTRY[action_id].value
+        # Special contracts (roadmap step 10) need their own branches here and in
+        # legal_action_ids(); unhandled phases raise instead of guessing.
         if self.phase == "bid":
             self.bid_history.append((self.seat, action))
             if action is not None:

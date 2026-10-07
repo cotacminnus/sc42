@@ -1,3 +1,8 @@
+"""Value types: dominoes, bids, trump, and contracts. Bottom layer; no game flow.
+
+Frozen dataclasses make every value hashable and immutable, so views and logs can
+share them safely (https://docs.python.org/3/library/dataclasses.html).
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -123,6 +128,8 @@ class Bid:
 
 
 class ContractKind(StrEnum):
+    # StrEnum members equal their string values, so JSON logs stay plain strings
+    # (https://docs.python.org/3/library/enum.html#enum.StrEnum).
     NORMAL = "normal"
     NIL = "nil"
     SPLASH = "splash"
@@ -157,6 +164,8 @@ class Contract:
     bid: Bid | None = None
 
     def __post_init__(self):
+        # Frozen dataclasses block normal assignment; object.__setattr__ is the
+        # documented way to normalize a field during construction.
         object.__setattr__(self, "kind", ContractKind(self.kind))
         if type(self.bidder) is not int or self.bidder not in range(4):
             raise ValueError("contract bidder must be a seat from 0 to 3")

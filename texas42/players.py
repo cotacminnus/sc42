@@ -1,3 +1,9 @@
+"""Object-based player API used by engine.Game and the CLI.
+
+Decision views here hold Domino objects. Training code uses the equivalent
+integer-ID views from training.py instead. A shared ID-based Agent interface
+that works in both places is planned (docs/roadmap.md step 4).
+"""
 from __future__ import annotations
 
 import random
@@ -92,6 +98,9 @@ class RandomPlayer(Player):
         self.rng = rng or random.Random()
 
     def choose_bid(self, view: BidView) -> AuctionCall:
+        # Never bidding means every --all-ai hand is a forced 30 by the shaker,
+        # so CLI logs carry no useful bidding signal. SelfPlayEnv with random
+        # legal IDs does exercise the whole auction.
         return None
 
     def choose_trump(self, view: TrumpView) -> Trump:

@@ -1,6 +1,8 @@
 """Optional OpenSpiel adapter; all game rules live in the Texas 42 engine.
 
 Import this module before calling pyspiel.load_game("python_texas42").
+Modeled on OpenSpiel's Python Kuhn poker game; see docs/openspiel.md for the
+upstream API references. pyspiel wheels target Linux/macOS (use WSL on Windows).
 """
 from __future__ import annotations
 
@@ -209,6 +211,8 @@ class Texas42Observer:
         for name, shape in pieces:
             length = int(np.prod(shape))
             # Named arrays share the flat tensor; set_from updates both at once.
+            # Slicing + reshape returns NumPy views, not copies
+            # (https://numpy.org/doc/stable/user/basics.copies.html).
             self.dict[name] = self.tensor[offset:offset + length].reshape(shape)
             offset += length
 
@@ -245,6 +249,9 @@ class Texas42Observer:
             self.dict["hand_index"][0] = state.hand_index
             self.dict["marks"][:] = state.session.marks if state.session else [0, 0]
             self.dict["points"][:] = hand.points if hand else [0, 0]
+            # TODO: always zero, although docs/openspiel.md describes per-seat deal
+            # counts. Fixing or removing it changes the tensor and needs a
+            # FEATURE_SCHEMA_VERSION bump.
             for seat in range(4):
                 self.dict["deal_counts"][seat] = len([])
             for slot, index in enumerate(indexes):

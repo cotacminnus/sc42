@@ -1,9 +1,13 @@
-"""Immutable policy inputs with stable integer domino IDs."""
+"""Immutable policy inputs with stable integer domino IDs.
+
+These views are the structured input to texas42.encoding, which flattens
+them into fixed-length feature vectors for neural networks.
+"""
 
 from copy import deepcopy
 from dataclasses import dataclass, field
 
-from .features import FEATURE_SCHEMA_VERSION
+from .features import ENCODER_LAYOUT_VERSION, FEATURE_SCHEMA_VERSION
 from .actions import (
     ACTION_REGISTRY, ACTION_SPACE_VERSION, NUM_ACTIONS, BID_ACTIONS,
     TRUMP_ACTIONS, PLAY_ACTIONS, legacy_action_id,
@@ -76,6 +80,7 @@ def training_metadata(ruleset_id: str = RULESET_ID) -> dict:
     return {
         "ruleset_id": validate_ruleset(ruleset_id),
         "feature_schema_version": FEATURE_SCHEMA_VERSION,
+        "encoder_layout_version": ENCODER_LAYOUT_VERSION,
         "action_space_version": ACTION_SPACE_VERSION,
         "num_actions": NUM_ACTIONS,
         "action_manifest": ACTION_REGISTRY.manifest(),
