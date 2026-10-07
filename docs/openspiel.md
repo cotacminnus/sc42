@@ -31,6 +31,7 @@ Parameters:
 | --- | --- | --- |
 | `episode` | `hand` | `hand` or `match` |
 | `target_marks` | `7` | Positive match target, also included in game parameters for hand episodes |
+| `ruleset_id` | `cadets_base_v1` | Versioned engine rules; other variants are rejected until implemented |
 | `shaker` | `-1` | Random starting shaker through chance; `0`–`3` fixes the starting seat |
 
 ## Engine ownership
@@ -73,12 +74,15 @@ Player action IDs use one fixed vocabulary:
 | 0–27 | Play domino | Same permanent domino ID as `SelfPlayEnv` |
 | 28–45 | Bid or pass | `BID_ACTIONS[id - 28]` |
 | 46–54 | Call trump | `TRUMP_ACTIONS[id - 46]` |
+| 55–57 | Reserved Nil/Splash/Plunge declarations | Disabled until rules exist |
 
 Chance actions reuse 0–3 for a shaker or 0–27 for a domino, distinguished by the
 chance state. Legal actions are sorted, phase-specific, and empty for inactive
-players and terminal states. `state.legal_actions_mask()` has 55 entries. The
-native `SelfPlayEnv` and its JSONL logs retain their existing phase-local IDs;
-apply `OFFSETS[phase]` when transferring a native player action to OpenSpiel.
+players and terminal states. `state.legal_actions_mask()` has `NUM_ACTIONS`
+entries (currently 58). Native `SelfPlayEnv`, schema-5 JSONL logs, and OpenSpiel
+now share these IDs directly; no phase offset is added at the adapter boundary.
+The shared registry is append-only. See [action compatibility](action-space.md)
+for dataset migration and the extension procedure.
 
 A hand has exactly 33 player decisions. A match needs at most
 `2 * target_marks - 1` hands because every hand awards at least one mark.
@@ -96,17 +100,17 @@ observer exposes a flat float32 tensor and named NumPy views through `dict`:
 | --- | --- |
 | `player` | Four-seat one-hot |
 | `hand` | Current private hand as a 28-bit domino membership mask |
-| `private_deals` | Own original deal; ordered seven-by-28 one-hot draws per hand for perfect recall, a 28-bit set for ordinary observations |
+| `private_deals` | Own original hand as a 28-bit set per retained hand |
 | `actor` | Four seats plus chance/terminal one-hot |
 | `phase` | Deal/bid/trump/play/terminal one-hot |
 | `hand_index` | Zero-based hand number |
 | `marks`, `points` | Two team totals each |
 | `deal_counts` | Number of dominoes dealt to each seat, with no opponent IDs |
 | `shakers` | Four-seat one-hot per retained hand |
-| `history` | 33 ordered public decision slots per retained hand; each slot has a four-seat one-hot and 55-action one-hot |
+| `history` | 33 ordered public decision slots per retained hand; each slot has a four-seat one-hot and `NUM_ACTIONS`-action one-hot |
 
 Ordinary observations retain the current hand. Information states preserve
-perfect recall: all previous own deals (including their observed order), shakers,
+perfect recall: all previous own hand sets, shakers,
 and public actions throughout a match. Tensor capacity is fixed at the maximum
 number of hands for the configured target; unused slots are zero. The strings
 encode the same fields sparsely and omit hidden chance outcomes.
@@ -149,3 +153,25 @@ define state methods and metadata. Observer integration follows
 Validation follows the upstream
 [game simulation tests](https://github.com/google-deepmind/open_spiel/blob/master/open_spiel/python/tests/games_sim_test.py)
 and [RL environment](https://github.com/google-deepmind/open_spiel/blob/master/open_spiel/python/rl_environment.py).
+
+Ruleset identity is a game parameter and is preserved by serialization.
+Use `training_metadata(game.ruleset_id)` to record matching dataset/checkpoint
+provenance. See [action compatibility](action-space.md) for stable 21/9/28 phase
+heads, resolved-contract types, and schema-2/3/4 log migration.
+
+### Feature compatibility
+
+`Texas42Game.feature_schema_version` and `training_metadata()` expose
+`FEATURE_SCHEMA_VERSION = 1`. This is the first explicitly versioned feature
+layout. Private dominoes are hidden during all 28 chance draws and revealed as
+sets when dealing finishes. Players make no decisions during dealing; chance
+order stays available only in simulator history. Thus permutations within a
+seat's deal produce identical information states and cannot leak draw order.
+Previous own sets remain available through later hands for perfect recall.
+
+This changes the unversioned information tensor: regenerate those tensors from
+replay, and migrate model input weights deliberately. JSONL migration cannot
+convert saved OpenSpiel tensors or checkpoints. The feature version covers
+private revelation semantics, field shapes, the five phase slots, and the
+33-decision capacity per hand. Extra setup decisions or phases require a feature
+version change even if all global action IDs stay the same.

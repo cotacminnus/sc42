@@ -5,7 +5,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from .models import DOUBLE_TRUMP, Bid, Domino, Trump, trump_name
+from .models import AuctionCall, DOUBLE_TRUMP, Bid, Contract, Domino, Trump, trump_name
 from .rules import is_legal_bid
 
 
@@ -16,12 +16,13 @@ class BidView:
     seat: int
     shaker: int
     hand: tuple[Domino, ...]
-    current_bid: Bid | None
+    current_bid: AuctionCall
     current_bidder: int | None
     forced: bool
     match_marks: tuple[int, int] = (0, 0)
-    bid_history: tuple[tuple[int, Bid | None], ...] = ()
+    bid_history: tuple[tuple[int, AuctionCall], ...] = ()
     target_marks: int = 7
+    contract: Contract | None = None
 
 
 @dataclass(frozen=True)
@@ -30,10 +31,11 @@ class TrumpView:
 
     seat: int
     hand: tuple[Domino, ...]
-    bid: Bid
+    bid: Bid | None
     match_marks: tuple[int, int] = (0, 0)
-    bid_history: tuple[tuple[int, Bid | None], ...] = ()
+    bid_history: tuple[tuple[int, AuctionCall], ...] = ()
     target_marks: int = 7
+    contract: Contract | None = None
 
 
 @dataclass(frozen=True)
@@ -50,12 +52,13 @@ class PlayView:
     trick: tuple[tuple[int, Domino], ...]
     completed_tricks: tuple[tuple[tuple[int, Domino], ...], ...]
     bidder: int
-    bid: Bid
+    bid: Bid | None
     trump: Trump
     team_points: tuple[int, int]
     match_marks: tuple[int, int]
-    bid_history: tuple[tuple[int, Bid | None], ...] = ()
+    bid_history: tuple[tuple[int, AuctionCall], ...] = ()
     target_marks: int = 7
+    contract: Contract | None = None
 
 
 class Player(ABC):
@@ -69,7 +72,7 @@ class Player(ABC):
         self.name = name
 
     @abstractmethod
-    def choose_bid(self, view: BidView) -> Bid | None:
+    def choose_bid(self, view: BidView) -> AuctionCall:
         """Return a legal raise or None; the engine turns a forced pass into 30."""
 
     @abstractmethod
@@ -88,7 +91,7 @@ class RandomPlayer(Player):
         super().__init__(name)
         self.rng = rng or random.Random()
 
-    def choose_bid(self, view: BidView) -> Bid | None:
+    def choose_bid(self, view: BidView) -> AuctionCall:
         return None
 
     def choose_trump(self, view: TrumpView) -> Trump:
@@ -109,7 +112,7 @@ class HumanPlayer(Player):
         self.read = read
         self.write = write
 
-    def choose_bid(self, view: BidView) -> Bid | None:
+    def choose_bid(self, view: BidView) -> AuctionCall:
         while True:
             current = str(view.current_bid) if view.current_bid else "none"
             forced = "; you cannot pass" if view.forced else ""
@@ -127,6 +130,8 @@ class HumanPlayer(Player):
             except (ValueError, TypeError) as error:
                 self.write(f"Invalid bid: {error}")
                 continue
+            if view.current_bid is not None and not isinstance(view.current_bid, Bid):
+                raise NotImplementedError("Human bidding requires rules for this declaration")
             if not is_legal_bid(bid, view.current_bid):
                 self.write("That bid is not a legal increase.")
                 continue

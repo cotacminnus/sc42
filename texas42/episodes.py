@@ -5,6 +5,7 @@ from typing import Literal
 
 from .models import Domino
 from .state import HandResult, HandState
+from .rulesets import RULESET_ID, validate_ruleset
 
 
 @dataclass(frozen=True, slots=True)
@@ -18,10 +19,11 @@ class EpisodeTransition:
 
 
 class EpisodeState:
-    """Accept externally dealt hands; apply phase-local engine actions."""
+    """Accept externally dealt hands; apply shared global engine action IDs."""
 
     def __init__(self, episode: Literal["hand", "match"], target_marks: int,
-                 shaker: int) -> None:
+                 shaker: int, ruleset_id: str = RULESET_ID) -> None:
+        self.ruleset_id = validate_ruleset(ruleset_id)
         if episode not in ("hand", "match"):
             raise ValueError("episode must be 'hand' or 'match'")
         if type(target_marks) is not int or target_marks < 1:
@@ -50,7 +52,7 @@ class EpisodeState:
                 or any(not isinstance(domino, Domino) for domino in deck)
                 or len(set(deck)) != 28):
             raise ValueError("A deal must contain four hands of seven unique dominoes")
-        self.hand = HandState(hands, self.shaker, tuple(self.marks), self.target_marks)
+        self.hand = HandState(hands, self.shaker, tuple(self.marks), self.target_marks, self.ruleset_id)
 
     def apply(self, action_id: int) -> EpisodeTransition:
         """Advance one decision, committing marks only on the final play."""

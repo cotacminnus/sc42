@@ -11,8 +11,8 @@ if _AVAILABLE:
     import numpy as np
     import pyspiel
     from open_spiel.python import rl_environment
-    from texas42 import SelfPlayEnv
-    from texas42.openspiel import OFFSETS, Texas42Game
+    from texas42 import NUM_ACTIONS, SelfPlayEnv, NIL_ACTION_ID, SPLASH_ACTION_ID, PLUNGE_ACTION_ID
+    from texas42.openspiel import Texas42Game
 
 
 @unittest.skipUnless(_AVAILABLE, "Install tx42[openspiel] to test the OpenSpiel adapter")
@@ -25,14 +25,18 @@ class OpenSpielTests(unittest.TestCase):
 
     def test_metadata_and_configuration(self):
         game = pyspiel.load_game("python_texas42")
+        self.assertEqual(game.feature_schema_version, 1)
         self.assertEqual(game.num_players(), 4)
-        self.assertEqual(game.num_distinct_actions(), 55)
+        self.assertEqual(game.num_distinct_actions(), NUM_ACTIONS)
         self.assertEqual(game.get_type().information, pyspiel.GameType.Information.IMPERFECT_INFORMATION)
         self.assertEqual(game.get_type().chance_mode, pyspiel.GameType.ChanceMode.EXPLICIT_STOCHASTIC)
         self.assertEqual(game.max_game_length(), 33)
         self.assertEqual(game.max_chance_nodes_in_history(), 29)
         self.assertEqual(game.min_utility(), -5)
-        for params in ({"episode": "other"}, {"target_marks": 0}, {"shaker": 4}):
+        self.assertEqual(game.ruleset_id, "cadets_base_v1")
+        self.assertEqual(game.get_parameters()["ruleset_id"], game.ruleset_id)
+        for params in ({"episode": "other"}, {"target_marks": 0}, {"shaker": 4},
+                       {"ruleset_id": "cadets_nil_v1"}):
             with self.assertRaises(ValueError):
                 Texas42Game(params)
 
@@ -66,12 +70,18 @@ class OpenSpielTests(unittest.TestCase):
                         self.deal(state, deck)
                     self.assertEqual(state.current_player(), obs.seat)
                     self.assertEqual(state.legal_actions(),
-                                     [OFFSETS[obs.phase] + i for i in obs.legal_action_ids])
+                                     list(obs.legal_action_ids))
+                    self.assertEqual(state.legal_actions_mask(), list(map(int, obs.action_mask)))
+                    before = str(state), state.history()
+                    for reserved in (NIL_ACTION_ID, SPLASH_ACTION_ID, PLUNGE_ACTION_ID):
+                        with self.assertRaises(ValueError):
+                            state.apply_action(reserved)
+                        self.assertEqual((str(state), state.history()), before)
                     for seat in range(4):
                         if seat != obs.seat:
                             self.assertEqual(state.legal_actions(seat), [])
                     action = rng.choice(obs.legal_action_ids)
-                    state.apply_action(OFFSETS[obs.phase] + action)
+                    state.apply_action(action)
                     transition = env.step(action)
                     actions += 1
                     self.assertEqual(state.is_terminal(), transition.terminated)
@@ -106,14 +116,34 @@ class OpenSpielTests(unittest.TestCase):
         second.apply_action(14)
         self.assertEqual(first.information_state_tensor(0), second.information_state_tensor(0))
 
-    def test_perfect_recall_retains_private_deal_order(self):
+    def test_private_hand_is_unordered_and_revealed_after_dealing(self):
         game = Texas42Game({"shaker": 0})
         first, second = game.new_initial_state(), game.new_initial_state()
         self.deal(first)
         self.deal(second, [1, 0] + list(range(2, 28)))
         self.assertEqual(first.observation_tensor(0), second.observation_tensor(0))
-        self.assertNotEqual(first.information_state_tensor(0), second.information_state_tensor(0))
-        self.assertNotEqual(first.information_state_string(0), second.information_state_string(0))
+        self.assertEqual(first.information_state_tensor(0), second.information_state_tensor(0))
+        self.assertEqual(first.information_state_string(0), second.information_state_string(0))
+
+    def test_partial_deals_reveal_no_private_dominoes(self):
+        game = Texas42Game({"shaker": 0})
+        first, second = game.new_initial_state(), game.new_initial_state()
+        for turn in range(27):
+            first.apply_action(turn)
+            second.apply_action(27 - turn)
+            for player in range(4):
+                for method in ("observation_tensor", "information_state_tensor",
+                               "observation_string", "information_state_string"):
+                    self.assertEqual(getattr(first, method)(player),
+                                     getattr(second, method)(player))
+            observer = game.make_py_observer(pyspiel.IIGObservationType(perfect_recall=True))
+            observer.set_from(first, 0)
+            self.assertEqual(observer.dict["hand"].sum(), 0)
+            self.assertEqual(observer.dict["private_deals"].sum(), 0)
+        first.apply_action(27)
+        observer.set_from(first, 0)
+        self.assertEqual(observer.dict["hand"].sum(), 7)
+        self.assertEqual(observer.dict["private_deals"].sum(), 7)
 
     def test_observer_privacy_options_and_fixed_shapes(self):
         game = Texas42Game({"episode": "match", "target_marks": 2, "shaker": 0})
@@ -140,8 +170,8 @@ class OpenSpielTests(unittest.TestCase):
             self.assertEqual(len(state.observation_tensor(0)), obs_size)
             self.assertEqual(len(state.information_state_tensor(0)), info_size)
             observer.set_from(state, 0)
-            for turn, domino in enumerate(original_deal[:7]):
-                self.assertEqual(observer.dict["private_deals"][0, 0, turn, domino], 1)
+            for domino in original_deal[:7]:
+                self.assertEqual(observer.dict["private_deals"][0, 0, domino], 1)
             state.apply_action(state.legal_actions()[0])
         self.assertEqual(len(state.information_state_tensor(0)), info_size)
 

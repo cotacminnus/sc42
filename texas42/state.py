@@ -2,23 +2,15 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Literal
-
-from .models import Bid, Domino, Trump, double_six_set
+from dataclasses import dataclass, field
+from .actions import ACTION_REGISTRY, BID_ACTIONS, PLAY_ACTIONS, TRUMP_ACTIONS, Phase
+from .models import AuctionCall, Bid, Contract, ContractKind, Domino, Trump
+from .rulesets import RULESET_ID, validate_ruleset
 from .players import BidView, PlayView, TrumpView
 from .rules import is_legal_bid, legal_plays, trick_points, trick_winner
 
 
-# IDs are indices in these tuples, local to each phase. Never hand positions.
-BID_ACTIONS: tuple[Bid | None, ...] = (
-    None,
-    *(Bid(points=points) for points in range(30, 42)),
-    *(Bid(marks=marks) for marks in range(1, 6)),
-)
-TRUMP_ACTIONS: tuple[Trump, ...] = (*range(7), "doubles", None)
-PLAY_ACTIONS: tuple[Domino, ...] = double_six_set()
-Phase = Literal["bid", "trump", "play"]
+# Re-export decoded tables for existing imports; permanent IDs live in actions.
 DecisionView = BidView | TrumpView | PlayView
 
 
@@ -26,27 +18,37 @@ DecisionView = BidView | TrumpView | PlayView
 class HandResult:
     """Seats are 0-3; team totals are ordered by seat parity."""
 
-    bidder: int
-    bid: Bid
+    contract: Contract
+    # Derived compatibility fields keep the JSON result shape unambiguous.
+    bidder: int = field(init=False)
+    bid: Bid | None = field(init=False)
     trump: Trump
     team_points: tuple[int, int]
     scoring_team: int
     marks_awarded: int
+
+    def __post_init__(self):
+        if not isinstance(self.contract, Contract):
+            raise ValueError("A completed hand requires a resolved contract")
+        object.__setattr__(self, "bidder", self.contract.bidder)
+        object.__setattr__(self, "bid", self.contract.bid)
 
 
 class HandState:
     """Internal mutable state. Only decision views belong in policy inputs."""
 
     def __init__(self, hands: list[list[Domino]], shaker: int,
-                 marks: tuple[int, int], target_marks: int) -> None:
+                 marks: tuple[int, int], target_marks: int, ruleset_id: str = RULESET_ID) -> None:
+        self.ruleset_id = validate_ruleset(ruleset_id)
         self.hands = [list(hand) for hand in hands]
         self.shaker = shaker
         self.marks = marks
         self.target_marks = target_marks
-        self.phase: Phase = "bid"
+        self.phase = Phase.BID
+        self.contract: Contract | None = None
         self.seat = (shaker + 1) % 4
-        self.bid_history: list[tuple[int, Bid | None]] = []
-        self.bid: Bid | None = None
+        self.bid_history: list[tuple[int, AuctionCall]] = []
+        self.current_call: AuctionCall = None
         self.bidder: int | None = None
         self.trump: Trump = None
         self.trick: list[tuple[int, Domino]] = []
@@ -55,8 +57,14 @@ class HandState:
         self.result: HandResult | None = None
 
     @property
+    def bid(self) -> Bid | None:
+        """Normal stake convenience accessor; declarations never invent a bid."""
+        return self.contract.bid if self.contract else (
+            self.current_call if isinstance(self.current_call, Bid) else None)
+
+    @property
     def forced(self) -> bool:
-        return self.phase == "bid" and len(self.bid_history) == 3 and self.bid is None
+        return self.phase == "bid" and len(self.bid_history) == 3 and self.current_call is None
 
     def view(self) -> DecisionView:
         """Copy public history and the actor's hand into immutable snapshots."""
@@ -64,13 +72,15 @@ class HandState:
             raise RuntimeError("The hand is complete")
         common = dict(seat=self.seat, hand=tuple(self.hands[self.seat]),
                       match_marks=self.marks, bid_history=tuple(self.bid_history),
-                      target_marks=self.target_marks)
+                      target_marks=self.target_marks, contract=self.contract)
         if self.phase == "bid":
-            return BidView(**common, shaker=self.shaker, current_bid=self.bid,
+            return BidView(**common, shaker=self.shaker, current_bid=self.current_call,
                            current_bidder=self.bidder, forced=self.forced)
-        assert self.bid is not None and self.bidder is not None
+        assert self.contract is not None and self.bidder is not None
         if self.phase == "trump":
             return TrumpView(**common, bid=self.bid)
+        if self.phase != Phase.PLAY:
+            raise RuntimeError(f"No view handler for phase {self.phase}")
         return PlayView(**common, legal_plays=self.legal_dominoes(),
                         trick=tuple(self.trick), completed_tricks=tuple(self.completed),
                         bidder=self.bidder, bid=self.bid, trump=self.trump,
@@ -81,19 +91,24 @@ class HandState:
                            self.trick[0][1] if self.trick else None, self.trump)
 
     def actions(self) -> tuple:
-        return {"bid": BID_ACTIONS, "trump": TRUMP_ACTIONS,
-                "play": PLAY_ACTIONS}[self.phase]
+        """Decoded values in global-ID order; use the registry to encode values."""
+        return tuple(entry.value for entry in ACTION_REGISTRY.entries)
 
     def legal_action_ids(self) -> tuple[int, ...]:
-        """Return sorted phase-local IDs, independent of the hand's ordering."""
+        """Return sorted global IDs, with future declarations masked out."""
         if self.result is not None:
             return ()
         if self.phase == "bid":
-            return tuple(i for i, bid in enumerate(BID_ACTIONS)
-                         if (not self.forced if bid is None else is_legal_bid(bid, self.bid)))
+            return tuple(entry.action_id for entry in ACTION_REGISTRY.implemented_for_phase("bid")
+                         if (not self.forced if entry.value is None
+                             else isinstance(entry.value, Bid)
+                             and (self.current_call is None or isinstance(self.current_call, Bid))
+                             and is_legal_bid(entry.value, self.current_call)))
         if self.phase == "trump":
-            return tuple(range(len(TRUMP_ACTIONS)))
-        return tuple(sorted(domino.id for domino in self.legal_dominoes()))
+            return tuple(entry.action_id for entry in ACTION_REGISTRY.implemented_for_phase("trump"))
+        if self.phase == Phase.PLAY:
+            return tuple(sorted(domino.id for domino in self.legal_dominoes()))
+        raise RuntimeError(f"No legality handler for phase {self.phase}")
 
     def apply(self, action_id: int) -> None:
         """Validate before mutating so rejected actions leave the state intact."""
@@ -101,22 +116,23 @@ class HandState:
             raise RuntimeError("The hand is complete")
         if type(action_id) is not int or action_id not in self.legal_action_ids():
             raise ValueError(f"Illegal {self.phase} action ID: {action_id!r}")
-        action = self.actions()[action_id]
+        action = ACTION_REGISTRY[action_id].value
         if self.phase == "bid":
             self.bid_history.append((self.seat, action))
             if action is not None:
-                self.bid, self.bidder = action, self.seat
+                self.current_call, self.bidder = action, self.seat
             if len(self.bid_history) == 4:
                 # The shaker bids last and cannot pass when all others pass,
                 # so every completed auction has a bidder and a contract.
                 assert self.bidder is not None
-                self.phase, self.seat = "trump", self.bidder
+                self.contract = Contract(ContractKind.NORMAL, self.bidder, self.bid)
+                self.phase, self.seat = Phase.TRUMP, self.bidder
             else:
                 self.seat = (self.seat + 1) % 4
         elif self.phase == "trump":
             self.trump = action
-            self.phase = "play"
-        else:
+            self.phase = Phase.PLAY
+        elif self.phase == Phase.PLAY:
             self.hands[self.seat].remove(action)
             self.trick.append((self.seat, action))
             if len(self.trick) < 4:
@@ -131,6 +147,8 @@ class HandState:
                 assert self.bid is not None and self.bidder is not None
                 team = self.bidder % 2
                 scoring_team = team if self.points[team] >= self.bid.target_points else 1 - team
-                self.result = HandResult(self.bidder, self.bid, self.trump,
+                self.result = HandResult(self.contract, self.trump,
                                          tuple(self.points), scoring_team,
                                          self.bid.value_in_marks)
+        else:
+            raise RuntimeError(f"No transition handler for phase {self.phase}")
