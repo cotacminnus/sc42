@@ -160,7 +160,7 @@ class HeuristicAgent:
             for suit in range(7)
         )
 
-        # Your proposed Follow Me rule.
+        # V1 deliberately prefers Follow Me when doubles dominate numbered suits.
         if doubles >= 3 and doubles > numbered_max:
             chosen = None
         else:
