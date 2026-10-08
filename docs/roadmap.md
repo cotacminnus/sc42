@@ -21,7 +21,7 @@ Step numbers match the team's live planning document.
 | 3 | Perfect-information oracle | Prototype only | planned `texas42/oracle.py` |
 | 4 | Common agent interface | Done | `agents/`: protocols, RandomAgent, AgentPlayer |
 | 5 | Baseline agents | V1 baselines done | HeuristicAgent, RandomAgent, ConservativeRandomAgent, HybridAgent; [phase ablations](policy_ablation.md) |
-| 6 | Self-play training | Not started | planned `research/` (PyTorch) |
+| 6 | Self-play training | Stage-1 PPO implemented | `research/ppo/`, [training guide](ppo_training.md) |
 | 7 | Hidden-information reasoning | Not started | planned `texas42/belief.py` |
 | 8 | Partnership behavior | Not started | uses the arena (step 11) |
 | 9 | Bidding | Not started | |
@@ -66,7 +66,7 @@ replay and incompatible versions. See [encoding.md](encoding.md) for APIs and
 JSONL collection examples. `validation.validate_episode()` checks complete schema-5
 episodes and distinguishes privileged verified replay from partial consistency
 validation without independently recorded deals. Collector failures abort the
-rollout until reset. No recurrent models or neural training are implemented.
+rollout until reset. Recurrent models remain future work; optional Stage-1 PPO now trains trick play.
 
 ### 3. Oracle (perfect-information solver)
 
@@ -118,7 +118,7 @@ Frozen Heuristic V1, conservative random bidding, and composable phase policies
 are implemented. HHH/HHR/HRR/CHH/CRR/RRR factories support reproducible duplicate
 hand and match experiments with independent per-phase RNG streams. See
 [policy_ablation.md](policy_ablation.md) for commands, methodology and limits.
-PIMC and learned policies remain future work.
+PIMC remains future work; Stage-1 PPO provides a learned trick-play baseline.
 
 - **Random:** choose uniformly from `legal_action_ids` (bids too).
 - **Heuristic:** bid on trump length, doubles, and counters; call the longest
@@ -130,6 +130,12 @@ PIMC and learned policies remain future work.
   Long et al. 2010).
 
 ### 6. Self-play training
+
+Implemented: masked hand-level PPO with heuristic bidding/trump, frozen HHH
+opponents, separate per-seat GAE, safe versioned checkpoints, deterministic CPU
+resumption, and arena evaluation. See [ppo_training.md](ppo_training.md).
+Joint phase training, recurrent policies, match PPO, and opponent pools remain
+future work. The following are possible extensions:
 
 - **Deep Monte Carlo** (DouZero): learn Q(state, action) from Monte Carlo hand
   returns, with ε-greedy exploration over legal IDs. Simple and stable; do it first.
@@ -182,7 +188,7 @@ and use official shaker rotation. Run `python -m examples.arena_benchmark`; see
 [arena.md](arena.md) for metric definitions, seed coupling, exports, and limits.
 Phase-wise baseline ablations now reuse this arena and its formatted reports.
 Next: held-out schedules, learned-checkpoint evaluation and
-cross-play matrices. Oracle execution/regret, model training, and advanced
+cross-play matrices. Oracle execution/regret, joint phase training, and advanced
 statistical testing remain future work.
 
 ## References
