@@ -66,6 +66,7 @@ class SelfPlayEnv:
                  ruleset_id: str = RULESET_ID,
                  collector: TrainingCollector | None = None) -> None:
         self._collector = collector
+        self._collection_failed = False
         self.ruleset_id = validate_ruleset(ruleset_id)
         if episode not in ("hand", "match"):
             raise ValueError("episode must be 'hand' or 'match'")
@@ -90,6 +91,7 @@ class SelfPlayEnv:
             raise ValueError("shaker must be a seat from 0 to 3")
         if seed is not None:
             self._rng.seed(seed)
+        self._collection_failed = False
         self._session = EpisodeState(self.episode, self.target_marks,
                                      self._rng.randrange(4) if shaker is None else shaker,
                                      self.ruleset_id)
@@ -109,6 +111,8 @@ class SelfPlayEnv:
 
     def observe(self) -> Observation:
         """Return the current actor's snapshot; unavailable outside an episode."""
+        if self._collection_failed:
+            raise RuntimeError("Collector failed; rollout aborted. Call reset(), do not retry the action")
         if self._session is None or self._session.terminated:
             raise RuntimeError("Call reset() before observing or stepping an episode")
         state = self._session.hand
@@ -118,6 +122,8 @@ class SelfPlayEnv:
 
     def step(self, action_id: int) -> StepResult:
         """Apply one legal global ID. Invalid actions leave state unchanged."""
+        if self._collection_failed:
+            raise RuntimeError("Collector failed; rollout aborted. Call reset(), do not retry the action")
         if self._session is None or self._session.terminated:
             raise RuntimeError("Call reset() before observing or stepping an episode")
         observation = self.observe() if self._collector is not None else None
@@ -125,7 +131,13 @@ class SelfPlayEnv:
         if self._collector is not None:
             # Record before auto-dealing: a terminal play belongs to the OLD
             # hand, even when step returns the next hand's first observation.
-            self._collector.record(observation, action_id, transition, self.match_marks)
+            try:
+                self._collector.record(observation, action_id, transition, self.match_marks)
+            except Exception:
+                # The engine has already advanced. Retrying could apply a second
+                # move (or duplicate a partly written record); abort, not rollback.
+                self._collection_failed = True
+                raise
         if self._session.needs_deal:
             # Native self-play samples chance automatically. The returned
             # observation is from the next hand, but hand_result is the old one.

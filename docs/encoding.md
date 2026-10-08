@@ -192,3 +192,44 @@ observations to ordinary policies. This is an API separation, not a sandbox
 against Python code that can inspect an environment. Labels are intended for
 future belief/oracle/critic training; those models are not implemented here.
 Generated `.jsonl` files and `logs/` remain gitignored.
+
+## Episode validation
+
+```python
+import json
+from texas42.validation import validate_episode, ValidationError
+
+with open("logs/labeled.jsonl") as source:
+    records = [json.loads(line) for line in source]
+result = validate_episode(records, episode="hand")  # or "match"
+print(result.status, result.records, result.hands, result.limitations)
+```
+
+Pass one complete, ordered episode, beginning with hand 1 and zero marks and
+ending at termination. Split multi-episode collector output by episode ID first.
+CLI logs have no episode ID and use `episode="match"`. The mode is required
+because schema 5 does not store the reward convention; the format is unchanged.
+Empty, truncated, reordered, or inconsistent episodes raise `ValidationError`
+with a record index. Input records are not mutated.
+
+`verified_replay` means every record has a privileged initial deal and agrees
+with `EpisodeState`/`HandState` replay: actor observations, legal IDs and masks,
+selected actions and decoded labels, chronological public history, contracts,
+hand results, marks, rewards, winner and termination. Repeated deal copies must
+agree. Private hand order is ignored because collection records ownership, not
+draw order; public decision and trick ordering remain exact.
+
+`partial` means some records have no privileged deal. For hands without any
+recorded deal, the validator reconstructs candidate ownership from the complete
+public play sequence and checks its consistency with observations and engine
+transitions. Supplied deals are still checked. This can catch legality, history,
+scoring and metadata errors but does not verify original ownership against an
+independently captured initial deal. A partial result must not be presented as
+verified replay. Neither status proves RNG provenance or dataset authenticity.
+The validator requires complete episodes; it does not certify partial rollouts.
+
+A collector sink exception aborts the current rollout: the original exception
+propagates, and subsequent `step()` and `observe()` calls fail until `reset()`.
+The action already advanced the engine and a sink may already have written
+part of its output. Do not retry that action or treat the unfinished episode
+as valid training data. There is no transactional rollback or deduplication.
