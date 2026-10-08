@@ -103,11 +103,11 @@ class HeuristicAgent:
         elif length == 6 and counters >= 5:
             desired = Bid(marks=2)
         elif length == 5 and counters >= 5:
-            desired = Bid(marks=1)
+            desired = Bid(marks=37)
         elif length == 6:
-            desired = Bid(points=39)
+            desired = Bid(points=37)
         elif length == 5:
-            desired = Bid(points=35)
+            desired = Bid(points=32)
         elif length == 4:
             desired = Bid(points=30)
         else:
