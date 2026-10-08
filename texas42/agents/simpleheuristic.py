@@ -1,3 +1,5 @@
+from dataclasses import replace
+
 from texas42.actions import ACTION_REGISTRY, PLAY_ACTIONS
 from texas42.models import Bid, Domino
 from texas42.phases import Phase
@@ -89,6 +91,16 @@ class HeuristicAgent:
 
     # ---------- Bidding ----------
 
+    def would_pass_if_allowed(self, obs) -> bool:
+        """Pure bidding diagnostic; does not change the actual legal action set."""
+        if obs.phase != Phase.BID:
+            raise ValueError('Expected a bidding observation')
+        pass_id = ACTION_REGISTRY.encode(Phase.BID, None)
+        ids = tuple(sorted(set(obs.legal_action_ids) | {pass_id}))
+        hypothetical = replace(obs, legal_action_ids=ids,
+                               action_mask=tuple(i in ids for i in range(len(obs.action_mask))))
+        return self._bid(hypothetical) == pass_id
+
     def _bid(self, obs):
         hand = self._hand(obs)
         best_suit = self._best_suit(hand)
@@ -151,20 +163,9 @@ class HeuristicAgent:
 
     def _trump(self, obs):
         hand = self._hand(obs)
-
-        doubles = sum(d.is_double for d in hand)
-        numbered_max = max(
-            len(self._suit_tiles(hand, suit))
-            for suit in range(7)
-        )
-
-        # V1 deliberately prefers Follow Me when doubles dominate numbered suits.
-        if doubles >= 3 and doubles > numbered_max:
-            chosen = None
-        else:
-            chosen = self._best_suit(hand)
-
+        chosen = self._best_suit(hand)
         return ACTION_REGISTRY.encode(Phase.TRUMP, chosen)
+
 
     # ---------- Playing ----------
 

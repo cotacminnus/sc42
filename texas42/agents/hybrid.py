@@ -54,6 +54,13 @@ class HybridAgent:
             raise ValueError('Unknown decision phase')
         return self._delegates[obs.phase].act(obs)
 
+    def would_pass_if_allowed(self, obs: Observation) -> bool | None:
+        """Delegate the optional diagnostic without sampling a random policy."""
+        if obs.phase != Phase.BID:
+            raise ValueError('Expected a bidding observation')
+        diagnostic = getattr(self._delegates[Phase.BID], 'would_pass_if_allowed', None)
+        return diagnostic(obs) if diagnostic is not None else None
+
 
 def variant_factory(variant: str):
     """Return an arena factory(seat, seed); the runner calls reset(seat)."""

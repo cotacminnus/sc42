@@ -223,3 +223,12 @@ Earlier success/failure reflects bid difficulty, deal and opposing policies as
 well as play. Timing alone cannot measure optimal play or prove that resources
 were wasted. The formula is explicitly limited to normal contracts; future
 special contracts with different winning conditions require separate diagnostics.
+
+Forced auction status and policy preference are distinct. `forced_bid` records
+that the winning bidder could not legally pass; the optional
+`would_pass_if_allowed` field records whether that policy would have passed if
+permitted. True means compelled, false means willing, and None means unavailable
+or not a forced call. The optional `BidPreference` protocol in `agents.base`
+requires a pure diagnostic that cannot consume randomness or update memory.
+See [policy_ablation.md](policy_ablation.md#policy-preference-in-a-forced-auction-slot)
+for reporting and examples.

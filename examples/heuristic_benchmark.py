@@ -40,6 +40,7 @@ def breakdown(report):
                  if h.seating[h.result.bidder] == policy]
         categories = {}
         origins = {}
+        preferences = {}
         thirty = {origin: {"successful": 0, "failed": 0}
                   for origin in ("forced", "voluntary")}
         for hand in hands:
@@ -49,6 +50,12 @@ def breakdown(report):
             outcome = 'successful' if hand.contract_success else 'failed'
             row[outcome] += 1
             origin = 'forced' if hand.forced_bid else 'voluntary'
+            if hand.forced_bid:
+                preference = ('unknown' if hand.would_pass_if_allowed is None else
+                              'would_pass' if hand.would_pass_if_allowed else 'would_bid')
+                counts = preferences.setdefault(category, {}).setdefault(
+                    preference, {'successful': 0, 'failed': 0})
+                counts[outcome] += 1
             origin_row = origins.setdefault(category, {}).setdefault(origin,
                 {'contracts': 0, 'successful': 0, 'failed': 0, 'signed_marks_sum': 0})
             origin_row['contracts'] += 1
@@ -69,6 +76,7 @@ def breakdown(report):
                                    for h in hands)),
             'contract_values': categories,
             'contract_origins': origins,
+            'forced_bid_preferences': preferences,
             'thirty_point_bids': thirty,
             'decision_timing': {
                 **timing_summary(hands),

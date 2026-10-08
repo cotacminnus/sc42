@@ -79,6 +79,8 @@ class HandEvaluation:
     forced_bid: bool = False
     # None supports older records and contracts with different winning conditions.
     contract_decided_at_trick: int | None = None
+    # Only queried for a forced auction call; None means unavailable/inapplicable.
+    would_pass_if_allowed: bool | None = None
 
     @property
     def contract_success(self) -> bool:
@@ -155,10 +157,18 @@ def run_game(factories: Sequence[AgentFactory], schedule: Sequence[Deal], *,
         state.deal([[PLAY_ACTIONS[value] for value in hand] for hand in deal.hands])
         decisions, bids = 0, [0] * 4
         bid_origins = {}
+        bid_preferences = {}
         decided_at = None
         while state.hand.result is None:
             obs = observation_from_view(state.hand.view())
             try:
+                preference = None
+                if obs.phase == 'bid' and obs.view.forced:
+                    diagnostic = getattr(agents[obs.seat], 'would_pass_if_allowed', None)
+                    if diagnostic is not None:
+                        preference = diagnostic(obs)
+                        if preference is not None and type(preference) is not bool:
+                            raise ValueError('Bid preference must be bool or None')
                 action_id = agents[obs.seat].act(obs)
                 if type(action_id) is not int or action_id not in obs.legal_action_ids:
                     raise ValueError(f"Illegal {obs.phase} action ID: {action_id!r}")
@@ -170,6 +180,7 @@ def run_game(factories: Sequence[AgentFactory], schedule: Sequence[Deal], *,
                 # Snapshot the engine flag before applying this call. Resolve by
                 # bidder AND bid so an overbid cannot inherit an earlier origin.
                 bid_origins[(obs.seat, ACTION_REGISTRY[action_id].value)] = obs.view.forced
+                bid_preferences[(obs.seat, ACTION_REGISTRY[action_id].value)] = preference
             completed_before = len(state.hand.completed)
             transition = state.apply(action_id)
             # Only completed tricks award points. Never inspect a next observation:
@@ -187,7 +198,9 @@ def run_game(factories: Sequence[AgentFactory], schedule: Sequence[Deal], *,
                                     decisions, tuple(bids), transition.rewards,
                                     forced_bid=bid_origins[(transition.hand_result.bidder,
                                                             transition.hand_result.bid)],
-                                    contract_decided_at_trick=decided_at))
+                                    contract_decided_at_trick=decided_at,
+                                    would_pass_if_allowed=bid_preferences[(transition.hand_result.bidder,
+                                                                          transition.hand_result.bid)]))
         if transition.terminated:
             winner = (transition.hand_result.scoring_team if episode == 'hand'
                       else transition.match_winner)

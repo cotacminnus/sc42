@@ -155,3 +155,25 @@ contracts, not all auction opportunities. The separate
 voluntary target-policy bid and replays BID/PASS from the same deal and prefix.
 It estimates paired acting-team mark differences under unchanged continuation
 policies; it does not replace ordinary duplicate-deal arena metrics.
+
+### Policy preference in a forced auction slot
+
+`forced_bid` continues to mean that passing was illegal for the resolved bidder.
+It does not mean that the policy wanted to pass. Evaluation now also records
+`would_pass_if_allowed`: `true` identifies an unwilling bidder (the current
+heuristic and conservative policies then take the minimum bid, 30), while
+`false` identifies a willing bidder who happens to occupy the last auction slot.
+A willing bidder can also choose 30; bid value alone cannot distinguish these cases.
+
+The shared benchmark table splits forced contracts by final bid value and policy
+preference, with successful and failed counts. Existing forced/voluntary tables
+retain their auction-rule meaning. JSON includes `forced_bid_preferences` and the
+per-hand preference field. `null` means unknown or inapplicable, not unwilling.
+
+Heuristic and conservative agents provide the optional, side-effect-free
+`would_pass_if_allowed(obs)` diagnostic; HybridAgent forwards its bidding
+policy's answer. Random and uninstrumented custom agents report unknown. The
+arena queries it before the decision, never calls `act` a second time, and does
+not change observations, legal actions, RNG streams, or game rules. Wrappers
+must forward the diagnostic to preserve this metadata. This describes the
+policy's preference, not whether bidding was objectively better than passing.

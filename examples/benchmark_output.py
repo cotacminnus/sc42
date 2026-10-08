@@ -106,4 +106,19 @@ def format_breakdown(details):
     lines.extend(['', 'Contract outcomes by bid origin', table(
         ('Policy', 'Bid', 'Origin', 'Contracts', 'Success', 'Failed', 'Success rate', 'Mean signed marks'),
         origin_rows)])
+    preference_rows = []
+    for policy, row in details.items():
+        for bid, groups in row.get('forced_bid_preferences', {}).items():
+            kind, value = bid.split(':')
+            for preference in ('would_pass', 'would_bid', 'unknown'):
+                counts = groups.get(preference, {'successful': 0, 'failed': 0})
+                total = sum(counts.values())
+                rate = f"{counts['successful'] / total:.1%}" if total else 'N/A'
+                preference_rows.append((policy, f'{value} {kind}', preference.replace('_', ' ').title(),
+                                        total, counts['successful'], counts['failed'], rate))
+    lines.extend(['', 'Policy preference when passing is unavailable', table(
+        ('Policy', 'Bid', 'Preference', 'Contracts', 'Success', 'Failed', 'Success rate'),
+        preference_rows),
+        'Would pass: compelled to bid. Would bid: willing bidder in a forced auction slot.',
+        'Unknown: policy does not report a preference; no extra random decision is sampled.'])
     return '\n'.join(lines)

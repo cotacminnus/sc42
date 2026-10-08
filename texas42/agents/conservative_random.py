@@ -38,3 +38,9 @@ class ConservativeRandomAgent:
         if obs.phase not in (Phase.TRUMP, Phase.PLAY):
             raise ValueError('Unknown decision phase')
         return self._rng.choice(obs.legal_action_ids)
+
+    def would_pass_if_allowed(self, obs: Observation) -> bool:
+        """Pure diagnostic: this policy always prefers passing in an auction."""
+        if obs.phase != Phase.BID:
+            raise ValueError('Expected a bidding observation')
+        return True

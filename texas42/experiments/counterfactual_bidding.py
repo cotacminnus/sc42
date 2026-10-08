@@ -129,6 +129,9 @@ def evaluate_hand(factories: Sequence[AgentFactory], deal: Deal, *, seating: tup
                     raise ValueError('Replay factories must create fresh agents')
                 retained_agents.append(delegate)
                 class RecordingAgent:
+                    def would_pass_if_allowed(self, obs):
+                        diagnostic = getattr(delegate, 'would_pass_if_allowed', None)
+                        return diagnostic(obs) if diagnostic is not None else None
                     def reset(self, assigned):
                         delegate.reset(assigned)
                     def act(self, obs):

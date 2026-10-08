@@ -82,17 +82,18 @@ class HeuristicTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             Bid(marks=37)
 
-    def test_trump_selection_numbered_follow_me_and_ties(self):
+    def test_trump_selection_numbered_doubles_and_ties(self):
         for suit in range(7):
             hand = tuple(Domino.make(suit, other) for other in range(7))
             self.assertEqual(self.choose(TrumpView(0, hand, Bid(points=30))), suit)
         hand = tiles('00 11 22 33 44 55 66')
         self.assertEqual(HeuristicAgent()._best_suit(hand), 'doubles')
-        self.assertIsNone(self.choose(TrumpView(0, hand, Bid(points=30))))
+        # Doubles compete directly; even seven doubles never select Follow Me.
+        self.assertEqual(self.choose(TrumpView(0, hand, Bid(points=30))), 'doubles')
         # Equal population, top rank, counters: enumeration order selects blanks.
         hand = tiles('60 61 20 21 30 31 54')
         self.assertEqual(self.choose(TrumpView(0, hand, Bid(points=30))), 0)
-        # Three doubles tied with a numbered suit: strict dominance is required.
+        # Equal population and top rank: doubles win on counter points.
         hand = tiles('66 55 44 60 61 32 10')
         self.assertEqual(self.choose(TrumpView(0, hand, Bid(points=30))), 'doubles')
 
@@ -144,6 +145,13 @@ class HeuristicTests(unittest.TestCase):
                 plays, chosen = self.play(hand, trick, trump, expected)
                 if expected in ('65', '60') and trick in ('64', '55'):
                     self.assertEqual(trick_winner(plays + ((0, chosen),), trump), 0)
+
+    def test_doubles_dominate_trump_selection(self):
+        hand = tiles("66 55 44 33 22 60 10")
+        self.assertEqual(
+            self.choose(TrumpView(0, hand, Bid(points=30))),
+            "doubles",
+        )
 
     def test_protocol_and_reset_errors(self):
         agent = HeuristicAgent()
