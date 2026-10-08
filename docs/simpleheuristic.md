@@ -9,7 +9,8 @@ that assignment across hands in a match. The heuristic has no RNG or learned sta
 
 ## Frozen V1 policy
 
-Choose the best suit among 0–6 and doubles by descending population, strongest
+Doubles compete directly with numbered suits 0–6 for both bidding and trump
+selection. Choose the best suit by descending population, strongest
 suit rank, then counter points within that suit. Exact ties favor earlier suits
 in that order. Doubles count as numbered trump when they contain its number.
 The desired opening bid is:
@@ -19,10 +20,9 @@ The desired opening bid is:
 | Seven trumps | Five marks |
 | Six trumps with at least five counter points | Two marks |
 | Five trumps with at least five counter points | 37 points |
-| Six trumps with fewer than five counter points | 37 points |
-| Five trumps with fewer than five counter points | 32 points |
-| Four trumps | 30 points |
-| Fewer than four trumps | Pass |
+| Six trumps with fewer than five counter points | 32 points |
+| Five trumps with fewer than five counter points | 30 points |
+| Four or fewer trumps | Pass |
 
 These are targets, subject to engine legality. Open with the largest legal bid
 at or below the target (so seven trumps opens at two marks, not five). When a bid
@@ -31,12 +31,14 @@ bid is at most two marks; subsequent mark bids increase by one. Pass when there 
 no affordable raise; if forced after three passes, choose the smallest legal bid.
 V1 treats a partner's existing bid like an opponent's bid.
 
-For trump selection, choose Follow Me when there are at least three doubles and
-more doubles than the population of any numbered suit. Otherwise choose the best
-suit defined above. Doubles trump is reachable when its population ties a numbered suit and its
-rank/counter tie-breakers win. For example, `66 55 44 60 61 32 10` ties doubles
+For trump selection, always choose the best suit defined above. This heuristic
+no longer selects Follow Me, even when doubles dominate the hand: seven doubles
+select doubles trump. Doubles can also win when their population ties a numbered
+suit and their rank/counter tie-breakers win. For example, `66 55 44 60 61 32 10` ties doubles
 and sixes at three tiles and the same top rank; the double-five counter selects
-doubles. All nine trump selections are covered by regression tests.
+doubles. Regression tests cover all seven numbered selections, doubles dominance,
+and deterministic ties. Follow Me remains legal in the engine, and the heuristic
+can still play a hand where another agent selected it.
 
 Trick priorities, always restricted to the engine's legal plays:
 

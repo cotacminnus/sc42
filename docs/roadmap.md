@@ -20,7 +20,7 @@ Step numbers match the team's live planning document.
 | — | OpenSpiel compatibility | Done | `openspiel.py`, [openspiel.md](openspiel.md) |
 | 3 | Perfect-information oracle | Prototype only | planned `texas42/oracle.py` |
 | 4 | Common agent interface | Done | `agents/`: protocols, RandomAgent, AgentPlayer |
-| 5 | Baseline agents | Random only | `agents.RandomAgent` (all legal bids); legacy `players.RandomPlayer` |
+| 5 | Baseline agents | V1 baselines done | HeuristicAgent, RandomAgent, ConservativeRandomAgent, HybridAgent; [phase ablations](policy_ablation.md) |
 | 6 | Self-play training | Not started | planned `research/` (PyTorch) |
 | 7 | Hidden-information reasoning | Not started | planned `texas42/belief.py` |
 | 8 | Partnership behavior | Not started | uses the arena (step 11) |
@@ -114,6 +114,12 @@ oracle execution remains a separate future path; see [arena.md](arena.md).
 
 ### 5. Baselines
 
+Frozen Heuristic V1, conservative random bidding, and composable phase policies
+are implemented. HHH/HHR/HRR/CHH/CRR/RRR factories support reproducible duplicate
+hand and match experiments with independent per-phase RNG streams. See
+[policy_ablation.md](policy_ablation.md) for commands, methodology and limits.
+PIMC and learned policies remain future work.
+
 - **Random:** choose uniformly from `legal_action_ids` (bids too).
 - **Heuristic:** bid on trump length, doubles, and counters; call the longest
   suit; lead trumps, give counters to a winning partner, otherwise play low.
@@ -174,7 +180,8 @@ schedules, duplicate partnerships, explicit seat permutations, policy-perspectiv
 metrics, and group-resampled 95% bootstrap intervals. Matches retain agent memory
 and use official shaker rotation. Run `python -m examples.arena_benchmark`; see
 [arena.md](arena.md) for metric definitions, seed coupling, exports, and limits.
-Next: heuristic baselines, held-out schedules, learned-checkpoint evaluation and
+Phase-wise baseline ablations now reuse this arena and its formatted reports.
+Next: held-out schedules, learned-checkpoint evaluation and
 cross-play matrices. Oracle execution/regret, model training, and advanced
 statistical testing remain future work.
 
@@ -232,3 +239,14 @@ Papers:
   Sampling in Game Tree Search" (AAAI 2010)
 - Frank & Basin, "Search in Games with Incomplete Information: A Case Study
   Using Bridge Card Play" (Artificial Intelligence, 1998)
+
+### Counterfactual bidding diagnostics
+
+Hand-mode BID/PASS replay experiments are available in
+`texas42/experiments/counterfactual_bidding.py`; see
+[counterfactual_bidding.md](counterfactual_bidding.md). First voluntary bids are
+compared under fixed continuation policies with exact BID-replay checks and
+duplicate-group bootstrap intervals. Broader opportunity sampling, repeated
+stochastic continuations, multiple interventions per group, and match-value
+experiments remain future work. Existing agents and ordinary arena metrics are
+unchanged.

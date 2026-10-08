@@ -21,6 +21,17 @@ class Agent(Protocol):
     def act(self, obs: Observation) -> int: ...
 
 
+class BidPreference(Protocol):
+    """Optional pure diagnostic, queried before act when passing is illegal.
+
+    True means the policy would pass if allowed; False means it would bid.
+    None means unknown. Must not change memory, consume RNG, or call act.
+    This is separate from Agent and from the engine's forced-auction flag.
+    """
+
+    def would_pass_if_allowed(self, obs: Observation) -> bool | None: ...
+
+
 @dataclass(frozen=True, slots=True)
 class PrivilegedState:
     """Remaining hands in absolute-seat order, using permanent domino IDs.

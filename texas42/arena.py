@@ -9,6 +9,7 @@ from typing import Callable, Sequence
 from .actions import ACTION_REGISTRY, PLAY_ACTIONS
 from .agents import Agent
 from .episodes import EpisodeState
+from .models import ContractKind
 from .selfplay import observation_from_view
 from .state import HandResult
 
@@ -74,6 +75,12 @@ class HandEvaluation:
     decisions: int
     bid_counts: tuple[int, int, int, int]
     rewards: tuple[int, int, int, int]
+    # Origin of the resolved contract, not the shaker identity or final value.
+    forced_bid: bool = False
+    # None supports older records and contracts with different winning conditions.
+    contract_decided_at_trick: int | None = None
+    # Only queried for a forced auction call; None means unavailable/inapplicable.
+    would_pass_if_allowed: bool | None = None
 
     @property
     def contract_success(self) -> bool:
@@ -101,6 +108,11 @@ class GameEvaluation:
 
 class AgentExecutionError(RuntimeError):
     """Factory/reset/decision failure with context; the failed game is abandoned."""
+
+
+def contract_decided(declaring_points: int, defending_points: int, target: int) -> bool:
+    """Normal-contract certainty from cumulative awarded points, after a trick."""
+    return declaring_points >= target or defending_points > 42 - target
 
 
 def run_game(factories: Sequence[AgentFactory], schedule: Sequence[Deal], *,
@@ -144,9 +156,19 @@ def run_game(factories: Sequence[AgentFactory], schedule: Sequence[Deal], *,
     for hand_index, deal in enumerate(schedule):
         state.deal([[PLAY_ACTIONS[value] for value in hand] for hand in deal.hands])
         decisions, bids = 0, [0] * 4
+        bid_origins = {}
+        bid_preferences = {}
+        decided_at = None
         while state.hand.result is None:
             obs = observation_from_view(state.hand.view())
             try:
+                preference = None
+                if obs.phase == 'bid' and obs.view.forced:
+                    diagnostic = getattr(agents[obs.seat], 'would_pass_if_allowed', None)
+                    if diagnostic is not None:
+                        preference = diagnostic(obs)
+                        if preference is not None and type(preference) is not bool:
+                            raise ValueError('Bid preference must be bool or None')
                 action_id = agents[obs.seat].act(obs)
                 if type(action_id) is not int or action_id not in obs.legal_action_ids:
                     raise ValueError(f"Illegal {obs.phase} action ID: {action_id!r}")
@@ -155,10 +177,30 @@ def run_game(factories: Sequence[AgentFactory], schedule: Sequence[Deal], *,
                     f"game={game_id} hand={hand_index} seat={obs.seat} phase={obs.phase}") from exc
             if obs.phase == 'bid' and ACTION_REGISTRY[action_id].value is not None:
                 bids[obs.seat] += 1
+                # Snapshot the engine flag before applying this call. Resolve by
+                # bidder AND bid so an overbid cannot inherit an earlier origin.
+                bid_origins[(obs.seat, ACTION_REGISTRY[action_id].value)] = obs.view.forced
+                bid_preferences[(obs.seat, ACTION_REGISTRY[action_id].value)] = preference
+            completed_before = len(state.hand.completed)
             transition = state.apply(action_id)
+            # Only completed tricks award points. Never inspect a next observation:
+            # the last trick may also have terminated the episode.
+            hand = state.hand
+            if decided_at is None and len(hand.completed) > completed_before:
+                contract = hand.contract
+                if contract.kind == ContractKind.NORMAL:
+                    team = contract.bidder % 2
+                    if contract_decided(hand.points[team], hand.points[1 - team],
+                                        contract.bid.target_points):
+                        decided_at = len(hand.completed)
             decisions += 1
         hands.append(HandEvaluation(deal.deal_id, seating, deal.shaker, transition.hand_result,
-                                    decisions, tuple(bids), transition.rewards))
+                                    decisions, tuple(bids), transition.rewards,
+                                    forced_bid=bid_origins[(transition.hand_result.bidder,
+                                                            transition.hand_result.bid)],
+                                    contract_decided_at_trick=decided_at,
+                                    would_pass_if_allowed=bid_preferences[(transition.hand_result.bidder,
+                                                                          transition.hand_result.bid)]))
         if transition.terminated:
             winner = (transition.hand_result.scoring_team if episode == 'hand'
                       else transition.match_winner)
