@@ -63,7 +63,10 @@ encoder. Opt-in `TrainingCollector` labels preserve the full initial deal
 outside observations, including across hand boundaries in match mode. Tests
 cover round trips, rotated-seat invariance, hidden-hand privacy, chronological
 replay and incompatible versions. See [encoding.md](encoding.md) for APIs and
-JSONL collection examples. No recurrent models or neural training are implemented.
+JSONL collection examples. `validation.validate_episode()` checks complete schema-5
+episodes and distinguishes privileged verified replay from partial consistency
+validation without independently recorded deals. Collector failures abort the
+rollout until reset. No recurrent models or neural training are implemented.
 
 ### 3. Oracle (perfect-information solver)
 

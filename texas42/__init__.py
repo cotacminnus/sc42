@@ -16,6 +16,7 @@ from .selfplay import Observation, SelfPlayEnv, StepResult
 from .serialization import (
     loads_observation, observation_from_dict, observation_from_record, training_view_from_dict,
 )
+from .validation import ValidationError, ValidationResult, validate_episode
 from .state import BID_ACTIONS, PLAY_ACTIONS, TRUMP_ACTIONS, HandResult
 from .training import (
     TrainingBidView, TrainingPlayView, TrainingTrumpView, TrainingView, upgrade_selfplay_record,
@@ -28,6 +29,7 @@ from .actions import (
 )
 
 __all__ = [
+    "ValidationError", "ValidationResult", "validate_episode",
     "TrainingCollector", "PRIVILEGED_DATA_VERSION", "PUBLIC_HISTORY_VERSION",
     "PublicEvent", "PublicHistory", "public_history", "loads_observation",
     "observation_from_dict", "observation_from_record", "training_view_from_dict",
