@@ -11,7 +11,8 @@ from .actions import ACTION_REGISTRY, BID_ACTIONS, PLAY_ACTIONS, TRUMP_ACTIONS, 
 from .models import AuctionCall, Bid, Contract, ContractKind, Domino, Trump
 from .rulesets import RULESET_ID, validate_ruleset
 from .players import BidView, PlayView, TrumpView
-from .rules import is_legal_bid, legal_plays, trick_points, trick_winner
+from .rules import legal_plays, trick_points, trick_winner
+from .legality import legal_action_ids
 
 
 # Re-export decoded tables for existing imports; permanent IDs live in actions.
@@ -106,17 +107,7 @@ class HandState:
         """Return sorted global IDs, with future declarations masked out."""
         if self.result is not None:
             return ()
-        if self.phase == "bid":
-            return tuple(entry.action_id for entry in ACTION_REGISTRY.implemented_for_phase("bid")
-                         if (not self.forced if entry.value is None
-                             else isinstance(entry.value, Bid)
-                             and (self.current_call is None or isinstance(self.current_call, Bid))
-                             and is_legal_bid(entry.value, self.current_call)))
-        if self.phase == "trump":
-            return tuple(entry.action_id for entry in ACTION_REGISTRY.implemented_for_phase("trump"))
-        if self.phase == Phase.PLAY:
-            return tuple(sorted(domino.id for domino in self.legal_dominoes()))
-        raise RuntimeError(f"No legality handler for phase {self.phase}")
+        return legal_action_ids(self.view())
 
     def apply(self, action_id: int) -> None:
         """Validate before mutating so rejected actions leave the state intact."""
