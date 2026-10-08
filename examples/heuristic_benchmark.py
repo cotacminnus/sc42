@@ -3,6 +3,9 @@ import argparse
 from collections import Counter
 import json
 from pathlib import Path
+from time import perf_counter
+
+from examples.benchmark_output import format_report, format_breakdown
 
 from texas42.agents import HeuristicAgent, RandomAgent
 from texas42.arena import compare_agents
@@ -51,24 +54,17 @@ def main(argv=None):
     parser.add_argument('--bootstrap-samples', type=int, default=2000)
     parser.add_argument('--output', type=Path)
     args = parser.parse_args(argv)
+    started = perf_counter()
     report = compare_agents(heuristic_factory,
                             random_factory if args.opponent == 'random' else heuristic_factory,
                             num_deals=args.deals, seed=args.seed, episode=args.episode,
                             target_marks=args.target_marks, bootstrap_seed=args.bootstrap_seed,
                             bootstrap_samples=args.bootstrap_samples)
-    print(f'A: Heuristic V1; B: {args.opponent}')
-    print(report.summary())
-    for metric in report.metrics:
-        def number(value):
-            return 'unavailable' if value is None else f'{value:.3f}'
-        print(f'{metric.policy}: contracts {metric.contracts_declared}; '
-              f'success rate {number(metric.contract_success_rate)}; '
-              f'mean contract value (marks) {number(metric.mean_contract_value)}; '
-              f'bidding frequency {number(metric.bidding_frequency)}')
-    if args.episode == 'match':
-        print(f'Average match length: {report.average_match_length:.3f} hands')
+    elapsed = perf_counter() - started
+    print(format_report(report, {'A': 'Heuristic V1',
+                                'B': 'Random' if args.opponent == 'random' else 'Heuristic V1'}, elapsed))
     details = breakdown(report)
-    print('Resolved-contract breakdown: ' + json.dumps(details, sort_keys=True))
+    print(format_breakdown(details))
     if args.opponent == 'heuristic':
         print('Identical deterministic policies: paired symmetry/integration check, not evidence of strength.')
     else:
@@ -79,6 +75,7 @@ def main(argv=None):
                              'episode': args.episode, 'target_marks': args.target_marks}
         data['breakdown'] = details
         args.output.write_text(json.dumps(data, indent=2) + '\n', encoding='utf-8')
+        print(f'JSON results saved to {args.output}')
     return report
 
 

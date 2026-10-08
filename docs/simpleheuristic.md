@@ -72,6 +72,12 @@ predetermined schedule and the two matches can terminate after different numbers
 of hands. Seed controls deals and random agents; bootstrap seed independently
 controls resampling. Heuristic factories accept but do not use the seed.
 
+Terminal output uses aligned tables rather than raw JSON. Runtime measures wall-clock
+time for evaluation plus bootstrap, excluding formatting and file export; games/s
+and decisions/s use that same duration. Compare timings using the same episode,
+bootstrap settings, hardware, and Python environment. Timing is displayed only,
+so exported results remain reproducible. `--output` still writes JSON for analysis.
+
 Output includes games/groups, policy win rates, signed marks per played hand,
 contracts declared, success rates, mean contract value **in marks**, bidding
 frequency (non-pass calls per controlled seat turn), and average match length.
