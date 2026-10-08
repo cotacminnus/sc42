@@ -19,8 +19,8 @@ Step numbers match the team's live planning document.
 | 2 | Self-play setup | Mostly done | `selfplay.py`, `training.py`, `encoding.py`, `serialization.py`, `history.py`, `collection.py` |
 | — | OpenSpiel compatibility | Done | `openspiel.py`, [openspiel.md](openspiel.md) |
 | 3 | Perfect-information oracle | Prototype only | planned `texas42/oracle.py` |
-| 4 | Common agent interface | Not started | `players.Player` exists for `Game` only |
-| 5 | Baseline agents | Random only | `players.RandomPlayer` |
+| 4 | Common agent interface | Done | `agents/`: protocols, RandomAgent, AgentPlayer |
+| 5 | Baseline agents | Random only | `agents.RandomAgent` (all legal bids); legacy `players.RandomPlayer` |
 | 6 | Self-play training | Not started | planned `research/` (PyTorch) |
 | 7 | Hidden-information reasoning | Not started | planned `texas42/belief.py` |
 | 8 | Partnership behavior | Not started | uses the arena (step 11) |
@@ -88,21 +88,30 @@ belief-consistent deals separately.
 
 ### 4. Common agent interface
 
-One protocol keyed by global action IDs, plus an adapter so any agent can sit in
-`engine.Game`:
+Implemented in `texas42/agents/`: ordinary `Agent.reset(seat)` and
+`Agent.act(Observation) -> int`, uniform `RandomAgent`, and `AgentPlayer` for
+`engine.Game`. `Player` retains its existing object-based decisions and gains
+a no-op episode reset hook. Shared pure legality and observation construction
+keep adapter inputs identical to native self-play inputs. The CLI's existing
+human/random player defaults remain unchanged.
 
-```python
-class Agent(Protocol):
-    def act(self, obs: Observation) -> int: ...      # an ID from obs.legal_action_ids
-    def reset(self, seat: int) -> None: ...
+Use four distinct agent instances, allowing shared weights but isolated private
+memory. Game resets once per match or standalone hand; native self-play runners
+reset agents once per `env.reset()`, never per hand within a match. RandomAgent
+continues its seeded RNG stream across resets. See the [README](../README.md#common-agents)
+and run `python -m examples.agent_selfplay` for a complete hand.
 
-class PrivilegedAgent(Agent, Protocol):              # oracle/teacher only
-    def act_privileged(self, obs: Observation, hands) -> int: ...
-```
+Custom heuristic, neural, PIMC and belief policies implement the ordinary
+protocol without depending on mutable engine state. Neural imports and training
+remain outside the core interface. A separate `PrivilegedAgent` protocol accepts
+an immutable `PrivilegedState` containing remaining hands; ordinary adapters
+never provide it. The oracle and its runner remain future work.
 
-`AgentPlayer(Player)` wraps an `Agent` and converts the chosen ID back with
-`ACTION_REGISTRY[id].value`. Keeping privileged access in a separate method
-prevents hidden information from leaking into ordinary agents.
+Next, the arena should accept factories for four per-seat agents, reset them at
+episode boundaries, and dispatch only the acting seat's observation. Use seeded
+seat/partnership rotations and shared deal schedules for reproducible paired
+comparisons, then aggregate scores with uncertainty. Keep oracle evaluation on
+an explicitly privileged path. No arena is implemented in this step.
 
 ### 5. Baselines
 

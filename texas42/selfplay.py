@@ -17,6 +17,8 @@ from .models import double_six_set
 from .episodes import EpisodeState
 from .state import HandResult, Phase
 from .training import TrainingView, training_view
+from .players import BidView, TrumpView, PlayView
+from .legality import legal_action_ids
 from .rulesets import RULESET_ID, validate_ruleset
 
 
@@ -33,6 +35,15 @@ class Observation:
     num_actions: int = NUM_ACTIONS
     feature_schema_version: int = FEATURE_SCHEMA_VERSION
     ruleset_id: str = RULESET_ID
+
+
+def observation_from_view(view: BidView | TrumpView | PlayView, *, ruleset_id: str = RULESET_ID) -> Observation:
+    """Build the same policy snapshot for native self-play, logging and adapters."""
+    validate_ruleset(ruleset_id)
+    phase = Phase.BID if isinstance(view, BidView) else Phase.TRUMP if isinstance(view, TrumpView) else Phase.PLAY
+    legal = legal_action_ids(view)
+    return Observation(view.seat, phase, training_view(view), legal,
+                       ACTION_REGISTRY.mask(legal), ruleset_id=ruleset_id)
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,9 +127,7 @@ class SelfPlayEnv:
         if self._session is None or self._session.terminated:
             raise RuntimeError("Call reset() before observing or stepping an episode")
         state = self._session.hand
-        legal = state.legal_action_ids()
-        return Observation(state.seat, state.phase, training_view(state.view()), legal,
-                           ACTION_REGISTRY.mask(legal), ruleset_id=self.ruleset_id)
+        return observation_from_view(state.view(), ruleset_id=self.ruleset_id)
 
     def step(self, action_id: int) -> StepResult:
         """Apply one legal global ID. Invalid actions leave state unchanged."""

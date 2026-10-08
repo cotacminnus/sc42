@@ -345,3 +345,107 @@ and macOS; on Windows, use WSL2. Training is not implemented yet; see the
 ## License
 
 [MIT](LICENSE).
+
+## Common agents
+
+`Agent` is the algorithm-facing protocol: `reset(seat)` and
+`act(obs: Observation) -> int`. Actions are exact Python integers in
+`obs.legal_action_ids` (global IDs 0–57). Reserved IDs 55–57 remain illegal.
+`Player` is the existing console interface with separate bid/trump/domino
+methods and object-based views. `AgentPlayer` adapts any ordinary agent to
+`Player`. Both native self-play and the adapter build observations through
+`selfplay.observation_from_view`, using shared pure legality in `legality.py`.
+
+`texas42/agents/base.py` defines `Agent`, `PrivilegedAgent`, and the immutable
+`PrivilegedState`; `random.py` provides `RandomAgent`; `adapters.py` provides
+`AgentPlayer`. These modules require no NumPy, PyTorch, or OpenSpiel.
+
+Run a complete native hand with:
+
+```bash
+python -m examples.agent_selfplay
+```
+
+The example uses four agent instances, one per seat:
+
+```python
+from texas42 import SelfPlayEnv
+from texas42.agents import RandomAgent
+
+agents = [RandomAgent(seed=seat) for seat in range(4)]
+env = SelfPlayEnv(seed=42)
+obs = env.reset()
+for seat, agent in enumerate(agents):
+    agent.reset(seat)
+while obs is not None:
+    action = agents[obs.seat].act(obs)
+    obs = env.step(action).observation
+```
+
+To use the same agents with the console engine:
+
+```python
+from texas42 import Game, GameConfig
+from texas42.agents import AgentPlayer, RandomAgent
+
+players = [AgentPlayer(f"Agent {seat}", RandomAgent(seed=seat)) for seat in range(4)]
+game = Game(players, GameConfig(seed=42, target_marks=3))
+game.play_match()
+```
+
+`RandomAgent` uniformly samples all legal IDs, including auction raises.
+The existing CLI `RandomPlayer` still normally passes; CLI defaults are unchanged.
+RandomAgent seeds its `random.Random` once at construction. `reset()` changes its
+seat assignment but continues its RNG stream. Construct a fresh agent with the
+same seed to reproduce the stream. Equal seeds and observation sequences give
+equal choices.
+
+### Custom policies and episode memory
+
+Implement `reset(seat)` and `act(obs)` on an ordinary class; inheritance from
+`Agent` is unnecessary. A minimal policy (not a competitive heuristic) is:
+
+```python
+class FirstLegalAgent:
+    def reset(self, seat):
+        self.seat = seat
+        self.memory = []
+
+    def act(self, obs):
+        assert obs.seat == self.seat
+        return obs.legal_action_ids[0]
+```
+
+A heuristic can inspect `obs.view`. A future neural policy can call
+`texas42.encoding.encode(obs)` and select a global ID using `obs.action_mask`.
+Convert tensor/NumPy scalar results with `int(...)` before returning. Keep model
+imports in your own optional policy module. Search, PIMC and belief agents use
+the same ordinary interface when acting on information available to their seat.
+No neural model, training code, heuristic AI or search implementation is included.
+
+Use a distinct agent instance for each seat, even if instances share model
+weights. Keep private memory per instance and clear it in `reset`. `Game` rejects
+multiple adapters wrapping the same agent object. `Game.play_match()` resets
+players once before the match; hand boundaries preserve agent memory. Each
+standalone `Game.play_hand()` call resets players once. These hooks do not reset
+Game's existing marks, RNG or shaker; use a fresh Game for a fresh match.
+`Player.reset(seat)` is an optional-to-override no-op for existing players.
+Direct adapter callers must reset it before asking for a decision.
+
+`SelfPlayEnv` does not own agents. Its runner calls every agent's reset after
+`env.reset()` and before the first decision, once per episode. In match mode,
+do not reset agents between hands. An aborted rollout requires a fresh episode
+and agent resets. Agents receive observations only, never mutable engine objects
+or other seats' hands. Agents are called only when their seat acts; a recurrent
+policy can inspect the existing chronological public history for intervening moves.
+
+### Privileged agents
+
+`PrivilegedAgent` defines a separate
+`act_privileged(obs, state: PrivilegedState) -> int` method, plus `reset(seat)`.
+`PrivilegedState.hands` contains immutable tuples of remaining domino IDs for
+all four absolute seats. Public context remains in `obs`. Only a future explicit
+oracle/teacher runner may supply this snapshot. `AgentPlayer` exclusively calls
+ordinary `act`; it never constructs or passes privileged state. There is no
+oracle or privileged runner yet, and no hidden fields have been added to
+`Observation` or training records.

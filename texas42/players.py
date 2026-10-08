@@ -1,8 +1,8 @@
 """Object-based player API used by engine.Game and the CLI.
 
 Decision views here hold Domino objects. Training code uses the equivalent
-integer-ID views from training.py instead. A shared ID-based Agent interface
-that works in both places is planned (docs/roadmap.md step 4).
+integer-ID views from training.py instead. The ID-based Agent interface
+uses AgentPlayer to work here as well (docs/roadmap.md step 4).
 """
 from __future__ import annotations
 
@@ -76,6 +76,9 @@ class Player(ABC):
 
     def __init__(self, name: str) -> None:
         self.name = name
+
+    def reset(self, seat: int) -> None:
+        """Episode-start hook; existing human/random players need no reset."""
 
     @abstractmethod
     def choose_bid(self, view: BidView) -> AuctionCall:

@@ -15,9 +15,8 @@ from .models import Bid, Domino, double_six_set, trump_name
 from .players import BidView, Player, TrumpView, format_hand
 from .rules import trick_points, trick_winner
 from .state import HandResult, HandState
-from .selfplay import Observation
+from .selfplay import observation_from_view
 from .history import public_history
-from .training import training_view
 from .rulesets import RULESET_ID, validate_ruleset
 
 
@@ -49,6 +48,7 @@ class Game:
         self.write = write
         self.log_state = log_state
         self._hand_number = 0
+        self._in_match = False
         self.rng = random.Random(self.config.seed)
         self.shaker = self.rng.randrange(4)
         self.marks = [0, 0]
@@ -60,6 +60,23 @@ class Game:
 
     def play_match(self) -> int:
         """Play to the configured mark target, rotating the shaker after each hand."""
+        self._reset_players()
+        self._in_match = True
+        try:
+            return self._play_match()
+        finally:
+            self._in_match = False
+
+    def _reset_players(self) -> None:
+        # Import at the runner boundary: core views/state never import agents.
+        from .agents import AgentPlayer
+        agents = [p.agent for p in self.players if isinstance(p, AgentPlayer)]
+        if len({id(agent) for agent in agents}) != len(agents):
+            raise ValueError("Use separate agent instances for each seat; weights may be shared")
+        for seat, player in enumerate(self.players):
+            player.reset(seat)
+
+    def _play_match(self) -> int:
         self.write("Texas 42 - you and Player 3 versus Players 2 and 4")
         self.write(f"{self.players[self.shaker].name} shakes first.")
         while max(self.marks) < self.config.target_marks:
@@ -72,6 +89,8 @@ class Game:
 
     def play_hand(self) -> HandResult:
         """Play seven tricks and update match marks without rotating the shaker."""
+        if not self._in_match:
+            self._reset_players()
         hands = self._deal()
         self._hand_number += 1
         self.write(f"\n--- New hand: {self.players[self.shaker].name} shakes ---")
@@ -109,9 +128,7 @@ class Game:
             if self.log_state is not None:
                 # Capture the actor's private snapshot BEFORE applying its move;
                 # the rest of this record describes the resulting transition.
-                legal = state.legal_action_ids()
-                observation = Observation(state.seat, state.phase, training_view(view), legal,
-                                          ACTION_REGISTRY.mask(legal), ruleset_id=self.config.ruleset_id)
+                observation = observation_from_view(view, ruleset_id=self.config.ruleset_id)
             state.apply(action_id)
             if self.log_state is not None:
                 # Marks are committed once below, after the hand finishes. Use a
