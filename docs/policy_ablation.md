@@ -74,8 +74,8 @@ won for frequencies; failure rate is one minus success rate when defined.
 Auctions won means contracts declared, not hands won: a failed declarer's
 opponent receives the marks. Mean contract value is in marks, including for
 point bids. A policy with no declared contracts has unavailable success rate
-and mean value, not zero. Bidding frequency includes forced bids. We do not
-record new action events for voluntary/forced/pass breakdowns.
+and mean value, not zero. Bidding frequency includes forced bids. Resolved 30-point contracts are also split by forced/voluntary origin below;
+intermediate auction calls and pass rates are not counted in that breakdown.
 
 Runtime measures evaluation plus bootstrap, excluding formatting and file export;
 throughput uses that duration. Compare performance only with comparable hardware,
@@ -104,3 +104,54 @@ seeds, larger held-out deal schedules, and stronger opponents before drawing
 strength conclusions. Do not tune V1 after seeing these results. Future learned
 agents can use the same interface and arena without changing rules or schemas;
 privileged oracle evaluation remains a separate future feature.
+
+## Forced versus voluntary 30-point contracts
+
+The shared benchmark table and JSON `thirty_point_bids` breakdown separate
+forced/voluntary successful/failed resolved 30-point contracts. A forced bid
+comes from the engine's `BidView.forced`: after three passes with no bid, the
+shaker must bid. This flag is captured before the action, then associated with
+the final winning bidder and bid. Each arena hand exports `forced_bid` for any
+contract value, including mandatory bids above 30. This is evaluation metadata;
+scoring results and training records are unchanged.
+
+A voluntary opening 30 and a mandatory 30 can reflect different hand selection
+and bidding opportunities. Separating them makes the aggregate contract success
+rate easier to interpret. Being the shaker alone is insufficient: the shaker
+may voluntarily raise a previous bidder. Intermediate overbid calls are excluded.
+Empty categories show N/A, not a zero success rate.
+
+These are observational success rates. They do not show whether passing, raising,
+or choosing another contract would have improved an individual hand: policies,
+hands, and subsequent decisions differ across the categories. No counterfactual
+or causal comparison follows from this breakdown alone.
+
+## When the contract becomes certain
+
+Both benchmark entry points report contract decision timing, assigned to the
+resolved declaring policy, with successful/failed and forced/voluntary groups.
+For normal target T the first completed trick with declarer points ≥ T or
+defender points > 42−T decides the contract. Mark bids target all 42 points.
+For example, 12 defender points do not defeat a 30 bid, but 13 do.
+
+Deciding a contract is different from completing the hand: every hand still
+plays all seven tricks and 33 decisions, with unchanged terminal scoring and
+rewards. Mean remaining tricks measures `7 - deciding trick`; multiply by four
+for subsequent domino plays. JSON adds `contract_decided_at_trick` per hand and
+`decision_timing` summaries/distributions in each policy's breakdown. Unknown
+legacy timings are excluded and empty means are N/A. See [arena.md](arena.md).
+
+These diagnostics describe normal contracts only. Earlier decisions may reflect
+bid difficulty or the deal, not better or worse trick play. They do not establish
+optimal resource use or a causal phase contribution, and must not be applied
+unchanged to future special contracts.
+
+## Bid versus pass interventions
+
+Resolved-contract origin reporting now covers all final bid values, including
+forced bids above 30, with declaring-team signed marks. It counts winning
+contracts, not all auction opportunities. The separate
+[counterfactual bidding experiment](counterfactual_bidding.md) selects the first
+voluntary target-policy bid and replays BID/PASS from the same deal and prefix.
+It estimates paired acting-team mark differences under unchanged continuation
+policies; it does not replace ordinary duplicate-deal arena metrics.

@@ -69,4 +69,41 @@ def format_breakdown(details):
         trumps = row['trumps']
         lines.append('Trump selections: ' + (', '.join(
             f'{trump}: {trumps[trump]}' for trump in sorted(trumps)) if trumps else 'none'))
+    origins = []
+    for policy, row in details.items():
+        for origin, counts in row['thirty_point_bids'].items():
+            total = counts['successful'] + counts['failed']
+            rate = f"{counts['successful'] / total:.1%}" if total else 'N/A'
+            origins.append((policy, origin.title(), counts['successful'], counts['failed'], rate))
+    lines.extend(['', '30-point contract outcomes', table(
+        ('Policy', 'Origin', 'Successful', 'Failed', 'Success rate'), origins)])
+    def timing_row(policy, group, data):
+        def mean(key):
+            return f"{data[key]:.3f}" if data[key] is not None else 'N/A'
+        return (policy, group, data['contracts'], mean('mean_decided_trick'),
+                mean('mean_remaining_tricks'))
+
+    timing_rows, distributions = [], []
+    for policy, row in details.items():
+        timing = row['decision_timing']
+        groups = [('All', timing), *timing['by_outcome'].items(), *timing['by_origin'].items()]
+        for group, data in groups:
+            timing_rows.append(timing_row(policy, group.title(), data))
+            distributions.append((policy, group.title(), *data['distribution'].values()))
+    lines.extend(['', 'Contract decision timing', table(
+        ('Policy', 'Group', 'Contracts', 'Mean decided trick', 'Mean remaining tricks'), timing_rows),
+        '', 'Decision timing by completed trick', table(
+            ('Policy', 'Group', *(f'Trick {i}' for i in range(1, 8))), distributions),
+        'Timing means exclude unavailable records; all seven tricks are still played.'])
+    origin_rows = []
+    for policy, row in details.items():
+        for bid, groups in row['contract_origins'].items():
+            kind, value = bid.split(':')
+            for origin, counts in groups.items():
+                origin_rows.append((policy, f'{value} {kind}', origin.title(), counts['contracts'],
+                    counts['successful'], counts['failed'], f"{counts['success_rate']:.1%}",
+                    f"{counts['mean_signed_marks']:.3f}"))
+    lines.extend(['', 'Contract outcomes by bid origin', table(
+        ('Policy', 'Bid', 'Origin', 'Contracts', 'Success', 'Failed', 'Success rate', 'Mean signed marks'),
+        origin_rows)])
     return '\n'.join(lines)

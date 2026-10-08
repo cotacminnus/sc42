@@ -58,8 +58,8 @@ class HeuristicTests(unittest.TestCase):
 
     def test_bidding_thresholds(self):
         expected = {'seven': Bid(marks=2), 'six_count': Bid(marks=2),
-                    'five_count': Bid(points=37), 'six_plain': Bid(points=37),
-                    'five_plain': Bid(points=32), 'four': Bid(points=30), 'weak': None}
+                    'five_count': Bid(points=37), 'six_plain': Bid(points=32),
+                    'five_plain': Bid(points=30), 'four': None, 'weak': None}
         for name, bid in expected.items():
             with self.subTest(name=name):
                 hand = tiles(HANDS[name])

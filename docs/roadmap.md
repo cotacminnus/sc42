@@ -239,3 +239,14 @@ Papers:
   Sampling in Game Tree Search" (AAAI 2010)
 - Frank & Basin, "Search in Games with Incomplete Information: A Case Study
   Using Bridge Card Play" (Artificial Intelligence, 1998)
+
+### Counterfactual bidding diagnostics
+
+Hand-mode BID/PASS replay experiments are available in
+`texas42/experiments/counterfactual_bidding.py`; see
+[counterfactual_bidding.md](counterfactual_bidding.md). First voluntary bids are
+compared under fixed continuation policies with exact BID-replay checks and
+duplicate-group bootstrap intervals. Broader opportunity sampling, repeated
+stochastic continuations, multiple interventions per group, and match-value
+experiments remain future work. Existing agents and ordinary arena metrics are
+unchanged.
