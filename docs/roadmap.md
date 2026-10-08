@@ -26,7 +26,7 @@ Step numbers match the team's live planning document.
 | 8 | Partnership behavior | Not started | uses the arena (step 11) |
 | 9 | Bidding | Not started | |
 | 10 | Special contracts (Nello) | IDs reserved | `actions.py` IDs 55–57 |
-| 11 | Evaluation | Not started | planned `texas42/arena.py` |
+| 11 | Evaluation | Done (ordinary agents) | `texas42/arena.py`, [arena.md](arena.md) |
 
 Recommended build order puts the evaluation tools before training, so every
 learned agent is measured on the same harness:
@@ -107,11 +107,10 @@ remain outside the core interface. A separate `PrivilegedAgent` protocol accepts
 an immutable `PrivilegedState` containing remaining hands; ordinary adapters
 never provide it. The oracle and its runner remain future work.
 
-Next, the arena should accept factories for four per-seat agents, reset them at
-episode boundaries, and dispatch only the acting seat's observation. Use seeded
-seat/partnership rotations and shared deal schedules for reproducible paired
-comparisons, then aggregate scores with uncertainty. Keep oracle evaluation on
-an explicitly privileged path. No arena is implemented in this step.
+The arena now accepts four per-seat factories, resets at episode boundaries,
+and dispatches only acting-seat observations. Predetermined duplicate schedules
+and paired bootstrap intervals support reproducible comparisons. Privileged
+oracle execution remains a separate future path; see [arena.md](arena.md).
 
 ### 5. Baselines
 
@@ -170,10 +169,14 @@ then mark the action implemented. See [action-space.md](action-space.md).
 
 ### 11. Evaluation
 
-Use duplicate deals: play each deal twice with partnerships swapped
-(`EpisodeState.deal()` accepts fixed hands). Report win rate, marks per hand,
-contract success rate, oracle regret, and bootstrap confidence intervals.
-Cross-play matrices serve step 8.
+Implemented: dependency-free hand/match execution, deterministic complete deal
+schedules, duplicate partnerships, explicit seat permutations, policy-perspective
+metrics, and group-resampled 95% bootstrap intervals. Matches retain agent memory
+and use official shaker rotation. Run `python -m examples.arena_benchmark`; see
+[arena.md](arena.md) for metric definitions, seed coupling, exports, and limits.
+Next: heuristic baselines, held-out schedules, learned-checkpoint evaluation and
+cross-play matrices. Oracle execution/regret, model training, and advanced
+statistical testing remain future work.
 
 ## References
 
