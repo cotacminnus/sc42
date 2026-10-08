@@ -16,6 +16,7 @@ from .players import BidView, Player, TrumpView, format_hand
 from .rules import trick_points, trick_winner
 from .state import HandResult, HandState
 from .selfplay import Observation
+from .history import public_history
 from .training import training_view
 from .rulesets import RULESET_ID, validate_ruleset
 
@@ -130,6 +131,7 @@ class Game:
                     "hand": self._hand_number,
                     "shaker": self.shaker,
                     "observation": asdict(observation),
+                    "public_history": asdict(public_history(observation.view)),
                     "action_id": action_id,
                     "action_key": ACTION_REGISTRY[action_id].key,
                     "action": action.id if isinstance(action, Domino) else

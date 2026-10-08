@@ -7,7 +7,7 @@ them into fixed-length feature vectors for neural networks.
 from copy import deepcopy
 from dataclasses import dataclass, field
 
-from .features import ENCODER_LAYOUT_VERSION, FEATURE_SCHEMA_VERSION
+from .features import ENCODER_LAYOUT_VERSION, FEATURE_SCHEMA_VERSION, PUBLIC_HISTORY_VERSION
 from .actions import (
     ACTION_REGISTRY, ACTION_SPACE_VERSION, NUM_ACTIONS, BID_ACTIONS,
     TRUMP_ACTIONS, PLAY_ACTIONS, legacy_action_id,
@@ -81,6 +81,7 @@ def training_metadata(ruleset_id: str = RULESET_ID) -> dict:
         "ruleset_id": validate_ruleset(ruleset_id),
         "feature_schema_version": FEATURE_SCHEMA_VERSION,
         "encoder_layout_version": ENCODER_LAYOUT_VERSION,
+        "public_history_version": PUBLIC_HISTORY_VERSION,
         "action_space_version": ACTION_SPACE_VERSION,
         "num_actions": NUM_ACTIONS,
         "action_manifest": ACTION_REGISTRY.manifest(),

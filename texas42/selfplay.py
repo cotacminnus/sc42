@@ -9,6 +9,7 @@ from __future__ import annotations
 import random
 from dataclasses import dataclass
 from typing import Literal
+from .collection import TrainingCollector
 from .features import FEATURE_SCHEMA_VERSION
 from .actions import ACTION_REGISTRY, ACTION_SPACE_VERSION, NUM_ACTIONS
 
@@ -55,11 +56,16 @@ class SelfPlayEnv:
     Hand episodes pay signed marks at hand end. Match episodes pay signed one
     only at match end. Each partnership receives identical rewards. reset(seed=N)
     restarts the random stream; reset() continues it. No players or I/O required.
+
+    An optional runner-owned collector records transitions. Full initial deals
+    require its explicit opt-in and never enter Observation or StepResult.
     """
 
     def __init__(self, *, episode: Literal["hand", "match"] = "hand",
                  target_marks: int = 7, seed: int | None = None,
-                 ruleset_id: str = RULESET_ID) -> None:
+                 ruleset_id: str = RULESET_ID,
+                 collector: TrainingCollector | None = None) -> None:
+        self._collector = collector
         self.ruleset_id = validate_ruleset(ruleset_id)
         if episode not in ("hand", "match"):
             raise ValueError("episode must be 'hand' or 'match'")
@@ -87,6 +93,8 @@ class SelfPlayEnv:
         self._session = EpisodeState(self.episode, self.target_marks,
                                      self._rng.randrange(4) if shaker is None else shaker,
                                      self.ruleset_id)
+        if self._collector is not None:
+            self._collector.begin_episode()
         self._deal()
         return self.observe()
 
@@ -95,6 +103,9 @@ class SelfPlayEnv:
         self._rng.shuffle(deck)
         hands = [deck[seat * 7:(seat + 1) * 7] for seat in range(4)]
         self._session.deal(hands)
+        if self._collector is not None:
+            self._collector.begin_hand(self.shaker,
+                                       hands if self._collector.include_initial_deal else None)
 
     def observe(self) -> Observation:
         """Return the current actor's snapshot; unavailable outside an episode."""
@@ -109,7 +120,12 @@ class SelfPlayEnv:
         """Apply one legal global ID. Invalid actions leave state unchanged."""
         if self._session is None or self._session.terminated:
             raise RuntimeError("Call reset() before observing or stepping an episode")
+        observation = self.observe() if self._collector is not None else None
         transition = self._session.apply(action_id)
+        if self._collector is not None:
+            # Record before auto-dealing: a terminal play belongs to the OLD
+            # hand, even when step returns the next hand's first observation.
+            self._collector.record(observation, action_id, transition, self.match_marks)
         if self._session.needs_deal:
             # Native self-play samples chance automatically. The returned
             # observation is from the next hand, but hand_result is the old one.

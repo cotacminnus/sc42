@@ -9,6 +9,7 @@ from pathlib import Path
 
 from texas42 import (
     ACTION_REGISTRY, RULESET_ID, SelfPlayEnv, upgrade_selfplay_record, BID_OFFSET, TRUMP_OFFSET,
+    observation_from_record,
 )
 from texas42.cli import main
 
@@ -27,6 +28,7 @@ class SelfPlayLogTests(unittest.TestCase):
         observation = env.reset()
         hand = 1
         for record in records:
+            self.assertEqual(observation_from_record(record), observation)
             self.assertEqual(record["schema_version"], 5)
             self.assertEqual(record["ruleset_id"], RULESET_ID)
             self.assertEqual(record["action_key"], ACTION_REGISTRY[record["action_id"]].key)

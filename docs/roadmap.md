@@ -16,7 +16,7 @@ Step numbers match the team's live planning document.
 | # | Step | Status | Where |
 | --- | --- | --- | --- |
 | 1 | Game engine | Done | `models.py`, `rules.py`, `state.py`, `engine.py` |
-| 2 | Self-play setup | Mostly done | `selfplay.py`, `training.py`, `encoding.py`, JSONL logs |
+| 2 | Self-play setup | Mostly done | `selfplay.py`, `training.py`, `encoding.py`, `serialization.py`, `history.py`, `collection.py` |
 | — | OpenSpiel compatibility | Done | `openspiel.py`, [openspiel.md](openspiel.md) |
 | 3 | Perfect-information oracle | Prototype only | planned `texas42/oracle.py` |
 | 4 | Common agent interface | Not started | `players.Player` exists for `Game` only |
@@ -41,9 +41,10 @@ learned agent is measured on the same harness:
 
 - `RandomPlayer` never bids, so `--all-ai` CLI logs are always a forced 30 by
   the shaker. Use `SelfPlayEnv` with random legal IDs for bidding data.
-- Logs record only the acting seat's view. Belief models (step 7) and oracle
-  labels (steps 3 and 9) need the full deal in a separate field that is never
-  part of `observation`.
+- Ordinary CLI logs contain only actor-visible observations and public history.
+  `TrainingCollector(include_initial_deal=True)` can separately record complete
+  initial deals for belief/oracle labels. Label generation and models remain
+  future work; ordinary policies receive only `Observation`.
 - OpenSpiel's `deal_counts` observer field is always zero (see the TODO in
   `openspiel.py`).
 - `pyspiel` wheels target Linux and macOS. On Windows, use WSL2; OpenSpiel tests
@@ -55,7 +56,14 @@ learned agent is measured on the same harness:
 
 `texas42/encoding.py` turns an `Observation` into a fixed-length list of floats,
 from the acting seat's point of view. See [encoding.md](encoding.md). Remaining
-work: parallel rollout collection (`multiprocessing`) and logging the true deal.
+work: parallel rollout collection (`multiprocessing`). Schema-5 JSONL loading
+now restores typed policy observations, and a separately versioned public
+history preserves action chronology without changing the 387-dimensional
+encoder. Opt-in `TrainingCollector` labels preserve the full initial deal
+outside observations, including across hand boundaries in match mode. Tests
+cover round trips, rotated-seat invariance, hidden-hand privacy, chronological
+replay and incompatible versions. See [encoding.md](encoding.md) for APIs and
+JSONL collection examples. No recurrent models or neural training are implemented.
 
 ### 3. Oracle (perfect-information solver)
 

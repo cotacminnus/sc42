@@ -91,11 +91,104 @@ not load a model trained on another version. It is separate from
 
 ## Not covered yet
 
-- **JSONL logs:** `encode` expects in-memory `Observation` objects. Logged
-  observations are JSON dicts (bids as `{"points": ..., "marks": ...}`). A
-  decoder from schema-5 records back to `Training*View` is the next step for
-  offline training.
-- **Sequence models:** the vector summarizes the current hand. An LSTM or
-  transformer over the ordered public history (as in DouZero) can be added as
-  a separate input without changing this layout.
+- **Sequence models:** chronological public history is available separately,
+  but recurrent models and neural training are not implemented.
 - **Previous hands:** match context is only the mark totals.
+
+## Offline JSONL observations
+
+`loads_observation(line)` loads the pre-action observation from a schema-5
+JSONL transition. `observation_from_record(record)` accepts an already parsed
+record; `observation_from_dict(record["observation"])` accepts its observation
+member. All return `Observation` with the appropriate `TrainingBidView`,
+`TrainingTrumpView`, or `TrainingPlayView`. `Phase`, `ContractKind`, `Contract`,
+`Bid`, `ContractDeclaration`, and nested tuples are restored without modifying
+the input. Trump values remain integers, `"doubles"`, or `None` (Follow Me).
+
+```python
+from texas42 import loads_observation
+from texas42.encoding import encode
+
+with open("logs/selfplay.jsonl") as source:
+    for line in source:
+        obs = loads_observation(line)
+        features = encode(obs)  # exactly the same 387 values as during rollout
+```
+
+The loader rejects incompatible record, feature, action-space, ruleset, and
+vocabulary versions, mismatched view phases, and inconsistent masks. Optional
+encoder, public-history, and privileged-label versions are also checked when
+present. Existing schema-5 CLI logs need no encoder or history field. Upgrade
+schema-2/3/4 records with `upgrade_selfplay_record()` before loading. This loader
+validates policy input structure and provenance, not the legality of an entire
+recorded game or its reward labels; replay the transitions for that purpose.
+
+## Lossless public history (version 1)
+
+`public_history(obs.view)` returns an immutable `PublicHistory`. Its `events`
+are chronological `PublicEvent(phase, seat, action_id)` entries: auction calls
+(including passes), then the chosen trump, then every played domino in trick
+order. Only decisions preceding the observation are included. At the trump
+view the trump action has not happened yet. Each four play events forms a
+completed trick; the last zero to three are the current trick. The sequence
+resets at hand boundaries. No draws, hidden hands, or prior hands are included.
+
+`PUBLIC_HISTORY_VERSION` versions this representation independently and is
+included in `training_metadata()`. It does not change `FEATURE_SCHEMA_VERSION`,
+`ENCODER_LAYOUT_VERSION`, action IDs, or `encode()` output. The 387-value vector
+summarizes played dominoes; this sequence preserves their full order for later
+research. No recurrent model is implemented.
+
+Seats are absolute for replay. `history.relative_events(obs.seat)` yields the
+same sequence with actor-relative seats, invariant under rotating all seats.
+Serialize with `dataclasses.asdict(history)` and restore with
+`PublicHistory.from_dict(data)`. CLI and collector records include this as a
+separate `public_history` field. Older schema-5 records can reconstruct it from
+the observation. To reconstruct the final hand, append the terminal record's
+`PublicEvent(obs.phase, obs.seat, record["action_id"])`; there is no terminal
+policy observation. Context such as shaker, marks and target remains in the
+record/observation, rather than being duplicated in each event.
+
+## Privileged collection
+
+`TrainingCollector` streams schema-5 transition dictionaries to a caller-owned
+sink. Its default records contain only policy observations, public history and
+transition labels. Full-deal labels require explicit opt-in:
+
+```python
+import json
+from texas42 import SelfPlayEnv, TrainingCollector
+
+with open("logs/labeled.jsonl", "w") as output:
+    collector = TrainingCollector(
+        lambda record: output.write(json.dumps(record) + "\n"),
+        include_initial_deal=True,
+    )
+    env = SelfPlayEnv(seed=0, collector=collector)
+    obs = env.reset()
+    while obs is not None:
+        # Replace with a policy accepting ONLY obs; this example picks the first legal ID.
+        action = obs.legal_action_ids[0]
+        obs = env.step(action).observation
+```
+
+Opted-in records add `privileged = {"version": 1, "initial_deal": ...}` outside
+`observation`. The deal contains four absolute-seat hands, each seven sorted
+permanent domino IDs. It captures original ownership, not remaining hands or
+meaningless draw order. It is repeated per transition so shuffled samples keep
+their labels. Episode and hand numbers are local to one collector; use a
+separate run identifier when combining workers' output.
+
+The terminal transition retains the old hand's deal even when match mode deals
+a new hand before returning. Reset starts a new numbered episode. Invalid
+actions emit no records. Sinks run synchronously after successful actions and
+before the next deal; sink errors propagate, so treat them as rollout failures
+rather than retrying the action. Use one collector per environment.
+
+`Observation`, its views, and `encode()` have no privileged field or collector
+reference. Offline observation loading also discards enclosing labels. Keep
+collectors and labeled records with the rollout/training runner and pass only
+observations to ordinary policies. This is an API separation, not a sandbox
+against Python code that can inspect an environment. Labels are intended for
+future belief/oracle/critic training; those models are not implemented here.
+Generated `.jsonl` files and `logs/` remain gitignored.
