@@ -4,15 +4,13 @@ from io import BytesIO
 import hashlib
 import os
 import torch
-from texas42.agents import HeuristicAgent
 from texas42.encoding import encode
 from texas42.selfplay import SelfPlayEnv
 from .buffer import Experience
 from .model import ActorCritic
-
-
-def stream_seed(seed, name, index=0):
-    return int.from_bytes(hashlib.sha256(f'{seed}:{name}:{index}'.encode()).digest()[:8], 'big') % (2**63)
+from .opponents import hand_agents
+from .seeds import stream_seed
+from time import perf_counter
 
 
 def snapshot(model):
@@ -29,15 +27,16 @@ def from_snapshot(weights, hidden_size):
 
 
 @torch.no_grad()
-def collect_hand(model, generator, seed, episode):
+def collect_hand(model, generator, seed, episode, opponent="HHH", performance=None):
     """One engine hand, with distinct terminal trajectories for the two learning seats."""
     device = next(model.parameters()).device
     team = (episode + seed) % 2
     env = SelfPlayEnv(episode='hand', seed=stream_seed(seed, 'deal', episode))
     obs = env.reset()
-    agents = [HeuristicAgent() for _ in range(4)]
-    for seat, agent in enumerate(agents):
-        agent.reset(seat)
+    construction_started = perf_counter()
+    agents = hand_agents(opponent, seed, episode, team)
+    construction_seconds = perf_counter() - construction_started
+    simulation_started = perf_counter()
     paths = {seat: [] for seat in range(4) if seat % 2 == team}
     decisions = 0
     while True:
@@ -62,7 +61,18 @@ def collect_hand(model, generator, seed, episode):
         if len(path) != 7:
             raise RuntimeError('Expected seven decisions per learning seat')
         path[-1] = replace(path[-1], reward=float(transition.rewards[seat]), done=True)
+    if performance is not None:
+        performance.update(agent_construction_seconds=construction_seconds,
+                           simulation_seconds=perf_counter() - simulation_started)
     return episode, tuple(tuple(path) for path in paths.values()), transition.rewards[team]
+
+
+def collect_episode(model, generator, seed, episode, opponents):
+    started = perf_counter()
+    opponent = opponents.choose(seed, episode)
+    performance = {'assignment_seconds': perf_counter() - started}
+    row = collect_hand(model, generator, seed, episode, opponent, performance)
+    return (*row, opponent, performance)
 
 
 _WORKER_MODEL = None
@@ -77,7 +87,7 @@ def initialize_worker():
 def collect_chunk(task):
     """Load each rollout snapshot once per process, then reuse it for full hands."""
     global _WORKER_MODEL, _WORKER_VERSION
-    weights, hidden_size, seed, indices = task
+    weights, hidden_size, seed, indices, opponents = task
     version = hashlib.sha256(weights).digest()
     if version != _WORKER_VERSION:
         _WORKER_MODEL = from_snapshot(weights, hidden_size)
@@ -86,7 +96,7 @@ def collect_chunk(task):
     for episode in indices:
         try:
             generator = torch.Generator().manual_seed(stream_seed(seed, 'parallel-episode-v1', episode))
-            results.append(collect_hand(_WORKER_MODEL, generator, seed, episode))
+            results.append(collect_episode(_WORKER_MODEL, generator, seed, episode, opponents))
         except Exception as exc:
             raise RuntimeError(f'PPO rollout episode={episode} worker_pid={os.getpid()}: {exc}') from exc
     return results, os.getpid()

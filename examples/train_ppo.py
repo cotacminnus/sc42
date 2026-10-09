@@ -1,4 +1,4 @@
-"""Train masked PPO trick play against frozen HHH using complete hand episodes."""
+"""Train masked PPO trick play against configured frozen variants using complete hand episodes."""
 from examples.experiment_output import record_output, add_output_arguments
 import argparse
 from dataclasses import asdict, fields
@@ -7,7 +7,9 @@ from pathlib import Path
 from time import perf_counter
 from research.ppo.trainer import Config, Trainer, stream_seed
 from research.ppo.checkpoint import save, resume, load_model
-from research.ppo.evaluation import evaluate
+from research.ppo.evaluation import evaluate_many
+from research.ppo.opponents import parse_opponents, evaluation_opponents, select_primary
+from texas42.agents import VARIANTS
 from texas42.parallel import resolve_workers
 
 
@@ -15,9 +17,19 @@ from texas42.parallel import resolve_workers
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     default = Config()
+    opponent_fields = ('train_opponents', 'eval_opponents', 'selection_opponent')
     for field in fields(Config):
+        if field.name in opponent_fields:
+            continue
         value = getattr(default, field.name)
         parser.add_argument('--' + field.name.replace('_', '-'), type=type(value), default=value)
+    training = parser.add_mutually_exclusive_group()
+    training.add_argument('--train-opponent', choices=VARIANTS)
+    training.add_argument('--train-opponents', help='NAME:WEIGHT,NAME:WEIGHT,...')
+    validation = parser.add_mutually_exclusive_group()
+    validation.add_argument('--eval-opponent', choices=VARIANTS)
+    validation.add_argument('--eval-opponents', help='Comma-separated opponent names')
+    parser.add_argument('--selection-opponent', choices=VARIANTS)
     parser.add_argument('--eval-threads', type=int, default=1,
                         help='Validation simulation workers, independent of rollout workers (0: auto)')
     parser.add_argument('--output-dir', type=Path, default=Path('runs/ppo-play-v1'))
@@ -28,7 +40,12 @@ def main(argv=None):
     args = parser.parse_args(argv)
     try:
         resolve_workers(args.eval_threads, args.eval_deals)
-        config = Config(**{f.name: getattr(args, f.name) for f in fields(Config)})
+        opponents = parse_opponents(args.train_opponents) if args.train_opponents is not None else ((args.train_opponent or 'HHH', '1'),)
+        eval_names = evaluation_opponents(tuple(n.strip() for n in args.eval_opponents.split(','))
+                         if args.eval_opponents is not None else (args.eval_opponent or 'HHH',))
+        primary = select_primary(eval_names, args.selection_opponent)
+        config = Config(**{f.name: getattr(args, f.name) for f in fields(Config) if f.name not in opponent_fields},
+                        train_opponents=opponents, eval_opponents=eval_names, selection_opponent=primary)
         trainer = Trainer(config)
         if args.resume:
             resume(args.resume, trainer)
@@ -55,7 +72,8 @@ def main(argv=None):
           f'PyTorch CPU threads: {config.torch_threads}\nParallel backend: {execution["backend"]}\n'
           f'Rollout sampling: {trainer.sampling_scheme}', flush=True)
     print(f'Validation workers: {resolve_workers(args.eval_threads, config.eval_deals)} (requested {args.eval_threads})', flush=True)
-    print('PPO trick-play training: heuristic auction/trump, neural partnership versus HHH', flush=True)
+    print(f'PPO trick-play training: heuristic auction/trump, neural partnership versus {trainer.opponents.describe()}', flush=True)
+    print(f'Evaluation opponents: {", ".join(config.eval_opponents)}; checkpoint selection: {config.selection_opponent}', flush=True)
     try:
         while trainer.hands < config.total_hands:
             update_started = perf_counter()
@@ -71,28 +89,41 @@ def main(argv=None):
                   f"KL {metrics['approx_kl']:.5f} clip {metrics['clip_fraction']:.3f} grad {metrics['gradient_norm']:.3f} | "
                   f"{row['hands_per_second']:.1f} hands/s", flush=True)
             row.update(execution=execution, worker_pids=trainer.worker_pids,
+                       episode_start=hands_before, episode_stop=trainer.hands,
+                       train_opponents=config.train_opponents, training_by_opponent=trainer.opponent_metrics,
+                       rollout_performance=trainer.rollout_performance, selection_opponent=config.selection_opponent,
                        collection_seconds=trainer.collection_seconds,
                        optimization_seconds=trainer.optimization_seconds,
                        evaluation_seconds=0.0, checkpoint_seconds=0.0,
                        collection_hands_per_second=(trainer.hands - hands_before) / trainer.collection_seconds,
                        collection_decisions_per_second=14 * (trainer.hands - hands_before) / trainer.collection_seconds)
+            for name, stats in trainer.opponent_metrics.items():
+                reward_text = f'{stats["mean_signed_reward"]:+.4f}' if stats['hands'] else 'N/A'
+                print(f'Train {name}: {stats["hands"]} hands, mean reward {reward_text}', flush=True)
             final = trainer.hands == config.total_hands
             if trainer.hands - trainer.last_eval >= config.eval_every_hands or final:
                 evaluation_started = perf_counter()
                 evaluation_performance = {}
-                report = evaluate(trainer.model, deals=config.eval_deals,
-                                  seed=stream_seed(config.seed, 'validation'),
+                reports = evaluate_many(trainer.model, opponents=config.eval_opponents,
+                                  deals=config.eval_deals, seed=stream_seed(config.seed, 'validation'),
                                   bootstrap_seed=stream_seed(config.seed, 'validation-bootstrap'),
                                   bootstrap_samples=config.bootstrap_samples, threads=args.eval_threads,
                                   performance=evaluation_performance)
                 row['evaluation_seconds'] = perf_counter() - evaluation_started
-                row['evaluation_performance'] = evaluation_performance
+                row['evaluation_performances'] = evaluation_performance
+                row['evaluations'] = {name: report.to_dict() for name, report in reports.items()}
+                report = reports[config.selection_opponent]
+                # Preserve legacy primary fields for existing analysis scripts.
+                row['evaluation_performance'] = evaluation_performance[config.selection_opponent]
+                row['evaluation'] = row['evaluations'][config.selection_opponent]
                 metric = report.metrics[0]
-                row['evaluation'] = report.to_dict()
                 trainer.last_eval = trainer.hands
-                print(f'Evaluation HHH: win {metric.win_rate:.1%}, signed marks {metric.mean_signed_marks:.4f}; '
-                      f'{config.eval_deals} duplicate groups', flush=True)
-                print(report.summary(), flush=True)
+                for name, outcome in reports.items():
+                    m = outcome.metrics[0]
+                    print(f'Evaluation {name}: win {m.win_rate:.1%}, signed marks {m.mean_signed_marks:.4f}; '
+                          f'{config.eval_deals} duplicate groups', flush=True)
+                    print(outcome.summary(), flush=True)
+                print(f'Checkpoint selection opponent: {config.selection_opponent}', flush=True)
                 if metric.mean_signed_marks > trainer.best_score:
                     trainer.best_score = metric.mean_signed_marks
                     checkpoint_started = perf_counter()

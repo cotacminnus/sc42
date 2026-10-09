@@ -2,7 +2,8 @@
 
 The optional `research/ppo` package trains a feed-forward actor/critic using only
 `encode(Observation)`. Bidding and trump selection remain the current heuristic
-for all four seats. Freezing these phases makes HHH the primary comparison for
+for the learning partnership. The opposing seats default to HHH and may use
+any existing phase variant or a weighted mixture. Freezing these phases makes HHH the primary comparison for
 trick-play quality and avoids uniform random overbidding confounding results.
 No changes are made to rules, actions, observations, or schema-5 records.
 
@@ -103,7 +104,8 @@ stopping skips a minibatch whose measured divergence already exceeds the limit.
 optimizer steps, losses, rewards, runtime/throughput, and full validation reports.
 `latest.pt` is saved at completed update boundaries after the configured hand
 interval and at completion. `best.pt` is selected strictly by mean signed marks
-against frozen HHH on a fixed validation schedule, never by training reward.
+against the designated selection opponent (default HHH) on a fixed validation
+schedule, never by training reward.
 Evaluation and save intervals can overshoot by up to a rollout because the policy
 is not updated mid-rollout. Evaluation also runs at final completion.
 
@@ -143,14 +145,14 @@ remains the bottleneck. Rollout records remain on CPU; minibatches move to devic
 
 ## Limits and next steps
 
-Stage 1 is hand-only, synchronous, feed-forward, against one frozen opponent.
-It may exploit that opponent, and its observation summary has no recurrent memory.
+Stage 1 is hand-only, synchronous and feed-forward, using fixed baseline variants
+or a distribution of them. It may exploit those continuation policies, and its observation summary has no recurrent memory.
 The critic is decentralized and sees the same public/private observation as the
 actor. Winning against HHH is an empirical question, not a smoke-test criterion.
 
 Future work can extend the same buffer to trump decisions, then bidding, then
-joint phase training with clearly defined returns and masks. Mixed-opponent or
-checkpoint-pool training would test generalization. Recurrent policies require
+joint phase training with clearly defined returns and masks. Historical neural
+checkpoint pools and true self-play remain future generalization experiments. Recurrent policies require
 sequence batching and memory isolation. Centralized privileged critics would
 require a separate explicit data path while retaining ordinary decentralized
 execution. Match-level returns need their own lifecycle and GAE design. None of
@@ -166,3 +168,141 @@ checkpoint migration, warm starts, exact resume rules, profiling, and benchmarks
 
 See [evaluation performance](evaluation_performance.md) for cached cluster bootstrap,
 independent `--eval-threads` validation workers, profiling, and readable log/CSV exports.
+
+
+## Configuring training and evaluation opponents
+
+All six frozen phase variants are supported: HHH, CHH, HHR, HRR, CRR and RRR.
+H denotes HeuristicAgent V1, C conservative bidding, and R uniform legal random
+choices. See [policy_ablation.md](policy_ablation.md) for their exact policies.
+Only the opposing partnership changes: PPO still controls play on its two seats,
+with heuristic bidding and trump selection. The learning partnership rotates by
+episode exactly as before. Rewards, per-seat GAE and PPO optimization are unchanged.
+
+Fixed HHH training is the default and retains its original agent construction and
+sampling behavior. Single-opponent and mixture arguments are mutually exclusive:
+
+```bash
+python -m examples.train_ppo --total-hands 524288 --train-opponent HHH \
+  --threads 8 --eval-threads 1 --output-dir runs/ppo-vs-hhh
+python -m examples.train_ppo --total-hands 524288 --train-opponent CHH \
+  --eval-opponent HHH --threads 8 --eval-threads 1 --output-dir runs/ppo-vs-chh
+python -m examples.train_ppo --total-hands 524288 --train-opponent HHR \
+  --eval-opponent HHH --threads 8 --output-dir runs/ppo-vs-random-play
+python -m examples.train_ppo --total-hands 524288 \
+  --train-opponents HHH:0.7,CHH:0.2,HHR:0.1 --eval-opponents HHH,CHH,HHR \
+  --selection-opponent HHH --threads 8 --eval-threads 1 --output-dir runs/ppo-mixed
+```
+
+Names must be registered and unique; weights must be finite and strictly positive.
+Weights need not sum to one: `HHH:7,CHH:2,HHR:1` is exactly equivalent to the
+last example. Pools are sorted by name and stored as normalized rational strings
+(e.g. `7/10`) to preserve exact configuration equivalence on checkpoint reload.
+The displayed probabilities are decimals. Empty pools and invalid entries fail
+before training. Each hand draws one identity for both opposing seats; it never
+switches within a hand. Realized proportions fluctuate.
+
+`OpponentPool` is an immutable, spawn-safe policy specification. Its dedicated
+`training-opponent-v1` stream depends only on training seed and episode index;
+seat-local baseline RNG seeds use `training-opponent-agent-v1`. Fixed pools skip
+sampling altogether. Deal, PPO action, minibatch and evaluation streams are
+independent. Different opponents can alter subsequent auctions, legal plays and
+action RNG consumption, but the initial deal for each episode stays identical.
+Episode-v1 trajectories and updates agree across worker counts on the same CPU
+numerical backend. Legacy-v1 retains its existing sequential action stream.
+
+Training against one policy and sampling from a policy distribution are different
+procedures. Validation against several policies yields separate labelled reports;
+it does not create a blended score. `--eval-opponent` and `--eval-opponents` are
+mutually exclusive. Validation uses the same duplicate-deal schedule and bootstrap
+seed for every opponent, independently of training. `--selection-opponent` must
+belong to that set; one opponent is automatically primary. With multiple opponents,
+HHH is primary by default when present; otherwise an explicit choice is required.
+`best.pt` still maximizes only that primary opponent's mean signed marks.
+
+Standalone evaluation retains its single-opponent interface and adds an optional
+multi-opponent mode:
+
+```bash
+python -m examples.evaluate_ppo --checkpoint runs/ppo-mixed/checkpoints/best.pt \
+  --opponents HHH,CHH,HHR --deals 2048 --threads 4 --seed 12345 \
+  --output runs/ppo-mixed/test.json --log-dir logs/experiments/ppo-mixed-test
+```
+
+Single-opponent JSON is unchanged. Multi-opponent JSON has `evaluations` and
+`breakdowns` keyed by name, plus the checkpoint identifier. Hand and metric CSVs
+include an opponent column. Training keeps existing primary `evaluation` and
+`evaluation_performance` progress fields and adds `evaluations` and
+`evaluation_performances` mappings. Per-update `training_by_opponent` records
+counts, reward sums and means (undefined when zero), alongside the overall reward.
+CSV columns expose these diagnostics, seeds, sample sizes, workers and selection
+opponent. `rollout_performance` separates opponent assignment, construction,
+simulation and main-process merging; worker times are sums, not additive wall
+phases. See [evaluation_performance.md](evaluation_performance.md) for log paths.
+
+### Checkpoint continuation and warm starts
+
+Old checkpoints without opponent fields migrate to HHH training, HHH validation
+and HHH selection. Their model, optimizer and saved RNG streams remain loadable.
+Exact resume requires the same canonical training mixture and validation/selection
+configuration. Changed distributions or selection criteria are rejected before
+restoring training state, preventing reuse of an incomparable `best_score`.
+Evaluation worker count remains an execution-only CLI option.
+
+```bash
+python -m examples.train_ppo --resume runs/ppo-mixed/checkpoints/latest.pt \
+  --total-hands 1048576 --train-opponents HHH:7,CHH:2,HHR:1 \
+  --eval-opponents HHH,CHH,HHR --selection-opponent HHH \
+  --threads 4 --eval-threads 1 --output-dir runs/ppo-mixed
+python -m examples.train_ppo --warm-start runs/ppo-play-v1/checkpoints/best.pt \
+  --total-hands 524288 --train-opponents HHH:0.5,CHH:0.3,HHR:0.2 \
+  --eval-opponents HHH,CHH,HHR --selection-opponent HHH \
+  --threads 8 --output-dir runs/ppo-mixed-warmstart
+```
+
+Match the remaining hyperparameters and sampling scheme for exact resume. A warm
+start copies only model weights into a new optimizer, counters and RNG streams;
+it is a new experiment. Neither mode changes older checkpoint files. These pools
+currently support registered baseline variants only; frozen learned opponents,
+historical snapshot pools and current-policy self-play remain future work.
+Performance against random agents, especially RRR's aggressive bidding, does not
+establish competitive strength. Validate on held-out seeds against fixed policies.
+
+Benchmark warmed collection with identical budgets, a warm-up update and several
+measured updates; no strength claims follow from this benchmark:
+
+```bash
+python -m examples.opponent_benchmark --workers 1 4 \
+  --hands-per-update 256 --updates 3 --output runs/opponent-performance.json
+```
+
+### Measured CPU smoke validation and throughput
+
+Four seed-42 smoke runs each completed 256 hands, 3,584 experiences and 14
+updates on four rollout workers, with separate HHH/CHH/HHR validation. The
+50/50 pool selected CHH for 138 hands and HHH for 118; the 70/20/10 pool
+selected CHH for 57, HHH for 172 and HHR for 27. These short runs verify
+integration and do not establish competitive strength. Older local HHH
+checkpoints loaded and resumed; the next hand matched the original collector
+exactly. Warm starting an older HHH network into mixed training and resuming
+a mixed run with changed worker counts were also exercised.
+
+Warmed throughput measurements used hidden size 256, seed 42, episode-v1,
+one warm-up update followed by three measured 256-hand updates. Each run
+trained 1,024 hands in total; the table covers the last 768.
+
+| Pool | 1 worker, hands/s | 4 workers, hands/s |
+|---|---:|---:|
+| HHH:1 | 199.8 | 671.8 |
+| CHH:1 | 203.2 | 612.6 |
+| HHH:1,CHH:1 | 194.0 | 643.0 |
+| HHH:7,CHH:2,HHR:1 | 188.1 | 627.1 |
+
+Mixed assignment cost about 33–37 microseconds per hand; fixed assignment
+about 1 microsecond. Agent construction ranged from about 5 microseconds for
+HHH to 46 for CHH. Main-process merging took 6.6–8.3 milliseconds over three
+measured updates. These are single-run measurements. Mixture assignment was
+less than 1% of summed hand simulation time; overall throughput differences
+also include different policies, game trajectories and measurement variability,
+so they cannot be attributed solely to configuration overhead. CPU simulations
+and PPO optimization remain the main work. No GPU performance claim is made.

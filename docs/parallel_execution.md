@@ -185,3 +185,22 @@ collection but did not minimize end-to-end time for this short workload. PPO
 optimization throughput stayed around 13,000 sample presentations/s. Parent peak
 RSS rose from 374 to 453 MiB over the whole benchmark; worker RSS and utilization
 were not measured. CUDA was unavailable, so no GPU speedup claim is made.
+
+
+## Opponent pools and validation
+
+PPO worker tasks now include a lightweight `OpponentPool` of canonical variant
+probabilities. Each episode chooses its opponent using a separate seed derived
+from the episode index; worker assignment cannot affect selection. Both opposing
+seats use that identity throughout the hand. The learning seats retain heuristic
+auction/trump and the frozen neural play snapshot. Every episode still returns
+14 experiences, with independent per-seat GAE and terminal engine marks.
+Default HHH collection consumes no additional random draws.
+
+Fixed and mixed pools work with legacy-v1 or episode-v1; comparison across worker
+counts requires episode-v1 as before. Checkpoints reject training-mixture or
+selection-criterion changes during exact resume. Normalized ratio equivalence is
+preserved. `--eval-threads` remains runtime-only. Multiple validation opponents
+share the same predetermined schedules and are reported separately; only the
+primary opponent determines `best.pt`. See [ppo_training.md](ppo_training.md)
+for mixture, validation, warm-start and resume commands.

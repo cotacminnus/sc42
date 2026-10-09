@@ -6,7 +6,8 @@ import numpy as np
 import torch
 from .buffer import RolloutBuffer
 from .model import ActorCritic
-from .rollout import stream_seed, collect_hand, collect_chunk, initialize_worker, snapshot, from_snapshot
+from .opponents import DEFAULT_OPPONENTS, OpponentPool, evaluation_opponents, select_primary
+from .rollout import stream_seed, collect_episode, collect_chunk, initialize_worker, snapshot, from_snapshot
 from texas42.parallel import OrderedPool, resolve_workers
 from time import perf_counter
 
@@ -36,8 +37,15 @@ class Config:
     threads: int = 1
     torch_threads: int = 1
     sampling_scheme: str = 'auto'
+    train_opponents: tuple = DEFAULT_OPPONENTS
+    eval_opponents: tuple = ('HHH',)
+    selection_opponent: str | None = None
 
     def __post_init__(self):
+        object.__setattr__(self, 'train_opponents', OpponentPool(self.train_opponents).probabilities)
+        names = evaluation_opponents(self.eval_opponents)
+        object.__setattr__(self, 'eval_opponents', names)
+        object.__setattr__(self, 'selection_opponent', select_primary(names, self.selection_opponent))
         for name in ('total_hands', 'rollout_play_steps', 'ppo_epochs', 'minibatch_size',
                      'hidden_size', 'eval_every_hands', 'eval_deals', 'checkpoint_every_hands',
                      'bootstrap_samples', 'torch_threads'):
@@ -101,6 +109,10 @@ class Trainer:
         self.pool = None
         self.collection_seconds = self.optimization_seconds = 0.0
         self.worker_pids = []
+        self.opponents = OpponentPool(config.train_opponents)
+        self.opponent_metrics = {}
+        self.opponent_assignments = []
+        self.rollout_performance = {}
 
     def execution_metadata(self):
         return dict(requested_workers=self.config.threads, resolved_workers=self.workers,
@@ -129,7 +141,7 @@ class Trainer:
         indices = tuple(range(self.hands, self.hands + count))
         self.model.eval()
         if self.sampling_scheme == 'legacy-v1':
-            results = [collect_hand(self.model, self.sampling, c.seed, i) for i in indices]
+            results = [collect_episode(self.model, self.sampling, c.seed, i, self.opponents) for i in indices]
             self.worker_pids = []
         else:
             self.synchronize()
@@ -140,8 +152,8 @@ class Trainer:
                 torch.set_num_threads(1)
                 try:
                     model = from_snapshot(weights, c.hidden_size)
-                    results = [collect_hand(model, torch.Generator().manual_seed(
-                        stream_seed(c.seed, 'parallel-episode-v1', i)), c.seed, i) for i in indices]
+                    results = [collect_episode(model, torch.Generator().manual_seed(
+                        stream_seed(c.seed, 'parallel-episode-v1', i)), c.seed, i, self.opponents) for i in indices]
                 finally:
                     torch.set_num_threads(previous_threads)
                 self.worker_pids = []
@@ -149,7 +161,7 @@ class Trainer:
                 if self.pool is None:
                     self.pool = OrderedPool(self.workers, initializer=initialize_worker)
                 size = math.ceil(count / self.workers)
-                tasks = [(weights, c.hidden_size, c.seed, indices[i:i + size])
+                tasks = [(weights, c.hidden_size, c.seed, indices[i:i + size], self.opponents)
                          for i in range(0, count, size)]
                 try:
                     chunks = self.pool.map(collect_chunk, tasks)
@@ -161,11 +173,24 @@ class Trainer:
         results.sort(key=lambda row: row[0])
         if [row[0] for row in results] != list(indices):
             raise RuntimeError('Rollout duplicated or omitted an episode')
+        merging_started = perf_counter()
         buffer, rewards = RolloutBuffer(), []
-        for _, paths, reward in results:
+        self.opponent_assignments = [(episode, opponent) for episode, _, _, opponent, _ in results]
+        self.opponent_metrics = {name: dict(hands=0, reward_sum=0.0, mean_signed_reward=None)
+                                 for name, _ in c.train_opponents}
+        self.rollout_performance = {key: sum(row[4][key] for row in results)
+                                    for key in ('assignment_seconds', 'agent_construction_seconds', 'simulation_seconds')}
+        for _, paths, reward, opponent, _ in results:
             for path in paths:
                 buffer.add_trajectory(path, c.gamma, c.gae_lambda)
             rewards.append(reward)
+            stats = self.opponent_metrics[opponent]
+            stats['hands'] += 1
+            stats['reward_sum'] += reward
+        for stats in self.opponent_metrics.values():
+            if stats['hands']:
+                stats['mean_signed_reward'] = stats['reward_sum'] / stats['hands']
+        self.rollout_performance['merging_seconds'] = perf_counter() - merging_started
         if len(buffer) != count * 14:
             raise RuntimeError('Incorrect Stage-1 rollout size')
         self.hands += count

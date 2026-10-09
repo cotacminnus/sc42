@@ -57,8 +57,56 @@ def training_rows(progress_rows, seed):
                 ci = interval[name]
                 for endpoint in ('low', 'high'):
                     row['evaluation_' + name + '_' + endpoint] = ci[endpoint] if ci else None
+        row['training_opponent_configuration'] = json.dumps(progress_row.get('train_opponents', [['HHH', '1']]), separators=(',', ':'))
+        for name, stats in progress_row.get('training_by_opponent', {}).items():
+            row[f'train_{name}_hands'] = stats['hands']
+            row[f'train_{name}_mean_signed_reward'] = stats['mean_signed_reward']
+        for name, report in progress_row.get('evaluations', {}).items():
+            metric, interval = report['metrics'][0], report['intervals'][0]
+            prefix = f'eval_{name}_'
+            for key in ('games_played', 'win_rate', 'mean_signed_marks', 'contract_success_rate', 'contracts_declared'):
+                row[prefix + key] = metric[key]
+            row[prefix + 'seed'] = report['seed']
+            row[prefix + 'bootstrap_seed'] = report['bootstrap_seed']
+            row[prefix + 'bootstrap_samples'] = report['bootstrap_samples']
+            row[prefix + 'workers'] = progress_row.get('evaluation_performances', {}).get(name, {}).get('workers')
+            for key in ('win_rate', 'mean_signed_marks'):
+                for endpoint in ('low', 'high'):
+                    row[prefix + key + '_' + endpoint] = interval[key][endpoint] if interval[key] else None
+        for key, value in progress_row.get('rollout_performance', {}).items():
+            row['rollout_' + key] = value
+        row['training_workers'] = progress_row.get('execution', {}).get('resolved_workers')
         rows.append(row)
     return rows
+
+
+def arena_export_rows(report):
+    rows = []
+    for game in report.games:
+        for index, hand in enumerate(game.hands, 1):
+            r = hand.result
+            rows.append(dict(experiment_seed=report.seed, bootstrap_seed=report.bootstrap_seed,
+                bootstrap_samples=report.bootstrap_samples, group_id=game.group_id, game_id=game.game_id,
+                deal_id=hand.deal_id, hand=index, seating='/'.join(hand.seating),
+                shaker=hand.shaker, bidder=r.bidder, declaring_policy=hand.seating[r.bidder],
+                bid_points=r.bid.points, bid_marks=r.bid.marks, trump=r.trump,
+                success=hand.contract_success, forced_bid=hand.forced_bid,
+                would_pass_if_allowed=hand.would_pass_if_allowed,
+                points_team_0=r.team_points[0], points_team_1=r.team_points[1],
+                scoring_team=r.scoring_team, marks_awarded=r.marks_awarded,
+                decisions=hand.decisions, contract_decided_at_trick=hand.contract_decided_at_trick))
+    metrics = []
+    for metric, interval in zip(report.metrics, report.intervals):
+        row = dict(vars(metric)) if hasattr(metric, '__dict__') else {
+            name: getattr(metric, name) for name in metric.__dataclass_fields__}
+        for name in ('win_rate', 'mean_signed_marks'):
+            ci = getattr(interval, name)
+            row[name + '_low'] = ci.low if ci else None
+            row[name + '_high'] = ci.high if ci else None
+        row.update(experiment_seed=report.seed, bootstrap_seed=report.bootstrap_seed,
+                   bootstrap_samples=report.bootstrap_samples)
+        metrics.append(row)
+    return rows, metrics
 
 
 def record_output(function):
@@ -107,31 +155,13 @@ def record_output(function):
                 progress_rows = ({k: v for k, v in json.loads(line).items()} for line in source)
                 rows = training_rows(progress_rows, config['seed'])
         elif hasattr(result, 'games'):
-            rows = []
-            for game in result.games:
-                for index, hand in enumerate(game.hands, 1):
-                    r = hand.result
-                    rows.append(dict(experiment_seed=result.seed, bootstrap_seed=result.bootstrap_seed,
-                        bootstrap_samples=result.bootstrap_samples, group_id=game.group_id, game_id=game.game_id,
-                        deal_id=hand.deal_id, hand=index, seating='/'.join(hand.seating),
-                        shaker=hand.shaker, bidder=r.bidder, declaring_policy=hand.seating[r.bidder],
-                        bid_points=r.bid.points, bid_marks=r.bid.marks, trump=r.trump,
-                        success=hand.contract_success, forced_bid=hand.forced_bid,
-                        would_pass_if_allowed=hand.would_pass_if_allowed,
-                        points_team_0=r.team_points[0], points_team_1=r.team_points[1],
-                        scoring_team=r.scoring_team, marks_awarded=r.marks_awarded,
-                        decisions=hand.decisions, contract_decided_at_trick=hand.contract_decided_at_trick))
-            metrics = []
-            for metric, interval in zip(result.metrics, result.intervals):
-                row = dict(vars(metric)) if hasattr(metric, '__dict__') else {
-                    name: getattr(metric, name) for name in metric.__dataclass_fields__}
-                for name in ('win_rate', 'mean_signed_marks'):
-                    ci = getattr(interval, name)
-                    row[name + '_low'] = ci.low if ci else None
-                    row[name + '_high'] = ci.high if ci else None
-                row.update(experiment_seed=result.seed, bootstrap_seed=result.bootstrap_seed,
-                           bootstrap_samples=result.bootstrap_samples)
-                metrics.append(row)
+            rows, metrics = arena_export_rows(result)
+        elif isinstance(result, dict) and all(hasattr(report, 'games') for report in result.values()):
+            rows, metrics = [], []
+            for opponent, report in result.items():
+                hand_rows, metric_rows = arena_export_rows(report)
+                rows.extend(dict(opponent=opponent, **row) for row in hand_rows)
+                metrics.extend(dict(opponent=opponent, **row) for row in metric_rows)
         elif isinstance(result, list):
             def flatten(row, prefix=''):
                 flat = {}
@@ -175,7 +205,7 @@ def record_output(function):
         labels = {
             'policy_ablation_benchmark': (option('--policy-a') or 'HHH', option('--policy-b') or 'CRR'),
             'heuristic_benchmark': ('heuristic_v1', option('--opponent') or 'random'),
-            'evaluate_ppo': ('PPO', option('--opponent') or 'HHH'),
+            'evaluate_ppo': ('PPO', option('--opponent') or option('--opponents') or 'HHH'),
             'arena_benchmark': ('Random', 'Random'),
         }.get(name)
         if labels:
@@ -185,9 +215,13 @@ def record_output(function):
                     context['checkpoint_id'] = hashlib.file_digest(source, 'sha256').hexdigest()
             for row in rows:
                 row.update(context)
+                if 'opponent' in row:
+                    row['policy_b'] = row['opponent']
             if metrics is not None:
                 for row in metrics:
-                    row.update(context, policy_name=labels[0 if row['policy'] == 'A' else 1])
+                    row.update(context, policy_name=labels[0] if row['policy'] == 'A' else row.get('opponent', labels[1]))
+                    if 'opponent' in row:
+                        row['policy_b'] = row['opponent']
         if metrics is not None:
             csv_rows(base.with_name(base.stem + '-metrics.csv'), metrics)
         csv_rows(csv_path, rows)
@@ -198,6 +232,11 @@ def record_output(function):
                        f'replicates: {result.bootstrap_samples}\n')
             if labels:
                 summary += f'A: {labels[0]}; B: {labels[1]}\n'
+        elif isinstance(result, dict):
+            summary = '\nFinal experiment summary\n' + '\n'.join(
+                f'Opponent {name}:\n{report.summary()}\nExperiment seed: {report.seed}; '
+                f'bootstrap seed: {report.bootstrap_seed}; replicates: {report.bootstrap_samples}'
+                for name, report in result.items()) + '\n'
         elif hasattr(result, 'hands') and not training:
             deltas = [h.intervention.delta_marks for h in result.hands if h.intervention is not None]
             mean = f'{sum(deltas) / len(deltas):.4f}' if deltas else 'N/A'

@@ -7,6 +7,7 @@ from texas42.agents.hybrid import variant_factory
 from texas42.arena import compare_agents
 from .agent import PPOAgent
 from .rollout import snapshot, from_snapshot
+from .opponents import evaluation_opponents
 
 
 @dataclass
@@ -30,24 +31,41 @@ class PPOFactory:
         return PPOAgent(self.model, seed=seed, greedy=True)
 
 
-def evaluate(model, *, opponent='HHH', deals=128, seed=12345, bootstrap_seed=0,
-             bootstrap_samples=200, threads=1, performance=None):
-    # Evaluation uses identical CPU numerical threading in sequential and worker
-    # paths. Restore the optimizer's main-process thread setting afterward.
+def evaluate_many(model, *, opponents=('HHH',), deals=128, seed=12345,
+                  bootstrap_seed=0, bootstrap_samples=200, threads=1, performance=None):
+    """Separate labelled reports on identical schedules, sharing one CPU snapshot."""
+    names = evaluation_opponents(opponents)
     previous_threads = torch.get_num_threads()
     if previous_threads != 1:
         torch.set_num_threads(1)
     started = perf_counter()
     try:
-        weights = snapshot(model)
+        factory = PPOFactory(snapshot(model), model.hidden_size)
         snapshot_seconds = perf_counter() - started
-        report = compare_agents(PPOFactory(weights, model.hidden_size), variant_factory(opponent),
-                              num_deals=deals, seed=seed, bootstrap_seed=bootstrap_seed,
-                              bootstrap_samples=bootstrap_samples, threads=threads, performance=performance)
-        if performance is not None:
-            performance.update(snapshot_seconds=snapshot_seconds,
-                               evaluation_total_seconds=perf_counter() - started)
-        return report
+        reports = {}
+        for opponent in names:
+            opponent_started = perf_counter()
+            telemetry = {}
+            reports[opponent] = compare_agents(factory, variant_factory(opponent),
+                num_deals=deals, seed=seed, bootstrap_seed=bootstrap_seed,
+                bootstrap_samples=bootstrap_samples, threads=threads, performance=telemetry)
+            telemetry.update(snapshot_seconds=snapshot_seconds,
+                             evaluation_total_seconds=perf_counter() - opponent_started)
+            if performance is not None:
+                performance[opponent] = telemetry
+        return reports
     finally:
         if previous_threads != 1:
             torch.set_num_threads(previous_threads)
+
+
+def evaluate(model, *, opponent='HHH', deals=128, seed=12345, bootstrap_seed=0,
+             bootstrap_samples=200, threads=1, performance=None):
+    """Compatible single-opponent API; ordinary agents still receive only observations."""
+    telemetry = {}
+    report = evaluate_many(model, opponents=(opponent,), deals=deals, seed=seed,
+                           bootstrap_seed=bootstrap_seed, bootstrap_samples=bootstrap_samples,
+                           threads=threads, performance=telemetry)[opponent]
+    if performance is not None:
+        performance.update(telemetry[opponent])
+    return report

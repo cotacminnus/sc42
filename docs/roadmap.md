@@ -131,11 +131,12 @@ PIMC remains future work; Stage-1 PPO provides a learned trick-play baseline.
 
 ### 6. Self-play training
 
-Implemented: masked hand-level PPO with heuristic bidding/trump, frozen HHH
-opponents, separate per-seat GAE, safe versioned checkpoints, deterministic CPU
+Implemented: masked hand-level PPO with heuristic bidding/trump, selectable frozen baseline variants or reproducible weighted mixtures, separate per-seat GAE, safe versioned checkpoints, deterministic CPU
 resumption, and arena evaluation. See [ppo_training.md](ppo_training.md).
-Joint phase training, recurrent policies, match PPO, and opponent pools remain
-future work. The following are possible extensions:
+Multi-opponent validation and an explicit primary checkpoint-selection policy are
+implemented, with backward-compatible HHH checkpoint migration. Joint phase
+training, recurrent policies, match PPO, learned-opponent pools and true self-play
+remain future work. The following are possible extensions:
 
 - **Deep Monte Carlo** (DouZero): learn Q(state, action) from Monte Carlo hand
   returns, with ε-greedy exploration over legal IDs. Simple and stable; do it first.
