@@ -1,8 +1,10 @@
 """Paired voluntary BID versus PASS experiments under fixed continuation policies."""
+from examples.experiment_output import record_output, add_output_arguments
 import argparse
 import json
 from pathlib import Path
 from time import perf_counter
+from texas42.parallel import execution_summary
 
 from examples.benchmark_output import table
 from texas42.agents import VARIANTS
@@ -41,6 +43,7 @@ def format_results(data, elapsed):
     return '\n'.join(lines)
 
 
+@record_output
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--policy-a', choices=VARIANTS, default='HHH')
@@ -53,13 +56,19 @@ def main(argv=None):
     parser.add_argument('--bootstrap-seed', type=int, default=0)
     parser.add_argument('--bootstrap-samples', type=int, default=2000)
     parser.add_argument('--output', type=Path)
+    parser.add_argument('--threads', type=int, default=1)
+    add_output_arguments(parser)
     args = parser.parse_args(argv)
     if args.episode != 'hand':
         parser.error('match episodes are not supported; this experiment estimates immediate hand marks')
+    try:
+        print(execution_summary(args.threads, args.deals))
+    except ValueError as exc:
+        parser.error(str(exc))
     started = perf_counter()
     report = compare_bidding(args.policy_a, args.policy_b, target_policy=args.target_policy,
         num_deals=args.deals, seed=args.seed, episode=args.episode, target_marks=args.target_marks,
-        bootstrap_seed=args.bootstrap_seed, bootstrap_samples=args.bootstrap_samples)
+        bootstrap_seed=args.bootstrap_seed, bootstrap_samples=args.bootstrap_samples, threads=args.threads)
     data = report.to_dict()
     print(format_results(data, perf_counter() - started))
     if args.output:

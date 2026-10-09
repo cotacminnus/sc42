@@ -219,19 +219,14 @@ class ArenaTests(unittest.TestCase):
         self.assertIsNone(bootstrap(report.games[:2], 'A').win_rate)
         self.assertIsNone(bootstrap([], 'A').win_rate)
         self.assertIsNone(bootstrap(report.games, 'missing', samples=5).win_rate)
-        observed_sizes = []
-        original = policy_metrics
-        def check(games, policy):
-            counts = {}
-            for game in games:
-                counts.setdefault(game.group_id, []).append(game)
-            for group in counts.values():
-                self.assertEqual(sum(g.seating[0] == 'A' for g in group), len(group) // 2)
-            observed_sizes.append(len(games))
-            return original(games, policy)
-        with patch('texas42.arena.policy_metrics', side_effect=check):
+        # Cached rows retain each complete two-game cluster. The repeated
+        # statistic no longer calls policy_metrics on allocated game lists.
+        from texas42.arena import group_statistics
+        groups = group_statistics(report.games, ('A', 'B'))
+        self.assertEqual(len(groups), 4)
+        self.assertTrue(all(row[0].win_count == row[1].win_count == 2 for row in groups))
+        with patch('texas42.arena.policy_metrics', side_effect=AssertionError('recomputed')):
             bootstrap(report.games, 'A', samples=12)
-        self.assertEqual(observed_sizes, [8] * 12)
 
     def test_explicit_seat_rotations_and_heterogeneous_partnerships(self):
         factories = (first_factory, random_factory, first_factory, random_factory)

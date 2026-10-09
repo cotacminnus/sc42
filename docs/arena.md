@@ -232,3 +232,15 @@ or not a forced call. The optional `BidPreference` protocol in `agents.base`
 requires a pure diagnostic that cannot consume randomness or update memory.
 See [policy_ablation.md](policy_ablation.md#policy-preference-in-a-forced-auction-slot)
 for reporting and examples.
+
+## Parallel execution
+
+`compare_agents(..., threads=N)` and the benchmark CLIs support ordered spawn
+workers at the complete duplicate-group level. Omitted/one stays sequential;
+zero selects a conservative automatic limit. Outcomes and bootstrap grouping do
+not change. Optional performance telemetry is separate from result serialization.
+See [parallel_execution.md](parallel_execution.md) for portable factories, worker
+limits, timing, and PPO/counterfactual integration.
+
+See [evaluation performance](evaluation_performance.md) for cached cluster bootstrap,
+independent `--eval-threads` validation workers, profiling, and readable log/CSV exports.
