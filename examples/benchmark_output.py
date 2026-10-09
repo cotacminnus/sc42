@@ -122,3 +122,12 @@ def format_breakdown(details):
         'Would pass: compelled to bid. Would bid: willing bidder in a forced auction slot.',
         'Unknown: policy does not report a preference; no extra random decision is sampled.'])
     return '\n'.join(lines)
+
+
+def format_performance(performance):
+    """Timing metadata is deliberately separate from deterministic outcome JSON."""
+    return (f"Requested threads: {performance['requested_workers']}\n"
+            f"Resolved simulation workers: {performance['workers']}\n"
+            f"Simulation: {performance['simulation_seconds']:.3f} s | "
+            f"Bootstrap/aggregation: {performance['bootstrap_seconds']:.3f} s | "
+            f"Total evaluation: {performance['total_seconds']:.3f} s")

@@ -1,19 +1,15 @@
-"""Single-process hand-level PPO; the policy is fixed throughout each rollout."""
-from dataclasses import asdict, dataclass, replace
-import hashlib
+"""Synchronized hand-level PPO; the policy is fixed throughout each rollout."""
+from dataclasses import dataclass
 import math
 import random
 import numpy as np
 import torch
-from texas42.agents import HeuristicAgent
-from texas42.encoding import encode
-from texas42.selfplay import SelfPlayEnv
-from .buffer import Experience, RolloutBuffer
+from .buffer import RolloutBuffer
 from .model import ActorCritic
+from .rollout import stream_seed, collect_hand, collect_chunk, initialize_worker, snapshot, from_snapshot
+from texas42.parallel import OrderedPool, resolve_workers
+from time import perf_counter
 
-
-def stream_seed(seed, name, index=0):
-    return int.from_bytes(hashlib.sha256(f'{seed}:{name}:{index}'.encode()).digest()[:8], 'big') % (2**63)
 
 
 @dataclass(frozen=True)
@@ -38,13 +34,20 @@ class Config:
     bootstrap_samples: int = 200
     target_kl: float = 0.0
     threads: int = 1
+    torch_threads: int = 1
+    sampling_scheme: str = 'auto'
 
     def __post_init__(self):
         for name in ('total_hands', 'rollout_play_steps', 'ppo_epochs', 'minibatch_size',
                      'hidden_size', 'eval_every_hands', 'eval_deals', 'checkpoint_every_hands',
-                     'bootstrap_samples', 'threads'):
+                     'bootstrap_samples', 'torch_threads'):
             if type(getattr(self, name)) is not int or getattr(self, name) <= 0:
                 raise ValueError(f'{name} must be a positive integer')
+        resolve_workers(self.threads)
+        if self.sampling_scheme not in ('auto', 'legacy-v1', 'episode-v1'):
+            raise ValueError('sampling_scheme must be auto, legacy-v1 or episode-v1')
+        if self.sampling_scheme == 'legacy-v1' and self.threads != 1:
+            raise ValueError('legacy-v1 sampling requires threads=1')
         for name in ('learning_rate', 'max_grad_norm', 'clip_epsilon'):
             if not math.isfinite(getattr(self, name)) or getattr(self, name) <= 0:
                 raise ValueError(f'{name} must be finite and positive')
@@ -72,7 +75,7 @@ def clipped_objective(log_probs, old_log_probs, advantages, epsilon):
 class Trainer:
     def __init__(self, config):
         self.config = config
-        torch.set_num_threads(config.threads)
+        torch.set_num_threads(config.torch_threads)
         random.seed(config.seed)
         np.random.seed(config.seed % 2**32)
         torch.manual_seed(config.seed)
@@ -91,52 +94,88 @@ class Trainer:
         self.hands = self.samples = self.updates = self.optimizer_steps = 0
         self.best_score = -float('inf')
         self.last_eval = self.last_checkpoint = 0
+        self.workers = resolve_workers(config.threads,
+                                       min(config.total_hands, math.ceil(config.rollout_play_steps / 14)))
+        self.sampling_scheme = (('legacy-v1' if config.threads == 1 else 'episode-v1')
+                                if config.sampling_scheme == 'auto' else config.sampling_scheme)
+        self.pool = None
+        self.collection_seconds = self.optimization_seconds = 0.0
+        self.worker_pids = []
+
+    def execution_metadata(self):
+        return dict(requested_workers=self.config.threads, resolved_workers=self.workers,
+                    backend='spawn' if self.workers > 1 else 'sequential',
+                    sampling_scheme=self.sampling_scheme, torch_threads=self.config.torch_threads)
+
+    def close(self):
+        if self.pool is not None:
+            self.pool.close()
+            self.pool = None
+
+    def __enter__(self): return self
+    def __exit__(self, *args): self.close()
+
+    def synchronize(self):
+        if self.device.type == 'cuda':
+            torch.cuda.synchronize(self.device)
 
     @torch.no_grad()
     def collect(self):
+        started = perf_counter()
         c = self.config
-        buffer, episode_rewards = RolloutBuffer(), []
+        count = min(math.ceil(c.rollout_play_steps / 14), c.total_hands - self.hands)
+        if count <= 0:
+            raise ValueError('Training hand budget exhausted')
+        indices = tuple(range(self.hands, self.hands + count))
         self.model.eval()
-        while len(buffer) < c.rollout_play_steps and self.hands < c.total_hands:
-            episode = self.hands
-            # Alternating partnerships balances both orientations without consuming RNG.
-            team = (episode + c.seed) % 2
-            env = SelfPlayEnv(episode='hand', seed=stream_seed(c.seed, 'deal', episode))
-            obs = env.reset()
-            agents = [HeuristicAgent() for _ in range(4)]
-            for seat, agent in enumerate(agents):
-                agent.reset(seat)
-            paths = {seat: [] for seat in range(4) if seat % 2 == team}
-            decisions = 0
-            while True:
-                if obs.phase == 'play' and obs.seat in paths:
-                    features = tuple(encode(obs))
-                    x = torch.tensor([features], dtype=torch.float32, device=self.device)
-                    mask = torch.tensor([obs.action_mask], dtype=torch.bool, device=self.device)
-                    action, log_prob, value = self.model.select(x, mask, generator=self.sampling)
-                    action = int(action.item())
-                    paths[obs.seat].append(Experience(features, obs.action_mask, action,
-                        float(log_prob.item()), float(value.item()), 0.0, False, obs.seat, episode))
-                else:
-                    action = agents[obs.seat].act(obs)
-                transition = env.step(action)
-                decisions += 1
-                if transition.terminated:
-                    break
-                obs = transition.observation
-            if decisions != 33 or sum(transition.hand_result.team_points) != 42:
-                raise RuntimeError('Incomplete normal hand')
-            for seat, path in paths.items():
-                if len(path) != 7:
-                    raise RuntimeError('Expected seven decisions per learning seat')
-                path[-1] = replace(path[-1], reward=float(transition.rewards[seat]), done=True)
+        if self.sampling_scheme == 'legacy-v1':
+            results = [collect_hand(self.model, self.sampling, c.seed, i) for i in indices]
+            self.worker_pids = []
+        else:
+            self.synchronize()
+            weights = snapshot(self.model)
+            if self.workers == 1:
+                # Same CPU inference/sampling as workers; restore the caller's thread count.
+                previous_threads = torch.get_num_threads()
+                torch.set_num_threads(1)
+                try:
+                    model = from_snapshot(weights, c.hidden_size)
+                    results = [collect_hand(model, torch.Generator().manual_seed(
+                        stream_seed(c.seed, 'parallel-episode-v1', i)), c.seed, i) for i in indices]
+                finally:
+                    torch.set_num_threads(previous_threads)
+                self.worker_pids = []
+            else:
+                if self.pool is None:
+                    self.pool = OrderedPool(self.workers, initializer=initialize_worker)
+                size = math.ceil(count / self.workers)
+                tasks = [(weights, c.hidden_size, c.seed, indices[i:i + size])
+                         for i in range(0, count, size)]
+                try:
+                    chunks = self.pool.map(collect_chunk, tasks)
+                except BaseException:
+                    self.close()
+                    raise
+                results = [row for rows, _ in chunks for row in rows]
+                self.worker_pids = sorted({pid for _, pid in chunks})
+        results.sort(key=lambda row: row[0])
+        if [row[0] for row in results] != list(indices):
+            raise RuntimeError('Rollout duplicated or omitted an episode')
+        buffer, rewards = RolloutBuffer(), []
+        for _, paths, reward in results:
+            for path in paths:
                 buffer.add_trajectory(path, c.gamma, c.gae_lambda)
-            episode_rewards.append(transition.rewards[team])
-            self.hands += 1
+            rewards.append(reward)
+        if len(buffer) != count * 14:
+            raise RuntimeError('Incorrect Stage-1 rollout size')
+        self.hands += count
         self.samples += len(buffer)
-        return buffer, sum(episode_rewards) / len(episode_rewards)
+        self.collection_seconds = perf_counter() - started
+        return buffer, sum(rewards) / count
 
     def update(self, buffer):
+        self.synchronize()
+        started = perf_counter()
         c = self.config
         data = buffer.tensors()
         adv = data['advantages']
@@ -178,4 +217,6 @@ class Trainer:
             raise RuntimeError('No PPO optimizer steps; old policy or KL configuration inconsistent')
         self.updates += 1
         buffer.clear()
+        self.synchronize()
+        self.optimization_seconds = perf_counter() - started
         return {k: v / weight for k, v in totals.items()}

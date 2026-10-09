@@ -3,6 +3,8 @@ import argparse
 import json
 from pathlib import Path
 from time import perf_counter
+from texas42.parallel import resolve_workers
+from examples.benchmark_output import format_performance
 
 from examples.benchmark_output import format_report, format_breakdown, table
 from examples.heuristic_benchmark import breakdown
@@ -21,13 +23,20 @@ def main(argv=None):
     parser.add_argument('--bootstrap-seed', type=int, default=0)
     parser.add_argument('--bootstrap-samples', type=int, default=2000)
     parser.add_argument('--output', type=Path)
+    parser.add_argument('--threads', type=int, default=1)
     args = parser.parse_args(argv)
+    try:
+        resolve_workers(args.threads, args.deals)
+    except ValueError as exc:
+        parser.error(str(exc))
+    performance = {}
     started = perf_counter()
     report = compare_agents(variant_factory(args.policy_a), variant_factory(args.policy_b),
                             num_deals=args.deals, seed=args.seed, episode=args.episode,
                             target_marks=args.target_marks, bootstrap_seed=args.bootstrap_seed,
-                            bootstrap_samples=args.bootstrap_samples)
+                            bootstrap_samples=args.bootstrap_samples, threads=args.threads, performance=performance)
     elapsed = perf_counter() - started
+    print(format_performance(performance))
     labels = {p: f'{v} (bid/trump/play: {"/".join(VARIANTS[v])})'
               for p, v in (('A', args.policy_a), ('B', args.policy_b))}
     print(format_report(report, labels, elapsed))

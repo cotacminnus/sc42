@@ -122,7 +122,8 @@ python -m examples.train_ppo --resume runs/ppo-play-v1/checkpoints/latest.pt \
   --total-hands 200000 --seed 42 --device auto --output-dir runs/ppo-play-v1
 ```
 
-Resume uses the same configuration except total hands/device selection, verifies
+Resume uses the same training configuration, with permitted execution changes described
+in [parallel_execution.md](parallel_execution.md), and verifies
 the resolved device type, and restores optimizer and RNG state. Exact continuation
 is tested at update boundaries. Extending a run whose last rollout was shortened
 by its total-hand budget changes the batching relative to an uninterrupted longer
@@ -132,7 +133,7 @@ sampling generator's device type.
 Deal seeds are derived from experiment seed and episode index, separately from
 sampling, minibatch and validation streams. Evaluation never trains and greedy
 inference does not consume training randomness. Strict CPU tests use deterministic
-PyTorch operations and one thread (`--threads` controls this). Sampling uses an
+PyTorch operations and one numerical thread (`--torch-threads` controls this). Sampling uses an
 explicit generator via
 [`torch.multinomial`](https://docs.pytorch.org/docs/stable/generated/torch.multinomial.html).
 Exact bitwise results across PyTorch versions, CUDA builds and GPU hardware are
@@ -142,7 +143,7 @@ remains the bottleneck. Rollout records remain on CPU; minibatches move to devic
 
 ## Limits and next steps
 
-Stage 1 is hand-only, single-process, feed-forward, against one frozen opponent.
+Stage 1 is hand-only, synchronous, feed-forward, against one frozen opponent.
 It may exploit that opponent, and its observation summary has no recurrent memory.
 The critic is decentralized and sees the same public/private observation as the
 actor. Winning against HHH is an empirical question, not a smoke-test criterion.
@@ -154,3 +155,11 @@ sequence batching and memory isolation. Centralized privileged critics would
 require a separate explicit data path while retaining ordinary decentralized
 execution. Match-level returns need their own lifecycle and GAE design. None of
 these extensions is implemented here.
+
+## Parallel simulation
+
+Use `--threads 0` for conservative auto-sized process collection, `--threads N`
+for up to N workers, and `--torch-threads 1` for main-process numerical threads.
+The sequential default preserves legacy sampling; parallel runs use versioned
+per-episode CPU sampling. See [parallel_execution.md](parallel_execution.md) for
+checkpoint migration, warm starts, exact resume rules, profiling, and benchmarks.

@@ -55,8 +55,8 @@ learned agent is measured on the same harness:
 ### 2. Self-play setup: feature encoder
 
 `texas42/encoding.py` turns an `Observation` into a fixed-length list of floats,
-from the acting seat's point of view. See [encoding.md](encoding.md). Remaining
-work: parallel rollout collection (`multiprocessing`). Schema-5 JSONL loading
+from the acting seat's point of view. See [encoding.md](encoding.md). Parallel rollout collection now uses bounded spawn workers; see
+[parallel_execution.md](parallel_execution.md). Schema-5 JSONL loading
 now restores typed policy observations, and a separately versioned public
 history preserves action chronology without changing the 387-dimensional
 encoder. Opt-in `TrainingCollector` labels preserve the full initial deal
@@ -256,3 +256,12 @@ duplicate-group bootstrap intervals. Broader opportunity sampling, repeated
 stochastic continuations, multiple interventions per group, and match-value
 experiments remain future work. Existing agents and ordinary arena metrics are
 unchanged.
+
+### Shared parallel execution
+
+`texas42.parallel` provides CPU-aware worker resolution and bounded ordered spawn
+pools. Arena/counterfactual duplicate groups and frozen CPU PPO rollouts support
+`--threads`, with deterministic merging, separate PyTorch thread controls, and
+explicit legacy/episode-seeded checkpoint rules. Centralized batched inference,
+asynchronous training and distributed multi-host execution remain future work.
+See [parallel_execution.md](parallel_execution.md) for scaling measurements.

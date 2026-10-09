@@ -1,5 +1,6 @@
 """Phase composition of frozen policies, with isolated per-phase RNG streams."""
 import random
+from dataclasses import dataclass
 from types import MappingProxyType
 
 from ..phases import Phase
@@ -62,13 +63,17 @@ class HybridAgent:
         return diagnostic(obs) if diagnostic is not None else None
 
 
+@dataclass(frozen=True)
+class VariantFactory:
+    """Portable factory specification; agents remain independent per seat."""
+    variant: str
+
+    def __call__(self, seat: int, seed: int) -> HybridAgent:
+        return HybridAgent(*VARIANTS[self.variant], seed=seed)
+
+
 def variant_factory(variant: str):
-    """Return an arena factory(seat, seed); the runner calls reset(seat)."""
+    """Return a picklable arena factory; the runner calls reset(seat)."""
     if variant not in VARIANTS:
         raise ValueError(f'Unknown policy variant: {variant}')
-    bidding, trump, playing = VARIANTS[variant]
-
-    def create(seat: int, seed: int) -> HybridAgent:
-        return HybridAgent(bidding, trump, playing, seed=seed)
-
-    return create
+    return VariantFactory(variant)

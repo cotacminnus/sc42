@@ -4,6 +4,8 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 import hashlib
 import random
+from time import perf_counter
+from .parallel import OrderedPool, resolve_workers
 from typing import Callable, Sequence
 
 from .actions import ACTION_REGISTRY, PLAY_ACTIONS
@@ -337,33 +339,73 @@ class ArenaReport:
         return '\n'.join(lines)
 
 
+_GROUP_POLICIES = None
+
+
+def _prepare_policies(policies):
+    for factory in policies:
+        prepare = getattr(factory, 'prepare', None)
+        if prepare is not None:
+            prepare()
+    return policies
+
+
+def _initialize_groups(policies):
+    global _GROUP_POLICIES
+    _GROUP_POLICIES = _prepare_policies(policies)
+
+
+def _evaluate_group(spec, policies=None):
+    index, seed, episode, target_marks = spec
+    policy_a, policy_b = policies if policies is not None else _GROUP_POLICIES
+    schedule = generate_schedule(1 if episode == 'hand' else 2 * target_marks - 1,
+                                 _seed(seed, 'schedule', index), shaker=index % 4)
+    group = f'{index}:{schedule[0].deal_id}'
+    games = []
+    for labels, factories in ((('A', 'B', 'A', 'B'), (policy_a, policy_b) * 2),
+                              (('B', 'A', 'B', 'A'), (policy_b, policy_a) * 2)):
+        games.append(run_game(factories, schedule, seating=labels,
+                              seed=_seed(seed, 'episode', index), episode=episode,
+                              target_marks=target_marks, game_id=f'{index}:{labels[0]}', group_id=group))
+    return index, tuple(games)
+
+
 def compare_agents(policy_a: AgentFactory, policy_b: AgentFactory, *, num_deals: int = 100,
                    seed: int = 42, episode: str = 'hand', target_marks: int = 7,
-                   bootstrap_seed: int = 0, bootstrap_samples: int = 2000) -> ArenaReport:
-    """A/B homogeneous partnerships, swapped on every fixed absolute-seat schedule.
+                   bootstrap_seed: int = 0, bootstrap_samples: int = 2000,
+                   threads: int = 1, performance: dict | None = None) -> ArenaReport:
+    """Paired absolute-seat schedules; parallel units are complete duplicate groups.
 
-    In match mode num_deals counts paired match schedules, not individual hands.
-    Agent streams are matched by absolute seat within a pair, never by policy.
+    Outcome/report serialization is independent of workers and timings. Optional
+    performance receives wall-clock telemetry separately. Non-picklable factories
+    remain supported sequentially; spawned execution requires portable factories.
     """
+    started = perf_counter()
     _positive(num_deals, 'num_deals')
     _positive(target_marks, 'target_marks')
     _positive(bootstrap_samples, 'bootstrap_samples')
     if episode not in ('hand', 'match'):
         raise ValueError('episode must be hand or match')
     _seed(bootstrap_seed)
-    schedules = tuple(generate_schedule(1 if episode == 'hand' else 2 * target_marks - 1,
-                                       _seed(seed, 'schedule', i), shaker=i % 4)
-                      for i in range(num_deals))
-    games = []
-    for index, schedule in enumerate(schedules):
-        group = f'{index}:{schedule[0].deal_id}'
-        for labels, factories in ((('A', 'B', 'A', 'B'), (policy_a, policy_b, policy_a, policy_b)),
-                                  (('B', 'A', 'B', 'A'), (policy_b, policy_a, policy_b, policy_a))):
-            games.append(run_game(factories, schedule, seating=labels,
-                                  seed=_seed(seed, 'episode', index), episode=episode,
-                                  target_marks=target_marks, game_id=f'{index}:{labels[0]}', group_id=group))
-    games = tuple(games)
-    return ArenaReport(seed, bootstrap_seed, bootstrap_samples, games,
+    workers = resolve_workers(threads, num_deals)
+    specs = [(i, seed, episode, target_marks) for i in range(num_deals)]
+    policies = (policy_a, policy_b)
+    if workers == 1:
+        _prepare_policies(policies)
+        groups = [_evaluate_group(spec, policies) for spec in specs]
+    else:
+        with OrderedPool(workers, initializer=_initialize_groups, initargs=(policies,)) as pool:
+            groups = pool.map(_evaluate_group, specs)
+    games = tuple(game for _, group in sorted(groups) for game in group)
+    simulation = perf_counter() - started
+    bootstrap_start = perf_counter()
+    report = ArenaReport(seed, bootstrap_seed, bootstrap_samples, games,
                        tuple(policy_metrics(games, p) for p in ('A', 'B')),
                        tuple(bootstrap(games, p, seed=bootstrap_seed, samples=bootstrap_samples)
                              for p in ('A', 'B')))
+    if performance is not None:
+        performance.update(requested_workers=threads, workers=workers,
+                           simulation_seconds=simulation,
+                           bootstrap_seconds=perf_counter() - bootstrap_start,
+                           total_seconds=perf_counter() - started)
+    return report

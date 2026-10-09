@@ -4,6 +4,8 @@ import hashlib
 import json
 from pathlib import Path
 from time import perf_counter
+from texas42.parallel import resolve_workers
+from examples.benchmark_output import format_performance
 import torch
 from examples.benchmark_output import format_report, format_breakdown
 from examples.heuristic_benchmark import breakdown
@@ -20,13 +22,20 @@ def main(argv=None):
     parser.add_argument('--bootstrap-seed', type=int, default=0)
     parser.add_argument('--bootstrap-samples', type=int, default=2000)
     parser.add_argument('--output', type=Path)
+    parser.add_argument('--threads', type=int, default=1)
     args = parser.parse_args(argv)
+    try:
+        resolve_workers(args.threads, args.deals)
+    except ValueError as exc:
+        parser.error(str(exc))
+    performance = {}
     torch.set_num_threads(1)
     model, _ = load_model(args.checkpoint)
     started = perf_counter()
     report = evaluate(model, opponent=args.opponent, deals=args.deals, seed=args.seed,
-                      bootstrap_seed=args.bootstrap_seed, bootstrap_samples=args.bootstrap_samples)
+                      bootstrap_seed=args.bootstrap_seed, bootstrap_samples=args.bootstrap_samples, threads=args.threads, performance=performance)
     elapsed = perf_counter() - started
+    print(format_performance(performance))
     identifier = hashlib.sha256(args.checkpoint.read_bytes()).hexdigest()
     print(f'Checkpoint: {args.checkpoint} (SHA256 {identifier})')
     print(f'A: PPO play + heuristic auction/trump; B: {args.opponent}')

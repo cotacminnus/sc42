@@ -259,9 +259,23 @@ class CounterfactualReport:
                     for name in ('suit_length', 'doubles', 'suit_counters', 'owns_highest_trump', 'partner_leads')}}
 
 
+def _counterfactual_group(spec):
+    i, policy_a, policy_b, target_policy, seed, target_marks = spec
+    a, b = variant_factory(policy_a), variant_factory(policy_b)
+    deal = generate_schedule(1, _seed(seed, 'schedule', i), shaker=i % 4)[0]
+    hands = []
+    for suffix, names, factories in (
+            ('A', (policy_a, policy_b) * 2, (a, b) * 2),
+            ('B', (policy_b, policy_a) * 2, (b, a) * 2)):
+        hands.append(evaluate_hand(factories, deal, seating=names, target_policy=target_policy,
+            seed=_seed(seed, 'episode', i), target_marks=target_marks,
+            game_id=f'{i}:{suffix}', group_id=f'{i}:{deal.deal_id}'))
+    return i, tuple(hands)
+
+
 def compare_bidding(policy_a='HHH', policy_b='CHH', *, target_policy='HHH', num_deals=128,
                     seed=42, episode='hand', target_marks=7, bootstrap_seed=0,
-                    bootstrap_samples=2000):
+                    bootstrap_samples=2000, threads=1):
     """Use exactly the arena's duplicate schedule and absolute-seat seed scheme."""
     if episode != 'hand':
         raise ValueError('Counterfactual bidding currently supports hand episodes only')
@@ -271,15 +285,11 @@ def compare_bidding(policy_a='HHH', policy_b='CHH', *, target_policy='HHH', num_
     _seed(bootstrap_seed)  # exact Python integer validation, consistent with arena
     if target_policy not in (policy_a, policy_b):
         raise ValueError('Target policy must be policy_a or policy_b')
-    a, b = variant_factory(policy_a), variant_factory(policy_b)
-    hands = []
-    for i in range(num_deals):
-        deal = generate_schedule(1, _seed(seed, 'schedule', i), shaker=i % 4)[0]
-        for suffix, names, factories in (
-                ('A', (policy_a, policy_b) * 2, (a, b) * 2),
-                ('B', (policy_b, policy_a) * 2, (b, a) * 2)):
-            hands.append(evaluate_hand(factories, deal, seating=names, target_policy=target_policy,
-                seed=_seed(seed, 'episode', i), target_marks=target_marks,
-                game_id=f'{i}:{suffix}', group_id=f'{i}:{deal.deal_id}'))
+    from ..parallel import OrderedPool, resolve_workers
+    workers = resolve_workers(threads, num_deals)
+    with OrderedPool(workers) as pool:
+        groups = pool.map(_counterfactual_group,
+                         [(i, policy_a, policy_b, target_policy, seed, target_marks) for i in range(num_deals)])
+    hands = [hand for _, group in sorted(groups) for hand in group]
     return CounterfactualReport(policy_a, policy_b, target_policy, seed, bootstrap_seed,
                                 bootstrap_samples, target_marks, tuple(hands))

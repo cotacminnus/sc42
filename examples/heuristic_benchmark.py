@@ -4,6 +4,8 @@ from collections import Counter
 import json
 from pathlib import Path
 from time import perf_counter
+from texas42.parallel import resolve_workers
+from examples.benchmark_output import format_performance
 
 from examples.benchmark_output import format_report, format_breakdown
 
@@ -99,14 +101,21 @@ def main(argv=None):
     parser.add_argument('--bootstrap-seed', type=int, default=0)
     parser.add_argument('--bootstrap-samples', type=int, default=2000)
     parser.add_argument('--output', type=Path)
+    parser.add_argument('--threads', type=int, default=1)
     args = parser.parse_args(argv)
+    try:
+        resolve_workers(args.threads, args.deals)
+    except ValueError as exc:
+        parser.error(str(exc))
+    performance = {}
     started = perf_counter()
     report = compare_agents(heuristic_factory,
                             random_factory if args.opponent == 'random' else heuristic_factory,
                             num_deals=args.deals, seed=args.seed, episode=args.episode,
                             target_marks=args.target_marks, bootstrap_seed=args.bootstrap_seed,
-                            bootstrap_samples=args.bootstrap_samples)
+                            bootstrap_samples=args.bootstrap_samples, threads=args.threads, performance=performance)
     elapsed = perf_counter() - started
+    print(format_performance(performance))
     print(format_report(report, {'A': 'Heuristic V1',
                                 'B': 'Random' if args.opponent == 'random' else 'Heuristic V1'}, elapsed))
     details = breakdown(report)

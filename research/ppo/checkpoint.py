@@ -28,7 +28,7 @@ def save(path, trainer):
     except (OSError, subprocess.CalledProcessError):
         sha, dirty = None, None
     numpy_state = np.random.get_state()
-    data = dict(metadata=metadata(), config=asdict(trainer.config), model=trainer.model.state_dict(),
+    data = dict(metadata=metadata(), execution=trainer.execution_metadata(), config=asdict(trainer.config), model=trainer.model.state_dict(),
                 optimizer=trainer.optimizer.state_dict(), git_sha=sha, git_dirty=dirty,
                 torch_version=str(torch.__version__), progress={name: getattr(trainer, name) for name in
                 ('hands', 'samples', 'updates', 'optimizer_steps', 'best_score', 'last_eval', 'last_checkpoint')},
@@ -62,8 +62,21 @@ def load_model(path, device='cpu'):
 def resume(path, trainer):
     data = read(path)
     current = asdict(trainer.config)
-    for key, value in data['config'].items():
-        if key not in ('total_hands', 'device') and current[key] != value:
+    saved = dict(data['config'])
+    if 'execution' not in data:
+        # Stage-1 checkpoints used "threads" for PyTorch intra-op parallelism.
+        saved['torch_threads'] = saved.get('threads', 1)
+        saved['threads'] = 1
+        scheme = 'legacy-v1'
+    else:
+        scheme = data['execution']['sampling_scheme']
+    if scheme != trainer.sampling_scheme:
+        raise ValueError('Sampling scheme mismatch: exact resume cannot change streams; '
+                         'use --warm-start for a new experiment, or --sampling-scheme ' + scheme)
+    if scheme == 'legacy-v1' and trainer.config.threads != 1:
+        raise ValueError('Legacy exact resume requires threads=1')
+    for key, value in saved.items():
+        if key not in ('total_hands', 'device', 'threads', 'sampling_scheme') and current[key] != value:
             raise ValueError(f'Resume configuration mismatch: {key}')
     if data['sampling_device'] != trainer.device.type:
         raise ValueError('Exact resumption requires the same sampling device type; CPU inference is always supported')
