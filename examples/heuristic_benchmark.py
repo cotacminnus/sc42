@@ -1,4 +1,5 @@
 """Reproducible V1 baseline comparison; no optional dependencies required."""
+from examples.experiment_output import record_output, add_output_arguments
 import argparse
 from collections import Counter
 import json
@@ -91,6 +92,7 @@ def breakdown(report):
     return result
 
 
+@record_output
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--opponent', choices=('random', 'heuristic'), default='random')
@@ -102,6 +104,7 @@ def main(argv=None):
     parser.add_argument('--bootstrap-samples', type=int, default=2000)
     parser.add_argument('--output', type=Path)
     parser.add_argument('--threads', type=int, default=1)
+    add_output_arguments(parser)
     args = parser.parse_args(argv)
     try:
         resolve_workers(args.threads, args.deals)

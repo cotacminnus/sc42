@@ -241,3 +241,6 @@ zero selects a conservative automatic limit. Outcomes and bootstrap grouping do
 not change. Optional performance telemetry is separate from result serialization.
 See [parallel_execution.md](parallel_execution.md) for portable factories, worker
 limits, timing, and PPO/counterfactual integration.
+
+See [evaluation performance](evaluation_performance.md) for cached cluster bootstrap,
+independent `--eval-threads` validation workers, profiling, and readable log/CSV exports.

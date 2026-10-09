@@ -1,4 +1,5 @@
 """Scaling measurements with correctness checks, including warm persistent PPO workers."""
+from examples.experiment_output import record_output, add_output_arguments
 import argparse
 import hashlib
 import json
@@ -21,6 +22,7 @@ def peak_parent_memory():
         return None
 
 
+@record_output
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--workers', default='1,2,4,8,0')
@@ -31,6 +33,7 @@ def main(argv=None):
     parser.add_argument('--device', choices=('cpu', 'cuda', 'auto'), default='cpu')
     parser.add_argument('--arena-only', action='store_true')
     parser.add_argument('--output', type=Path)
+    add_output_arguments(parser)
     args = parser.parse_args(argv)
     try:
         counts = [int(s) for s in args.workers.split(',')]

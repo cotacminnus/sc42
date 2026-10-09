@@ -1,4 +1,5 @@
 """Paired voluntary BID versus PASS experiments under fixed continuation policies."""
+from examples.experiment_output import record_output, add_output_arguments
 import argparse
 import json
 from pathlib import Path
@@ -42,6 +43,7 @@ def format_results(data, elapsed):
     return '\n'.join(lines)
 
 
+@record_output
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--policy-a', choices=VARIANTS, default='HHH')
@@ -55,6 +57,7 @@ def main(argv=None):
     parser.add_argument('--bootstrap-samples', type=int, default=2000)
     parser.add_argument('--output', type=Path)
     parser.add_argument('--threads', type=int, default=1)
+    add_output_arguments(parser)
     args = parser.parse_args(argv)
     if args.episode != 'hand':
         parser.error('match episodes are not supported; this experiment estimates immediate hand marks')

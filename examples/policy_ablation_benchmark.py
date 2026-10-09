@@ -1,4 +1,5 @@
 """Duplicate-deal comparisons of frozen phase policies, without ML dependencies."""
+from examples.experiment_output import record_output, add_output_arguments
 import argparse
 import json
 from pathlib import Path
@@ -12,6 +13,7 @@ from texas42.agents import VARIANTS, variant_factory
 from texas42.arena import compare_agents
 
 
+@record_output
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--policy-a', choices=VARIANTS, default='HHH')
@@ -24,6 +26,7 @@ def main(argv=None):
     parser.add_argument('--bootstrap-samples', type=int, default=2000)
     parser.add_argument('--output', type=Path)
     parser.add_argument('--threads', type=int, default=1)
+    add_output_arguments(parser)
     args = parser.parse_args(argv)
     try:
         resolve_workers(args.threads, args.deals)

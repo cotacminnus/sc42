@@ -4,8 +4,10 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 import hashlib
 import random
+import os
 from time import perf_counter
 from .parallel import OrderedPool, resolve_workers
+from .statistics import GroupStatistics, percentile_interval, resample_groups
 from typing import Callable, Sequence
 
 from .actions import ACTION_REGISTRY, PLAY_ACTIONS
@@ -263,35 +265,52 @@ class PolicyIntervals:
     mean_signed_marks: ConfidenceInterval | None
 
 
-def bootstrap(games: Sequence[GameEvaluation], policy: str, *, seed: int = 0,
-              samples: int = 2000) -> PolicyIntervals:
-    """Percentile 95% intervals, resampling complete schedule/deal groups."""
-    _positive(samples, 'samples')
+def group_statistics(games: Sequence[GameEvaluation], policies: Sequence[str]):
+    """Cache seat-averaged contributions in first-seen duplicate-group order."""
     groups = {}
     for game in games:
-        groups.setdefault(game.group_id, []).append(game)
-    if len(groups) < 2:
-        return PolicyIntervals(policy, None, None)
-    groups = tuple(groups.values())
-    rng = random.Random(_seed(seed, 'bootstrap'))
-    wins, marks = [], []
-    for _ in range(samples):
-        selected = [game for _ in groups for game in rng.choice(groups)]
-        metrics = policy_metrics(selected, policy)
-        if metrics.win_rate is None:  # an undefined replicate cannot support an interval
-            return PolicyIntervals(policy, None, None)
-        wins.append(metrics.win_rate)
-        marks.append(metrics.mean_signed_marks)
+        row = groups.setdefault(game.group_id, [[0.0, 0, 0.0, 0] for _ in policies])
+        for column, policy in enumerate(policies):
+            seats = [s for s, label in enumerate(game.seating) if label == policy]
+            if not seats:
+                continue
+            stats = row[column]
+            stats[0] += sum(s % 2 == game.winner for s in seats) / len(seats)
+            stats[1] += 1
+            for hand in game.hands:
+                result = hand.result
+                stats[2] += sum(result.marks_awarded *
+                                (1 if s % 2 == result.scoring_team else -1)
+                                for s in seats) / len(seats)
+                stats[3] += 1
+    return tuple(tuple(GroupStatistics(*stats) for stats in row) for row in groups.values())
 
+
+def bootstrap_policies(games: Sequence[GameEvaluation], policies: Sequence[str], *,
+                       seed: int = 0, samples: int = 2000, performance=None):
+    """Joint cluster resampling using the legacy RNG and percentile convention."""
+    _positive(samples, 'samples')
+    started = perf_counter()
+    groups = group_statistics(games, policies)
+    sampling_started = perf_counter()
+    values = (resample_groups(groups, random.Random(_seed(seed, 'bootstrap')), samples)
+              if len(groups) >= 2 else None)
     def interval(values):
-        values.sort()
-        def quantile(p):
-            index = (len(values) - 1) * p
-            lower = int(index)
-            upper = min(lower + 1, len(values) - 1)
-            return values[lower] + (values[upper] - values[lower]) * (index - lower)
-        return ConfidenceInterval(quantile(.025), quantile(.975))
-    return PolicyIntervals(policy, interval(wins), interval(marks))
+        bounds = percentile_interval(values)
+        return ConfidenceInterval(*bounds) if bounds is not None else None
+    result = tuple(PolicyIntervals(policy, None, None) if values is None else
+                   PolicyIntervals(policy, interval(values[i][0]), interval(values[i][1]))
+                   for i, policy in enumerate(policies))
+    if performance is not None:
+        performance.update(group_statistics_seconds=sampling_started - started,
+                           bootstrap_sampling_seconds=perf_counter() - sampling_started)
+    return result
+
+
+def bootstrap(games: Sequence[GameEvaluation], policy: str, *, seed: int = 0,
+              samples: int = 2000) -> PolicyIntervals:
+    """Backward-compatible single-policy percentile cluster bootstrap."""
+    return bootstrap_policies(games, (policy,), seed=seed, samples=samples)[0]
 
 
 @dataclass(frozen=True, slots=True)
@@ -340,6 +359,7 @@ class ArenaReport:
 
 
 _GROUP_POLICIES = None
+_GROUP_INITIALIZATION = None
 
 
 def _prepare_policies(policies):
@@ -351,8 +371,10 @@ def _prepare_policies(policies):
 
 
 def _initialize_groups(policies):
-    global _GROUP_POLICIES
+    global _GROUP_POLICIES, _GROUP_INITIALIZATION
+    started = perf_counter()
     _GROUP_POLICIES = _prepare_policies(policies)
+    _GROUP_INITIALIZATION = (os.getpid(), started, perf_counter() - started)
 
 
 def _evaluate_group(spec, policies=None):
@@ -368,6 +390,12 @@ def _evaluate_group(spec, policies=None):
                               seed=_seed(seed, 'episode', index), episode=episode,
                               target_marks=target_marks, game_id=f'{index}:{labels[0]}', group_id=group))
     return index, tuple(games)
+
+
+def _timed_group(spec, policies=None):
+    started = perf_counter()
+    result = _evaluate_group(spec, policies)
+    return result, perf_counter() - started, _GROUP_INITIALIZATION
 
 
 def compare_agents(policy_a: AgentFactory, policy_b: AgentFactory, *, num_deals: int = 100,
@@ -390,22 +418,37 @@ def compare_agents(policy_a: AgentFactory, policy_b: AgentFactory, *, num_deals:
     workers = resolve_workers(threads, num_deals)
     specs = [(i, seed, episode, target_marks) for i in range(num_deals)]
     policies = (policy_a, policy_b)
+    initialization_started = perf_counter()
     if workers == 1:
         _prepare_policies(policies)
-        groups = [_evaluate_group(spec, policies) for spec in specs]
+        model_initialization = perf_counter() - initialization_started
+        measured = [_timed_group(spec, policies) for spec in specs]
+        startup = 0.0
     else:
         with OrderedPool(workers, initializer=_initialize_groups, initargs=(policies,)) as pool:
-            groups = pool.map(_evaluate_group, specs)
+            measured = pool.map(_timed_group, specs)
+        initializations = {entry[2][0]: entry[2] for entry in measured}
+        model_initialization = sum(entry[2] for entry in initializations.values())
+        startup = min(entry[1] for entry in initializations.values()) - initialization_started
+    groups = [entry[0] for entry in measured]
     games = tuple(game for _, group in sorted(groups) for game in group)
     simulation = perf_counter() - started
     bootstrap_start = perf_counter()
-    report = ArenaReport(seed, bootstrap_seed, bootstrap_samples, games,
-                       tuple(policy_metrics(games, p) for p in ('A', 'B')),
-                       tuple(bootstrap(games, p, seed=bootstrap_seed, samples=bootstrap_samples)
-                             for p in ('A', 'B')))
+    metrics = tuple(policy_metrics(games, p) for p in ('A', 'B'))
+    aggregation_seconds = perf_counter() - bootstrap_start
+    intervals = bootstrap_policies(games, ('A', 'B'), seed=bootstrap_seed,
+                                   samples=bootstrap_samples, performance=performance)
+    report = ArenaReport(seed, bootstrap_seed, bootstrap_samples, games, metrics, intervals)
     if performance is not None:
         performance.update(requested_workers=threads, workers=workers,
                            simulation_seconds=simulation,
+                           aggregation_seconds=aggregation_seconds,
+                           worker_startup_seconds=startup,
+                           model_initialization_seconds=model_initialization,
+                           worker_simulation_seconds=sum(entry[1] for entry in measured),
+                           bootstrap_replicates_per_second=bootstrap_samples / max(performance["bootstrap_sampling_seconds"], 1e-12),
+                           games_per_second=len(games) / simulation,
+                           decisions_per_second=sum(h.decisions for g in games for h in g.hands) / simulation,
                            bootstrap_seconds=perf_counter() - bootstrap_start,
                            total_seconds=perf_counter() - started)
     return report

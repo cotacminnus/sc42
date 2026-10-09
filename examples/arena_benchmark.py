@@ -1,4 +1,5 @@
 """Run with python -m examples.arena_benchmark; no optional dependencies."""
+from examples.experiment_output import record_output, add_output_arguments
 import argparse
 from time import perf_counter
 
@@ -13,13 +14,15 @@ def random_factory(seat: int, seed: int) -> RandomAgent:
     return RandomAgent(seed)
 
 
-def main():
+@record_output
+def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--deals', type=int, default=30)
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--bootstrap-seed', type=int, default=123)
     parser.add_argument('--threads', type=int, default=1)
-    args = parser.parse_args()
+    add_output_arguments(parser)
+    args = parser.parse_args(argv)
     try:
         resolve_workers(args.threads, args.deals)
     except ValueError as exc:
@@ -32,6 +35,7 @@ def main():
     elapsed = perf_counter() - started
     print(format_performance(performance))
     print(format_report(report, {'A': 'Random', 'B': 'Random'}, elapsed))
+    return report
 
 
 if __name__ == '__main__':

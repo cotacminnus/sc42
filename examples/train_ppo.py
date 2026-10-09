@@ -1,4 +1,5 @@
 """Train masked PPO trick play against frozen HHH using complete hand episodes."""
+from examples.experiment_output import record_output, add_output_arguments
 import argparse
 from dataclasses import asdict, fields
 import json
@@ -7,20 +8,26 @@ from time import perf_counter
 from research.ppo.trainer import Config, Trainer, stream_seed
 from research.ppo.checkpoint import save, resume, load_model
 from research.ppo.evaluation import evaluate
+from texas42.parallel import resolve_workers
 
 
+@record_output
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     default = Config()
     for field in fields(Config):
         value = getattr(default, field.name)
         parser.add_argument('--' + field.name.replace('_', '-'), type=type(value), default=value)
+    parser.add_argument('--eval-threads', type=int, default=1,
+                        help='Validation simulation workers, independent of rollout workers (0: auto)')
     parser.add_argument('--output-dir', type=Path, default=Path('runs/ppo-play-v1'))
     source = parser.add_mutually_exclusive_group()
     source.add_argument('--resume', type=Path)
     source.add_argument('--warm-start', type=Path)
+    add_output_arguments(parser)
     args = parser.parse_args(argv)
     try:
+        resolve_workers(args.eval_threads, args.eval_deals)
         config = Config(**{f.name: getattr(args, f.name) for f in fields(Config)})
         trainer = Trainer(config)
         if args.resume:
@@ -42,9 +49,12 @@ def main(argv=None):
     initial_hands = trainer.hands
     execution = trainer.execution_metadata()
     print('Execution configuration', flush=True)
+    print(f'Training seed: {config.seed}; validation seed: {stream_seed(config.seed, "validation")}; '
+          f'validation bootstrap seed: {stream_seed(config.seed, "validation-bootstrap")}', flush=True)
     print(f'Device: {trainer.device}\nRequested workers: {config.threads}\nResolved workers: {trainer.workers}\n'
           f'PyTorch CPU threads: {config.torch_threads}\nParallel backend: {execution["backend"]}\n'
           f'Rollout sampling: {trainer.sampling_scheme}', flush=True)
+    print(f'Validation workers: {resolve_workers(args.eval_threads, config.eval_deals)} (requested {args.eval_threads})', flush=True)
     print('PPO trick-play training: heuristic auction/trump, neural partnership versus HHH', flush=True)
     try:
         while trainer.hands < config.total_hands:
@@ -73,7 +83,7 @@ def main(argv=None):
                 report = evaluate(trainer.model, deals=config.eval_deals,
                                   seed=stream_seed(config.seed, 'validation'),
                                   bootstrap_seed=stream_seed(config.seed, 'validation-bootstrap'),
-                                  bootstrap_samples=config.bootstrap_samples, threads=config.threads,
+                                  bootstrap_samples=config.bootstrap_samples, threads=args.eval_threads,
                                   performance=evaluation_performance)
                 row['evaluation_seconds'] = perf_counter() - evaluation_started
                 row['evaluation_performance'] = evaluation_performance
@@ -108,6 +118,9 @@ def main(argv=None):
                 sink.write(json.dumps(row, allow_nan=False) + '\n')
     finally:
         trainer.close()
+    print(f'Training complete: {trainer.hands} hands, {trainer.samples} play samples, '
+          f'{trainer.updates} updates; best held-out signed marks {trainer.best_score:.4f}; '
+          f'total elapsed {perf_counter() - started:.3f}s', flush=True)
     return trainer
 
 

@@ -1,4 +1,5 @@
 """Evaluate a Stage-1 PPO checkpoint through the existing duplicate-deal arena."""
+from examples.experiment_output import record_output, add_output_arguments
 import argparse
 import hashlib
 import json
@@ -13,6 +14,7 @@ from research.ppo.checkpoint import load_model
 from research.ppo.evaluation import evaluate
 
 
+@record_output
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--checkpoint', required=True, type=Path)
@@ -23,6 +25,7 @@ def main(argv=None):
     parser.add_argument('--bootstrap-samples', type=int, default=2000)
     parser.add_argument('--output', type=Path)
     parser.add_argument('--threads', type=int, default=1)
+    add_output_arguments(parser)
     args = parser.parse_args(argv)
     try:
         resolve_workers(args.threads, args.deals)

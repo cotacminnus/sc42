@@ -126,8 +126,16 @@ def format_breakdown(details):
 
 def format_performance(performance):
     """Timing metadata is deliberately separate from deterministic outcome JSON."""
+    detail = ""
+    if "group_statistics_seconds" in performance:
+        detail = (f"\nGroup statistics: {performance['group_statistics_seconds']:.3f} s | "
+                  f"Bootstrap sampling/percentiles: {performance['bootstrap_sampling_seconds']:.3f} s | "
+                  f"Result aggregation: {performance['aggregation_seconds']:.3f} s\n"
+                  f"Simulation throughput: {performance['games_per_second']:.1f} games/s, "
+                  f"{performance['decisions_per_second']:.1f} decisions/s; "
+                  f"{performance['bootstrap_replicates_per_second']:.1f} bootstrap replicates/s")
     return (f"Requested threads: {performance['requested_workers']}\n"
             f"Resolved simulation workers: {performance['workers']}\n"
             f"Simulation: {performance['simulation_seconds']:.3f} s | "
             f"Bootstrap/aggregation: {performance['bootstrap_seconds']:.3f} s | "
-            f"Total evaluation: {performance['total_seconds']:.3f} s")
+            f"Total evaluation: {performance['total_seconds']:.3f} s" + detail)

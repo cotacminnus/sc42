@@ -163,3 +163,6 @@ for up to N workers, and `--torch-threads 1` for main-process numerical threads.
 The sequential default preserves legacy sampling; parallel runs use versioned
 per-episode CPU sampling. See [parallel_execution.md](parallel_execution.md) for
 checkpoint migration, warm starts, exact resume rules, profiling, and benchmarks.
+
+See [evaluation performance](evaluation_performance.md) for cached cluster bootstrap,
+independent `--eval-threads` validation workers, profiling, and readable log/CSV exports.

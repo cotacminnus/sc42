@@ -1,6 +1,7 @@
 """Frozen CPU policy factories, prepared once per arena worker."""
 from dataclasses import dataclass, field
 import multiprocessing
+from time import perf_counter
 import torch
 from texas42.agents.hybrid import variant_factory
 from texas42.arena import compare_agents
@@ -19,9 +20,9 @@ class PPOFactory:
         return dict(weights=self.weights, hidden_size=self.hidden_size, model=None)
 
     def prepare(self):
-        if multiprocessing.current_process().name != 'MainProcess':
-            torch.set_num_threads(1)
         if self.model is None:
+            if multiprocessing.current_process().name != 'MainProcess' and torch.get_num_threads() != 1:
+                torch.set_num_threads(1)
             self.model = from_snapshot(self.weights, self.hidden_size)
 
     def __call__(self, seat, seed):
@@ -34,10 +35,19 @@ def evaluate(model, *, opponent='HHH', deals=128, seed=12345, bootstrap_seed=0,
     # Evaluation uses identical CPU numerical threading in sequential and worker
     # paths. Restore the optimizer's main-process thread setting afterward.
     previous_threads = torch.get_num_threads()
-    torch.set_num_threads(1)
+    if previous_threads != 1:
+        torch.set_num_threads(1)
+    started = perf_counter()
     try:
-        return compare_agents(PPOFactory(snapshot(model), model.hidden_size), variant_factory(opponent),
+        weights = snapshot(model)
+        snapshot_seconds = perf_counter() - started
+        report = compare_agents(PPOFactory(weights, model.hidden_size), variant_factory(opponent),
                               num_deals=deals, seed=seed, bootstrap_seed=bootstrap_seed,
                               bootstrap_samples=bootstrap_samples, threads=threads, performance=performance)
+        if performance is not None:
+            performance.update(snapshot_seconds=snapshot_seconds,
+                               evaluation_total_seconds=perf_counter() - started)
+        return report
     finally:
-        torch.set_num_threads(previous_threads)
+        if previous_threads != 1:
+            torch.set_num_threads(previous_threads)

@@ -265,3 +265,6 @@ pools. Arena/counterfactual duplicate groups and frozen CPU PPO rollouts support
 explicit legacy/episode-seeded checkpoint rules. Centralized batched inference,
 asynchronous training and distributed multi-host execution remain future work.
 See [parallel_execution.md](parallel_execution.md) for scaling measurements.
+
+See [evaluation performance](evaluation_performance.md) for cached cluster bootstrap,
+independent `--eval-threads` validation workers, profiling, and readable log/CSV exports.
