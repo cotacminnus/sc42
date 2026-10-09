@@ -10,3 +10,6 @@ build/
 *.egg-info/
 logs/
 *.jsonl
+
+runs/
+*.pt

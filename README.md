@@ -449,3 +449,10 @@ oracle/teacher runner may supply this snapshot. `AgentPlayer` exclusively calls
 ordinary `act`; it never constructs or passes privileged state. There is no
 oracle or privileged runner yet, and no hidden fields have been added to
 `Observation` or training records.
+
+## Optional PPO trick-play training
+
+Install `pip install -e ".[rl]"` and run `python -m examples.train_ppo`.
+Stage 1 learns trick play with heuristic bidding/trump against frozen HHH;
+ordinary engine imports remain dependency-free. See [the PPO guide](docs/ppo_training.md)
+for training, checkpoints, CPU/CUDA support, and duplicate-deal evaluation.
