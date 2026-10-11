@@ -306,3 +306,13 @@ less than 1% of summed hand simulation time; overall throughput differences
 also include different policies, game trajectories and measurement variability,
 so they cannot be attributed solely to configuration overhead. CPU simulations
 and PPO optimization remain the main work. No GPU performance claim is made.
+
+## Independent-phase PPO and historical self-play
+
+The original play-only trainer is preserved. For neural bidding with bitwise
+frozen pretrained play, joint bid/play training, optional heuristic imitation,
+frozen checkpoint opponents, and historical snapshot mixtures, see
+[multi-phase training](multiphase_selfplay.md). Use `examples.train_selfplay_ppo`
+and `examples.evaluate_selfplay_ppo`; new checkpoints use version 2 while existing
+play-only checkpoint inference remains supported. Neither stage changes the
+engine, observation schema, action IDs, or terminal signed-mark rewards.

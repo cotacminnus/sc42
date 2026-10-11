@@ -281,3 +281,37 @@ For a reproducible series of experiments: (1) run one baseline/ablation schedule
 This command reference reflects implementation status at commit 93dd899d. The latest optimization introduced a cached group bootstrap, independent PPO validation workers, and automatic readable log/CSV exports; earlier branches do not support all flags shown here.
 
 Project sources: https://github.com/cotacminnus/sc42/tree/evaluation-performance-optimization · docs/ppo_training.md · docs/parallel_execution.md · docs/evaluation_performance.md · docs/policy_ablation.md · docs/counterfactual_bidding.md
+
+## Multi-phase PPO commands
+
+See [multi-phase training](multiphase_selfplay.md) for complete experiments and
+checkpoint compatibility rules. Existing play-only commands remain available.
+
+| Entry point / flag | Meaning |
+| --- | --- |
+| `examples.train_selfplay_ppo` | Independent phase networks, frozen historical opponents, hand episodes. |
+| `--init-play-checkpoint PATH` | Original play-only pretrained weights; default `runs/ppo-play-v1/checkpoints/best.pt`. |
+| `--init-checkpoint PATH` | New stage from phase weights with fresh optimizer/RNG; exclusive with initialization/resume sources. |
+| `--resume PATH` | Exact update-boundary continuation; omitted options restore saved configuration. |
+| `--learn-phases bid` / `play` / `bid,play` | Enabled neural PPO decisions; default bid. |
+| `--learn-phases bid,trump,play --trump-policy neural` | Optional prepared neural trump module; trump-only training rejected. |
+| `--play-policy frozen\|trainable` | Optional assertion agreeing with learn-phases. |
+| `--trump-policy heuristic\|neural` | Default heuristic. |
+| `--opponent-pool NAME:WEIGHT,...` | Default `HHH:0.5,anchor:0.5`; canonical ratios; existing variants, anchor, self-snapshots, registered checkpoints. |
+| `--opponent-checkpoint NAME=PATH` | Repeatable frozen checkpoint registration. |
+| `--rollout-decisions N` | Enabled decision target, default 1024; complete hands, variable-trump bounded waves. |
+| `--bid-bc-hands N` | Default 0; optional four-epoch HHH masked imitation initialization. |
+| `--snapshot-every-hands N` / `--snapshot-pool-size N` | Default 32768 / 8; publish at update boundaries; bound active roster. |
+| `--eval-opponents HHH,CHH,anchor` | Separate paired reports on the same fixed validation schedule. |
+| `--selection-opponent anchor` | Select best.pt by this opponent's mean signed marks. |
+| `--forgetting-hands N` | Default 8; fixed anchor-play observation dataset for KL diagnostics. |
+| `--anchor-checkpoint PATH` | Original play anchor; inferred from source checkpoint when omitted. |
+| `--threads N` / `--eval-threads N` | Simulation and validation worker requests, default 1 each. |
+| `--output-dir PATH` / `--log-dir PATH` | Checkpoints/progress in runs; readable logs/CSV in dedicated logs directory. |
+| `examples.evaluate_selfplay_ppo --checkpoint PATH --opponents HHH,CHH,HHR,anchor` | Held-out phase-aware evaluation, optional historical registrations and JSON `--output`. |
+| `examples.multiphase_benchmark --hands 64 --workers 1 4` | Warmed collection/update/inference/load/evaluation measurements for four configurations. |
+
+The usual PPO optimizer, device, budget, evaluation interval, and checkpoint
+interval flags are supported. The new learning rate defaults to 0.0001. The old
+`--rollout-play-steps`, variant-only training opponent flags, and legacy sampling
+scheme flags belong to `train_ppo`, not the new entry point.

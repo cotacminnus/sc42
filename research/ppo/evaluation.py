@@ -35,6 +35,12 @@ def evaluate_many(model, *, opponents=('HHH',), deals=128, seed=12345,
                   bootstrap_seed=0, bootstrap_samples=200, threads=1, performance=None):
     """Separate labelled reports on identical schedules, sharing one CPU snapshot."""
     names = evaluation_opponents(opponents)
+    if hasattr(model, 'neural_phases'):
+        from .opponents import PolicySpec
+        from .selfplay_evaluation import evaluate_phases
+        return evaluate_phases(model, tuple(PolicySpec(n) for n in names), deals=deals, seed=seed,
+            bootstrap_seed=bootstrap_seed, bootstrap_samples=bootstrap_samples,
+            threads=threads, performance=performance)
     previous_threads = torch.get_num_threads()
     if previous_threads != 1:
         torch.set_num_threads(1)

@@ -48,6 +48,10 @@ def save(path, trainer):
 
 def read(path):
     data = torch.load(path, map_location='cpu', weights_only=True)
+    if data.get('metadata', {}).get('checkpoint_version') == 2:
+        from .selfplay_checkpoint import validate
+        validate(data)
+        return data
     compatibility = metadata()
     for key in ('training_opponent', 'training_opponents', 'opponent_selection_scheme',
                 'checkpoint_selection_opponent'):
@@ -78,13 +82,25 @@ def load_model(path, device='cpu'):
     data = read(path)
     # Loading an evaluation model must not perturb training's global RNG stream.
     with torch.random.fork_rng(devices=[]):
-        model = ActorCritic(data['config']['hidden_size'])
+        if data['metadata']['checkpoint_version'] == 2:
+            from .multiphase import PhaseActorCritic
+            model = PhaseActorCritic(data['config']['hidden_size'], data['metadata']['neural_phases'])
+        else:
+            model = ActorCritic(data['config']['hidden_size'])
     model.load_state_dict(data['model'], strict=True)
+    if data['metadata']['checkpoint_version'] == 2:
+        model.trained_phases = tuple(data['metadata']['trained_phases'])
+    import hashlib
+    with Path(path).open('rb') as source:
+        model.checkpoint_sha256 = hashlib.file_digest(source, 'sha256').hexdigest()
+    model.checkpoint_path = str(Path(path).resolve())
     return model.to(device).eval(), data
 
 
 def resume(path, trainer):
     data = read(path)
+    if data['metadata']['checkpoint_version'] != 1:
+        raise ValueError('Use train_selfplay_ppo to resume a multi-phase checkpoint')
     current = asdict(trainer.config)
     saved = dict(data['config'])
     if 'execution' not in data:

@@ -75,6 +75,12 @@ def training_rows(progress_rows, seed):
                     row[prefix + key + '_' + endpoint] = interval[key][endpoint] if interval[key] else None
         for key, value in progress_row.get('rollout_performance', {}).items():
             row['rollout_' + key] = value
+        for key, value in progress_row.get('metrics', {}).items():
+            row['ppo_' + key] = value
+        for key, value in progress_row.get('phase_samples', {}).items():
+            row['samples_' + key] = value
+        for opponent, identity in progress_row.get('evaluation_identities', {}).items():
+            row[f'eval_{opponent}_checkpoint_sha256'] = identity
         row['training_workers'] = progress_row.get('execution', {}).get('resolved_workers')
         rows.append(row)
     return rows
@@ -127,8 +133,8 @@ def record_output(function):
                     return arg.split('=', 1)[1]
             return None
         name = Path(function.__code__.co_filename).stem
-        training = name == 'train_ppo'
-        training_directory = Path(option('--output-dir') or 'runs/ppo-play-v1')
+        training = name in ('train_ppo', 'train_selfplay_ppo')
+        training_directory = Path(option('--output-dir') or ('runs/ppo-selfplay' if name == 'train_selfplay_ppo' else 'runs/ppo-play-v1'))
         log_directory = Path(option('--log-dir') or DEFAULT_LOG_DIRECTORY / f'{name}-{time_ns()}')
         log_directory.mkdir(parents=True, exist_ok=True)
         if option('--output'):
@@ -206,6 +212,7 @@ def record_output(function):
             'policy_ablation_benchmark': (option('--policy-a') or 'HHH', option('--policy-b') or 'CRR'),
             'heuristic_benchmark': ('heuristic_v1', option('--opponent') or 'random'),
             'evaluate_ppo': ('PPO', option('--opponent') or option('--opponents') or 'HHH'),
+            'evaluate_selfplay_ppo': ('PPO phases', option('--opponents') or 'HHH,CHH,HHR,anchor'),
             'arena_benchmark': ('Random', 'Random'),
         }.get(name)
         if labels:

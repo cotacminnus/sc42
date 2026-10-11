@@ -107,3 +107,91 @@ def hand_agents(opponent, seed, episode, learning_team):
         agent.reset(seat)
         agents.append(agent)
     return agents
+
+
+@dataclass(frozen=True, slots=True)
+class PolicySpec:
+    """Portable frozen-policy identity; neural imports remain optional and lazy."""
+    name: str
+    kind: str = 'variant'
+    path: str | None = None
+    sha256: str | None = None
+
+    def __post_init__(self):
+        if not self.name or self.kind not in ('variant', 'checkpoint'):
+            raise ValueError('Invalid frozen policy specification')
+        if self.kind == 'variant' and self.name not in VARIANTS:
+            raise ValueError(f'Unknown variant: {self.name}')
+        if self.kind == 'checkpoint' and (not self.path or not self.sha256 or len(self.sha256) != 64):
+            raise ValueError('Checkpoint policy requires a path and SHA256 identity')
+
+    @classmethod
+    def checkpoint(cls, name, path):
+        import hashlib
+        from pathlib import Path
+        path = Path(path).resolve()
+        with path.open('rb') as source:
+            identifier = hashlib.file_digest(source, 'sha256').hexdigest()
+        return cls(name, 'checkpoint', str(path), identifier)
+
+    def factory(self):
+        if self.kind == 'variant':
+            return variant_factory(self.name)
+        from .selfplay_evaluation import FrozenFactory
+        return FrozenFactory(self)
+
+
+@dataclass(frozen=True, slots=True)
+class HistoricalPool:
+    """Canonical mixture of named policies; snapshots have a separate RNG stream."""
+    probabilities: tuple
+    policies: tuple[PolicySpec, ...]
+    anchor: PolicySpec
+    snapshots: tuple[PolicySpec, ...] = ()
+
+    def __post_init__(self):
+        entries, seen = [], set()
+        known = {p.name for p in self.policies} | {'self-snapshots'}
+        if len({p.name for p in self.policies}) != len(self.policies):
+            raise ValueError('Duplicate policy names')
+        for name, weight in self.probabilities:
+            if name not in known or name in seen or isinstance(weight, bool):
+                raise ValueError(f'Unknown or duplicate opponent: {name}')
+            seen.add(name)
+            try:
+                weight = Fraction(str(weight))
+            except (ValueError, ZeroDivisionError) as exc:
+                raise ValueError('Weights must be finite and positive') from exc
+            if weight <= 0:
+                raise ValueError('Weights must be finite and positive')
+            entries.append((name, weight))
+        if not entries:
+            raise ValueError('Opponent pool must be nonempty')
+        total = sum(w for _, w in entries)
+        object.__setattr__(self, 'probabilities', tuple((n, str(w / total)) for n, w in sorted(entries)))
+
+    def choose(self, seed, episode):
+        name = self.probabilities[0][0]
+        if len(self.probabilities) > 1:
+            draw = random.Random(stream_seed(seed, 'multiphase-opponent-v1', episode)).random()
+            cumulative = 0.0
+            for name, probability in self.probabilities:
+                cumulative += float(Fraction(probability))
+                if draw < cumulative:
+                    break
+        if name == 'self-snapshots':
+            roster = self.snapshots or (self.anchor,)
+            index = random.Random(stream_seed(seed, 'historical-snapshot-v1', episode)).randrange(len(roster))
+            return name, roster[index]
+        return name, next(p for p in self.policies if p.name == name)
+
+
+def historical_pool(spec, policies, anchor, snapshots=()):
+    """Parse named ratios without introducing checkpoint paths into weight syntax."""
+    try:
+        entries = [tuple(part.strip() for part in entry.split(':')) for entry in spec.split(',')]
+        if any(len(entry) != 2 for entry in entries):
+            raise ValueError('Expected NAME:WEIGHT pairs')
+        return HistoricalPool(tuple(entries), tuple(policies), anchor, tuple(snapshots))
+    except (TypeError, AttributeError) as exc:
+        raise ValueError('Invalid opponent pool') from exc

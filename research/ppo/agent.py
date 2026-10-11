@@ -1,5 +1,6 @@
 """Ordinary policy adapter: heuristic auction and trump, neural trick play."""
 import torch
+from time import perf_counter
 from texas42.agents import HeuristicAgent
 from texas42.encoding import encode
 
@@ -9,6 +10,8 @@ class PPOAgent:
         self.model, self.greedy = model, greedy
         self.heuristic = HeuristicAgent()
         self.seat = None
+        self.profile_inference = False
+        self.neural_inference_seconds = 0.0
         self.device = next(model.parameters()).device
         self.generator = torch.Generator(device=self.device).manual_seed(seed % (2**63))
 
@@ -17,17 +20,22 @@ class PPOAgent:
         self.seat = seat
 
     def would_pass_if_allowed(self, obs):
+        if 'bid' in getattr(self.model, 'neural_phases', ()):
+            return None  # Neural intent is unavailable when pass is masked.
         return self.heuristic.would_pass_if_allowed(obs)
 
     @torch.no_grad()
     def act(self, obs):
         if obs.seat != self.seat:
             raise RuntimeError('Reset for the acting seat before use')
-        if obs.phase != 'play':
+        if obs.phase not in getattr(self.model, 'neural_phases', ('play',)):
             return self.heuristic.act(obs)
         features = torch.tensor([encode(obs)], dtype=torch.float32, device=self.device)
         masks = torch.tensor([obs.action_mask], dtype=torch.bool, device=self.device)
+        started = perf_counter() if self.profile_inference else None
         actions, _, _ = self.model.select(features, masks, greedy=self.greedy, generator=self.generator)
+        if started is not None:
+            self.neural_inference_seconds += perf_counter() - started
         action = int(actions.item())
         if action not in obs.legal_action_ids:
             raise ValueError('Neural agent selected an illegal action')

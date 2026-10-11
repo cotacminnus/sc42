@@ -207,6 +207,7 @@ class Trainer:
         data['advantages'] = (adv - adv.mean()) / adv.std(unbiased=False).clamp_min(1e-8)
         self.model.train()
         totals, weight = {}, 0
+        phase_totals, phase_weights = {}, {}
         stop = False
         for _ in range(c.ppo_epochs):
             for batch in buffer.minibatches(data, c.minibatch_size, self.shuffle):
@@ -230,6 +231,24 @@ class Trainer:
                 metrics = dict(policy_loss=policy.item(), value_loss=value.item(), entropy=entropy.mean().item(),
                                approx_kl=kl.item(), clip_fraction=((delta.exp() - 1).abs() > c.clip_epsilon).float().mean().item(),
                                gradient_norm=norm.item())
+                if hasattr(self.model, 'neural_phases'):
+                    for index, phase in enumerate(('bid', 'trump', 'play')):
+                        selected = batch['features'][:, index] == 1
+                        count = int(selected.sum())
+                        if not count:
+                            continue
+                        d = delta[selected]
+                        phase_values = dict(
+                            policy_loss=clipped_objective(logp[selected], batch['old_log_probs'][selected],
+                                batch['advantages'][selected], c.clip_epsilon).item(),
+                            value_loss=(values[selected] - batch['returns'][selected]).square().mean().item(),
+                            entropy=entropy[selected].mean().item(),
+                            approx_kl=((d.exp() - 1) - d).mean().item(),
+                            clip_fraction=((d.exp() - 1).abs() > c.clip_epsilon).float().mean().item())
+                        phase_weights[phase] = phase_weights.get(phase, 0) + count
+                        for key, v in phase_values.items():
+                            name = phase + '_' + key
+                            phase_totals[name] = phase_totals.get(name, 0.0) + count * v
                 n = len(batch['actions'])
                 for key, v in metrics.items():
                     if not math.isfinite(v):
@@ -244,4 +263,6 @@ class Trainer:
         buffer.clear()
         self.synchronize()
         self.optimization_seconds = perf_counter() - started
-        return {k: v / weight for k, v in totals.items()}
+        result = {k: v / weight for k, v in totals.items()}
+        result.update({k: v / phase_weights[k.split('_')[0]] for k, v in phase_totals.items()})
+        return result
