@@ -59,7 +59,7 @@ For larger refactors, give a short before/after map of modules and responsibilit
 - `docs/arena.md`: duplicate-deal methodology, metrics, uncertainty, and statistical interpretation.
 - `docs/roadmap.md`: research status, remaining questions, and milestones.
 
-Other focused research documents may remain. Prefer cross-links to copying commands, metric definitions, or implementation explanations into several places. Clearly label archived or legacy procedures rather than quietly deleting history. Keep examples synchronized with actual CLI flags. Any significant modification, addition, and deletion of the code must be reflected in the documents after the changes have been implemented.
+Other focused research documents may remain. Prefer cross-links to copying commands, metric definitions, or implementation explanations into several places. Clearly label archived or legacy procedures rather than quietly deleting history. Keep examples synchronized with actual CLI flags. Any significant modification, addition, and deletion of the code must be reflected in the documents after the changes have been implemented and the tests have passed.
 
 ## Implementation and testing
 
