@@ -269,3 +269,23 @@ See [parallel_execution.md](parallel_execution.md) for scaling measurements.
 
 See [evaluation performance](evaluation_performance.md) for cached cluster bootstrap,
 independent `--eval-threads` validation workers, profiling, and readable log/CSV exports.
+
+## Independent phase learning and historical self-play
+
+Implemented an additional [multi-phase PPO path](multiphase_selfplay.md):
+
+- Bidding-only PPO initialized from an existing play checkpoint, with completely
+  separate trainable bidding and bitwise frozen playing modules.
+- Optional masked heuristic bidding imitation, joint chronological bid/play
+  trajectories, per-seat GAE, and phase-specific PPO diagnostics.
+- Frozen original anchors and named checkpoint opponents, reproducible weighted
+  pools, bounded historical snapshot membership, and exact roster resumption.
+- Version-2 phase-aware checkpoints, backward-compatible play-only inference,
+  duplicate-deal validation against the original anchor, and play-KL monitoring.
+- Trump routing/serialization and optional neural trump learning are prepared;
+  effective learned trump policies remain an empirical research milestone.
+
+Next: run multi-seed Stage A experiments against the identical frozen-play anchor,
+then test joint historical self-play on independent held-out schedules. Add
+recurrent memory, pool curricula, or optional forgetting regularization only as
+explicit research ablations. Smoke tests are not evidence of competitive gains.

@@ -50,7 +50,8 @@ def main(argv=None):
     details_by_opponent = {}
     for name, report in reports.items():
         print(format_performance(performance[name]))
-        print(f'A: PPO play + heuristic auction/trump; B: {name}')
+        phases = ','.join(getattr(model, 'neural_phases', ('play',)))
+        print(f'A: PPO {phases}; remaining phases heuristic; B: {name}')
         print(format_report(report, {'A': 'PPO play', 'B': name}, performance[name]['evaluation_total_seconds']))
         details = breakdown(report)
         details_by_opponent[name] = details
