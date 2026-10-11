@@ -2,7 +2,7 @@
 
 *Texas 42 research workflows | CLI recipes, parameters, checkpoints and outputs*
 
-Source snapshot: cotacminnus/sc42 · evaluation-performance-optimization · commit 93dd899d (2026-10-09 UTC). Commands verified against the CLI source and project documentation on this branch; later revisions may differ.
+Canonical commands for the current checkout. Method and compatibility details live in the linked topic guides.
 
 > **Note:** All commands below are run from the repository root. Examples use bash/WSL2 line continuation (\). Replace checkpoint and output paths with your own.
 
@@ -24,8 +24,11 @@ python -m unittest discover -s tests -v
 | Human/AI console game | python -m texas42 | Interactive play; optional JSONL self-play logs |
 | Baseline comparison | python -m examples.policy_ablation_benchmark | HHH, CHH, HHR, etc. in paired duplicate deals |
 | Bid/pass experiment | python -m examples.counterfactual_bidding | Counterfactual voluntary bid intervention |
-| Train PPO | python -m examples.train_ppo | Play-only masked PPO against frozen HHH |
-| Evaluate PPO | python -m examples.evaluate_ppo | Held-out, paired checkpoint evaluation |
+| Train legacy play-only PPO | python -m examples.train_ppo | Reproducible baseline; fixed or mixed heuristic variants |
+| Legacy checkpoint evaluation | python -m examples.evaluate_ppo | Held-out, paired checkpoint evaluation |
+| Current PPO training | python -m examples.train_selfplay_ppo | Independent phase networks and historical opponents |
+| Agent-vs-agent evaluation | python -m examples.evaluate_agent_vs_agent | Canonical new phase-ablation experiments |
+| Multi-opponent phase evaluation | python -m examples.evaluate_selfplay_ppo | Compatibility command for anchors and archived policies |
 | Scaling benchmark | python -m examples.parallel_benchmark | Worker-count throughput and correctness |
 | Bootstrap benchmark | python -m examples.bootstrap_benchmark | Old vs. optimized confidence interval implementation |
 | Validation benchmark | python -m examples.validation_benchmark | Evaluation scaling by group and worker count |
@@ -85,7 +88,7 @@ python -m examples.counterfactual_bidding \
 
 The experiment identifies the first voluntary bid chosen by the target policy in each original hand, and replays BID versus PASS from the same deal. It supports hand episodes only. The result is conditional on the actions the policy actually bids; it does not evaluate every legal bid or pass opportunity.
 
-### 2.4 Start PPO from scratch (parallel)
+### 2.4 Start legacy play-only PPO from scratch (parallel)
 
 ```bash
 python -m examples.train_ppo \
@@ -128,7 +131,7 @@ python -m examples.train_ppo \
 
 The original single-process PPO checkpoints use legacy-v1 sampling. The parallel trainer uses episode-v1 by default whenever --threads is not 1. To switch legacy weights to parallel rollout collection, use --warm-start, not --resume. Parallel episode-v1 checkpoints can vary worker counts while retaining episode-seeded sampling; use --sampling-scheme episode-v1 explicitly if requesting --threads 1.
 
-### 2.6 Held-out PPO evaluation
+### 2.6 Legacy checkpoint evaluation
 
 ```bash
 # Primary test: unchanged heuristic bidding/trump; PPO versus HHH play
@@ -149,7 +152,7 @@ python -m examples.evaluate_ppo \
   --opponent HHR --deals 4096 --seed 24681357 --threads 4
 ```
 
-The A-side is PPO play plus heuristic auction/trump. For HHH comparison, the bidding and trump policies are identical and the contrast isolates the two trick-playing policies. Use new held-out seeds for final testing; repeated selection on one test seed makes it part of validation.
+For version-1 checkpoints the A-side is PPO play plus heuristic auction/trump. Version-2 sources retain their configured neural phases. For HHH comparison, the bidding and trump policies are identical and the contrast isolates the two trick-playing policies. Use new held-out seeds for final testing; repeated selection on one test seed makes it part of validation.
 
 ### 2.7 Performance and statistical benchmarks
 
@@ -191,7 +194,7 @@ For a faster pure-engine baseline, use python -m examples.arena_benchmark --deal
 | --threads | 1 | Maximum simulation processes; 0=auto, capped at 8 and CPU limits; 1=sequential. |
 | --bootstrap-seed | 0 (arena/PPO); 123 arena_benchmark | Independent bootstrap RNG seed. |
 | --bootstrap-samples | 2000 (most evaluation CLIs) | Number of complete-group bootstrap resamples. |
-| --episode | hand | hand or match for supported baseline arena commands. |
+| --episode | hand | hand or match for baseline arena and phase-composable commands. |
 | --target-marks | 7 | Marks required to win matches; counterfactual supports hand only. |
 | --output | Unset | Optional JSON export or benchmark profile path. |
 | --log-dir | Auto subdirectory | Readable .log / .csv experiment sidecars; does not replace JSON --output. |
@@ -203,7 +206,7 @@ For a faster pure-engine baseline, use python -m examples.arena_benchmark --deal
 | policy_ablation_benchmark | --policy-a, --policy-b | HHH and CRR; values: HHH/HHR/HRR/CHH/CRR/RRR. |
 | heuristic_benchmark | --opponent | random (or heuristic). |
 | counterfactual_bidding | --policy-a, --policy-b, --target-policy | HHH / CHH / HHH; target must be one of the two policy names. |
-| evaluate_ppo | --checkpoint, --opponent | Checkpoint required; opponent HHH (or CHH, HHR). |
+| evaluate_ppo | --checkpoint, --opponent / --opponents | Checkpoint required; default HHH; single variant or comma-separated variants, mutually exclusive. |
 | arena_benchmark | --deals, --seed, --bootstrap-seed | 30 / 42 / 123; simple random-versus-random arena smoke test. |
 | openspiel_selfplay | --episode, --target-marks, --seed | hand / 7 / 42; optional pyspiel required. |
 | texas42 console | --debug, --seed, --target-marks, --ruleset-id | --ruleset-id currently cadets_base_v1; --debug reveals hands. |
@@ -234,6 +237,9 @@ For a faster pure-engine baseline, use python -m examples.arena_benchmark --deal
 | --target-kl | 0.0 | Optional KL early-stop threshold; 0 disables. |
 | --threads | 1 | PPO simulation worker request (0=auto). |
 | --torch-threads | 1 | Main-process PyTorch CPU intra-op threads; distinct from workers. |
+| --train-opponent / --train-opponents | HHH | One variant or NAME:WEIGHT mixture; mutually exclusive. |
+| --eval-opponent / --eval-opponents | HHH | One or comma-separated variants; mutually exclusive. |
+| --selection-opponent | HHH when present | Primary validation opponent for best.pt; must belong to evaluation set. |
 | --sampling-scheme | auto | auto, legacy-v1 or episode-v1; governs action sampling streams. |
 | --eval-threads | 1 | Validation workers; runtime-only, not in checkpoint training Config. |
 | --output-dir | runs/ppo-play-v1 | Training config, progress and checkpoints. |
@@ -278,14 +284,55 @@ For a faster pure-engine baseline, use python -m examples.arena_benchmark --deal
 
 For a reproducible series of experiments: (1) run one baseline/ablation schedule; (2) train Stage-1 PPO with a fixed training seed; (3) preserve periodic checkpoints; (4) use the fixed 128-group schedule only for model selection; (5) evaluate best and latest models against HHH, CHH and HHR on separate 4096-group test seeds; (6) compare different checkpoints on the same held-out deals; (7) retain JSON, CSV, checkpoint hashes and Git commit IDs.
 
-This command reference reflects implementation status at commit 93dd899d. The latest optimization introduced a cached group bootstrap, independent PPO validation workers, and automatic readable log/CSV exports; earlier branches do not support all flags shown here.
-
-Project sources: https://github.com/cotacminnus/sc42/tree/evaluation-performance-optimization · docs/ppo_training.md · docs/parallel_execution.md · docs/evaluation_performance.md · docs/policy_ablation.md · docs/counterfactual_bidding.md
-
 ## Multi-phase PPO commands
 
-See [multi-phase training](multiphase_selfplay.md) for complete experiments and
-checkpoint compatibility rules. Existing play-only commands remain available.
+See [multi-phase training](multiphase_selfplay.md) for parameter transfer, credit assignment and checkpoint compatibility. Existing play-only commands remain available.
+
+### Stage A: frozen play, learned bidding
+
+```bash
+python -m examples.train_selfplay_ppo \
+  --init-play-checkpoint runs/ppo-play-v1/checkpoints/best.pt \
+  --learn-phases bid --play-policy frozen --trump-policy heuristic \
+  --bid-bc-hands 4096 --opponent-pool HHH:0.5,anchor:0.5 \
+  --total-hands 262144 --rollout-decisions 1024 \
+  --ppo-epochs 4 --minibatch-size 256 --learning-rate 0.0001 \
+  --threads 8 --eval-threads 1 --device auto --seed 42 \
+  --output-dir runs/ppo-bidding-v1
+```
+
+### Stage B: joint training with historical opponents
+
+```bash
+python -m examples.train_selfplay_ppo \
+  --init-checkpoint runs/ppo-bidding-v1/checkpoints/best.pt \
+  --learn-phases bid,play --trump-policy heuristic \
+  --opponent-pool HHH:0.3,anchor:0.3,self-snapshots:0.4 \
+  --snapshot-every-hands 32768 --snapshot-pool-size 8 \
+  --total-hands 524288 --rollout-decisions 4096 \
+  --ppo-epochs 4 --minibatch-size 512 --learning-rate 0.0001 \
+  --threads 8 --eval-threads 1 --device auto --seed 42 \
+  --output-dir runs/ppo-joint-v1
+```
+
+### Resume and multi-opponent validation
+
+```bash
+python -m examples.train_selfplay_ppo \
+  --resume runs/ppo-joint-v1/checkpoints/latest.pt \
+  --total-hands 1048576 --threads 4 --eval-threads 1 \
+  --output-dir runs/ppo-joint-v1
+
+python -m examples.evaluate_selfplay_ppo \
+  --checkpoint runs/ppo-bidding-v1/checkpoints/best.pt \
+  --opponents HHH,CHH,HHR,anchor --deals 4096 --seed 12345 \
+  --threads 4 --output runs/ppo-bidding-v1/heldout.json
+```
+
+Add `--opponent-checkpoint archive=runs/ppo-joint-v1/snapshots/policy-000032768.pt`
+and include `archive` in `--opponents` to evaluate an archived policy.
+
+### Multi-phase arguments
 
 | Entry point / flag | Meaning |
 | --- | --- |
@@ -318,6 +365,11 @@ scheme flags belong to `train_ppo`, not the new entry point.
 
 ## Agent-vs-agent phase composition
 
+Use this command for new phase ablations. See [composition methodology](phase_composable_evaluation.md)
+for checkpoint validation, parameter equality and interpretation.
+
+### Hold joint playing fixed, change bidding
+
 ```bash
 python -m examples.evaluate_agent_vs_agent \
   --agent-a-checkpoint runs/ppo-joint-v1/checkpoints/best.pt \
@@ -330,12 +382,95 @@ python -m examples.evaluate_agent_vs_agent \
   --log-dir logs/experiments/joint-bidding-ablation
 ```
 
-Every agent phase accepts `neural`, `heuristic`, or `random`; bidding also accepts
-`conservative`. All phase defaults are heuristic. `--agent-a-PHASE-checkpoint`
-(and B) overrides the corresponding agent's default checkpoint. Version-1 sources
-support neural play only; version-2 neural sources must declare the requested
-phase trained. `--stochastic-neural` enables seeded neural sampling.
-`--episode hand|match` and `--target-marks` are also supported. Existing evaluation
-commands remain unchanged. See [phase-composable evaluation](phase_composable_evaluation.md)
-for independent sources, archived policies, pure heuristics, conservative/random
-comparisons, reusable API, and parameter-identity metadata.
+Change only `--agent-b-bid conservative` to compare conservative versus neural bidding.
+
+### Independent checkpoint sources
+
+```bash
+python -m examples.evaluate_agent_vs_agent \
+  --agent-a-bid neural \
+  --agent-a-bid-checkpoint runs/ppo-bidding-v1/checkpoints/best.pt \
+  --agent-a-trump heuristic --agent-a-play neural \
+  --agent-a-play-checkpoint runs/ppo-joint-v1/checkpoints/best.pt \
+  --agent-b-bid conservative --agent-b-trump random --agent-b-play neural \
+  --agent-b-play-checkpoint runs/ppo-play-v1/checkpoints/best.pt \
+  --deals 4096 --seed 42 --threads 4
+```
+
+For joint PPO versus the original play-only PPO, use neural bid/play from the joint
+checkpoint for A and heuristic bid/trump plus neural play from the original for B:
+
+```bash
+python -m examples.evaluate_agent_vs_agent \
+  --agent-a-checkpoint runs/ppo-joint-v1/checkpoints/best.pt \
+  --agent-a-bid neural --agent-a-play neural \
+  --agent-b-checkpoint runs/ppo-play-v1/checkpoints/best.pt --agent-b-play neural \
+  --deals 4096 --seed 31415926 --threads 4
+```
+
+Use immutable snapshot paths in either agent's checkpoint options to compare
+archived policies. Each requested neural phase must have been trained.
+
+### Pure heuristic, conservative and random comparisons
+
+```bash
+# HHH against HHH: deterministic paired symmetry check
+python -m examples.evaluate_agent_vs_agent --deals 64 --seed 42
+# HHH against conservative bidding with heuristic trump/play
+python -m examples.evaluate_agent_vs_agent --agent-b-bid conservative --deals 64
+# HHH against heuristic bidding with random trump/play
+python -m examples.evaluate_agent_vs_agent \
+  --agent-b-trump random --agent-b-play random --deals 64
+```
+
+### Composition arguments
+
+| Argument | Default / meaning |
+| --- | --- |
+| `--agent-{a,b}-bid` | `heuristic`; neural, heuristic, random or conservative. |
+| `--agent-{a,b}-trump`, `--agent-{a,b}-play` | `heuristic`; neural, heuristic or random. |
+| `--agent-{a,b}-checkpoint PATH` | Default source for that agent's neural phases. |
+| `--agent-{a,b}-{bid,trump,play}-checkpoint PATH` | Override only that phase's neural source. |
+| `--stochastic-neural` | Optional phase-seeded sampling; default greedy inference. |
+| Shared evaluation flags | `--deals 2048 --seed 42 --bootstrap-seed 0 --bootstrap-samples 2000 --threads 1`. |
+| Hand/match flags | `--episode hand` or `--episode match`; `--target-marks 7`. |
+| Outputs | `--output PATH` for JSON; `--log-dir PATH` for readable logs and CSV. |
+
+## Legacy mixed-opponent training recipes
+
+```bash
+python -m examples.train_ppo --total-hands 524288 --train-opponent HHH \
+  --threads 8 --eval-threads 1 --output-dir runs/ppo-vs-hhh
+python -m examples.train_ppo --total-hands 524288 --train-opponent CHH \
+  --eval-opponent HHH --threads 8 --eval-threads 1 --output-dir runs/ppo-vs-chh
+python -m examples.train_ppo --total-hands 524288 --train-opponent HHR \
+  --eval-opponent HHH --threads 8 --output-dir runs/ppo-vs-random-play
+python -m examples.train_ppo --total-hands 524288 \
+  --train-opponents HHH:0.7,CHH:0.2,HHR:0.1 --eval-opponents HHH,CHH,HHR \
+  --selection-opponent HHH --threads 8 --eval-threads 1 --output-dir runs/ppo-mixed
+```
+
+```bash
+python -m examples.evaluate_ppo --checkpoint runs/ppo-mixed/checkpoints/best.pt \
+  --opponents HHH,CHH,HHR --deals 2048 --threads 4 --seed 12345 \
+  --output runs/ppo-mixed/test.json --log-dir logs/experiments/ppo-mixed-test
+```
+
+```bash
+python -m examples.train_ppo --resume runs/ppo-mixed/checkpoints/latest.pt \
+  --total-hands 1048576 --train-opponents HHH:7,CHH:2,HHR:1 \
+  --eval-opponents HHH,CHH,HHR --selection-opponent HHH \
+  --threads 4 --eval-threads 1 --output-dir runs/ppo-mixed
+python -m examples.train_ppo --warm-start runs/ppo-play-v1/checkpoints/best.pt \
+  --total-hands 524288 --train-opponents HHH:0.5,CHH:0.3,HHR:0.2 \
+  --eval-opponents HHH,CHH,HHR --selection-opponent HHH \
+  --threads 8 --output-dir runs/ppo-mixed-warmstart
+```
+
+```bash
+python -m examples.opponent_benchmark --workers 1 4 \
+  --hands-per-update 256 --updates 3 --output runs/opponent-performance.json
+```
+
+Keep saved optimizer settings and sampling scheme unchanged for exact resume.
+Method and migration details: [legacy PPO](ppo_training.md#configuring-training-and-evaluation-opponents).

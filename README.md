@@ -1,118 +1,68 @@
 # SC42 / TX42
 
-A command-line Texas 42 dominoes game for the Texas A&M Singing Cadets. The current
-version pairs one human with a placeholder AI against two more placeholder AIs.
-Partners are Players 1 and 3 versus Players 2 and 4; you are Player 1.
+SC42 is a command-line Texas 42 game and a reproducible research testbed for
+imperfect-information partnership learning. The Python package is `texas42`;
+the installed console command is `tx42`. Seats are zero-based: team 0 occupies
+0/2 and team 1 occupies 1/3. The console pairs one human with a random bot against
+two random bots; research agents are available through the common agent API.
 
-The repository is `sc42`, the Python package is `texas42`, and the optional installed
-command is `tx42`. Running from source requires Python 3.11 or newer and no
-third-party runtime dependencies.
+## Installation and quick start
 
-The engine also serves as a research testbed for self-play learning under imperfect
-information. See the [research roadmap](docs/roadmap.md) for goals, status, and
-planned steps.
+Python 3.11+ is required. The engine runs from source without third-party runtime
+dependencies. From the repository root:
+
+```bash
+python -m pip install -e .
+python -m texas42
+python -m unittest discover -s tests -v
+```
+
+Optional extras are `.[rl]` (PyTorch/NumPy training and neural evaluation) and
+`.[openspiel]` (OpenSpiel integration). Install only the extras you need.
+See the [command reference](docs/command_reference.md) for all experiment commands,
+arguments, resume recipes and output locations.
+
+### Console controls
+
+- Bid `30`–`41`, `42` for one mark, or `1m`–`5m`; `p` passes when legal.
+- Trump: `0`–`6`, `doubles`, or `n`/`follow me` for no trump.
+- Play the displayed legal domino number; these are hand positions, not global IDs.
+- Ctrl+C quits. `--debug` reveals hands; `--seed` reproduces shuffles and bot choices.
+- `--all-ai` runs bots; `--self-play-log [PATH]` records schema-5 JSONL and requires
+  `--all-ai`. Logs overwrite their destination, default `logs/selfplay.jsonl`.
+
+## Current capabilities and guides
+
+| Topic | Authoritative guide |
+| --- | --- |
+| Commands, arguments, JSON/log/CSV paths | [Command reference](docs/command_reference.md) |
+| Original play-only PPO and version-1 reproduction | [Legacy PPO](docs/ppo_training.md) |
+| Learned bidding, joint phase training, frozen historical opponents | [Multi-phase PPO](docs/multiphase_selfplay.md) |
+| Independently composed agents and phase ablations | [Phase-composable evaluation](docs/phase_composable_evaluation.md) |
+| Duplicate deals, metrics, bootstrap uncertainty | [Arena methodology](docs/arena.md) |
+| Frozen heuristic and random/conservative variants | [Heuristic V1](docs/simpleheuristic.md), [policy ablations](docs/policy_ablation.md) |
+| Bid-versus-pass replay experiments | [Counterfactual bidding](docs/counterfactual_bidding.md) |
+| Observations, public history and training-data validation | [Encoding](docs/encoding.md) |
+| Permanent global actions and reserved contracts | [Action space](docs/action-space.md) |
+| Process workers and evaluation profiling | [Parallel execution](docs/parallel_execution.md), [evaluation performance](docs/evaluation_performance.md) |
+| Optional OpenSpiel adapter | [OpenSpiel](docs/openspiel.md) |
+| Research status and next experiments | [Roadmap](docs/roadmap.md) |
 
 ## Project map
 
-```text
- Front ends        cli.py -> engine.Game -> players.Player (human, random bot)
-                   selfplay.SelfPlayEnv  -> episodes.EpisodeState
-                   openspiel.py (optional) -> episodes.EpisodeState
-                                   |
- One hand          state.HandState: bid -> trump -> seven tricks (global action IDs)
-                                   |
- Pure rules        rules.py (legality, trick winner, points), models.py (value types)
-
- Shared formats    actions.py (58 permanent action IDs), training.py (ID-based views,
-                   checkpoint metadata, log migration), encoding.py (feature vectors),
-                   features.py / rulesets.py / phases.py (version and rules identity)
-```
-
-| File | Responsibility |
+| Directory / module | Responsibility |
 | --- | --- |
-| `texas42/models.py` | Dominoes, bids, trump, and contract value types |
-| `texas42/rules.py` | Legal bids and plays, suit ranking, and trick scoring |
-| `texas42/state.py` | One hand's transitions, legal action IDs, and hand results |
-| `texas42/episodes.py` | Hand or match episodes: marks, shaker rotation, and rewards |
-| `texas42/engine.py` | Console match runner for `Player` objects, with optional JSONL logging |
-| `texas42/players.py` | Player interface, immutable decision views, human input, and the random bot |
-| `texas42/cli.py` | Command-line options and player setup |
-| `texas42/selfplay.py` | Silent reset/step API for training episodes |
-| `texas42/training.py` | Integer-ID training views, `training_metadata()`, and log migration |
-| `texas42/encoding.py` | Fixed-length feature vectors for neural policies |
-| `texas42/actions.py` | Append-only action vocabulary and neural-head slots |
-| `texas42/features.py`, `rulesets.py`, `phases.py` | Feature/encoder versions, ruleset identity, and phase names |
-| `texas42/openspiel.py` | Optional OpenSpiel game, state, and observer backed by the engine |
-| `tests/` | One test module per area (`test_game`, `test_selfplay`, `test_encoding`, `test_openspiel`, ...) |
-| `docs/` | [Roadmap](docs/roadmap.md), [encoder](docs/encoding.md), [action IDs](docs/action-space.md), [OpenSpiel](docs/openspiel.md) |
-
-Seats are zero-based everywhere: team 0 is seats 0 and 2, and team 1 is seats 1 and 3.
-
-## Play
-
-Run commands from the repository root (the directory containing `pyproject.toml`):
-
-```console
-python -m texas42
-```
-
-To install the optional command into your active Python environment:
-
-```console
-python -m pip install -e .
-tx42
-```
-
-Installation uses setuptools as declared in `pyproject.toml`; installation is not
-needed to play or run tests from the checkout.
-
-### Controls
-
-- **Bid:** enter `30` through `41`, `42` for one mark, or `1m` through `5m`.
-  Enter `p` or `pass` to pass unless you are the forced bidder. Bids must satisfy
-  the increase limits below.
-- **Call trump:** enter `0` through `6` (`0` means blanks), `doubles`, or `n` for
-  Follow Me/no trump. `follow` and `follow me` also select no trump.
-- **Play:** enter one of the displayed legal domino numbers. These are positions
-  in your current hand, starting at 1, and change as dominoes are removed.
-- **Quit:** press Ctrl+C.
-
-### Run options
-
-```console
-python -m texas42 --help
-python -m texas42 --debug --seed 42
-python -m texas42 --target-marks 3
-```
-
-`--debug` reveals all four hands at the start of each hand. `--seed` makes the
-shuffle and bot choices reproducible when the same player decisions are made.
-`--target-marks` must be positive and defaults to 7.
-
-For a noninteractive self-play run, use `--all-ai`:
-
-```console
-python -m texas42 --all-ai --seed 42 --target-marks 1
-```
-
-Add `--self-play-log` to write `logs/selfplay.jsonl`, or supply a custom path:
-
-```console
-python -m texas42 --all-ai --seed 42 --self-play-log
-python -m texas42 --all-ai --seed 42 --self-play-log logs/match.jsonl
-```
-
-Each JSON line records the acting seat's observation before its action (including
-its hand, public state, legal action IDs, and mask), the chosen global action
-ID and decoded action, and the resulting marks, hand result, match termination,
-winner, and per-seat rewards. Match rewards are zero until the final action, then
-+1 for winners and -1 for opponents. Seats are zero-based. The next line contains
-the next acting seat's observation. Logs are overwritten on each run; `logs/` and
-`*.jsonl` are ignored by Git. Logging requires `--all-ai` and does not train a model.
-Logs use `schema_version: 5` and share action IDs with training and OpenSpiel.
-Every domino is still an integer ID from 0 through 27. Schema-2 logs used
-phase-local action IDs; `upgrade_selfplay_record(record)` migrates schema-2/3/4 records,
-including their legal-action masks. See [action compatibility](docs/action-space.md).
+| `texas42/models.py`, `rules.py`, `state.py` | Value types, pure rules and authoritative hand transitions |
+| `texas42/episodes.py`, `selfplay.py` | Hand/match episodes, immutable observations, reset/step API |
+| `texas42/engine.py`, `players.py`, `cli.py` | Console runner and object-based player decisions |
+| `texas42/agents/` | Common protocol, built-in agents and Player adapter |
+| `texas42/arena.py`, `parallel.py` | Paired evaluation, metrics and ordered process workers |
+| `texas42/training.py`, `encoding.py`, `actions.py` | Versioned ID-based views, 387 features and legal global actions |
+| `texas42/openspiel.py` | Optional adapter depending on the native engine |
+| `research/ppo/` | Optional training, checkpoints and frozen policy composition |
+| `examples/` | Runnable game, training and evaluation commands |
+| `tests/`, `docs/` | Deterministic unittest coverage and technical documentation |
+| `runs/`, `logs/` | Ignored generated checkpoints, results and readable exports |
 
 ## Implemented rules
 
@@ -146,227 +96,21 @@ Nello, Sevens, Splash, and Plunge are not implemented. The rules above describe
 the current implementation; additional Singing Cadets house rules may need to be
 added.
 
-## Development
-
-Run the standard-library test suite from the repository root:
-
-```console
-python -m unittest discover -s tests -v
-```
-
-Tests also run in GitHub Actions on pushes and pull requests: a dependency-free
-core job and an OpenSpiel integration job. OpenSpiel tests skip when `pyspiel`
-is not installed.
-
-### Adding a real AI
-
-Subclass `texas42.players.Player` and implement these decision methods, using the
-types from `texas42.players` and `texas42.models`:
-
-```python
-def choose_bid(self, view: BidView) -> Bid | None: ...
-def choose_trump(self, view: TrumpView) -> Trump: ...
-def choose_domino(self, view: PlayView) -> Domino: ...
-```
-
-Each immutable view contains the player's own hand and the public information
-needed for that decision. Opponents' hands are not exposed. `PlayView` includes
-the current trick, completed tricks, hand points, and match marks. Choose a domino
-from `view.legal_plays`; the engine validates returned bids, trump calls, and plays.
-Returning `None` from `choose_bid` passes, or becomes a bid of 30 if forced.
-For trump, use an integer from 0 through 6, `"doubles"`, or `None` for Follow Me.
-
-Seats in the API are zero-based: team 0 has seats 0 and 2, and team 1 has seats 1
-and 3. Point and mark tuples use that team order. Supply exactly four players in
-seat order to `Game`; replace any of the bots below with your implementation:
-
-```python
-import random
-
-from texas42 import Game, GameConfig
-from texas42.players import RandomPlayer
-
-players = [RandomPlayer(f"Bot {seat + 1}", random.Random(seat)) for seat in range(4)]
-game = Game(players, GameConfig(seed=42, target_marks=1))
-winning_team = game.play_match()  # Returns team 0 or 1.
-```
-
-`GameConfig.seed` controls the engine's shuffle and initial shaker; custom players
-manage their own randomness. `play_hand()` returns a `HandResult` and updates
-match marks, but only `play_match()` automatically rotates the shaker.
-
-### Self-play training interface
-
-`SelfPlayEnv` runs without player objects, console output, or third-party
-dependencies. Both it and `Game` use the same hand transition logic. This is a
-native turn-based API, not a Gymnasium or PettingZoo adapter.
-
-```python
-import random
-from texas42 import SelfPlayEnv
-
-env = SelfPlayEnv(episode="hand", seed=42)
-policy_rng = random.Random(123)
-
-for episode in range(100):
-    observation = env.reset()
-    trajectories = [[] for _ in range(4)]
-    while True:
-        # Replace this with masked sampling from your policy network.
-        action_id = policy_rng.choice(observation.legal_action_ids)
-        trajectories[observation.seat].append((observation, action_id))
-        transition = env.step(action_id)
-        if transition.terminated:
-            # Hand mode: assign each seat's terminal team reward to its own
-            # trajectory. A PPO collector should also store log-probs/values.
-            for seat, trajectory in enumerate(trajectories):
-                reward = transition.rewards[seat]
-                # train/store (trajectory, reward) here
-            break
-        observation = transition.observation
-```
-
-`reset(seed=42)` restarts the deal random stream; `reset()` continues it.
-`reset(shaker=0)` optionally selects the starting shaker. A reset discards any
-previous episode, clears marks, and deals a fresh hand. Policy sampling needs
-its own seeded RNG for complete reproducibility.
-
-Each immutable `Observation` contains the acting `seat`, `phase`, player `view`,
-`legal_action_ids`, and a boolean `action_mask`. Views expose only that seat's
-hand and public information, including chronological bids/passes, match marks,
-and the target mark count. Play views also contain the current trick and all
-completed tricks. Do not pass the environment's private simulator state to a
-policy. An observation remains unchanged after later steps.
-
-Self-play views are slotted `TrainingBidView`, `TrainingTrumpView`, and
-`TrainingPlayView` snapshots. They store every domino as an integer ID, including
-`hand`, `legal_plays`, and the domino component of `(seat, domino_id)` entries in
-`trick` and `completed_tricks`. Decode an ID with `PLAY_ACTIONS[id]`; convert a
-`Domino` to its stable ID with `domino.id`. For example, `[0|0]` is 0, `[3|2]` is
-8, and `[6|6]` is 27. Existing `Player` decision views still use `Domino` objects.
-Code consuming earlier self-play observations must now decode IDs before calling
-rules helpers that expect domino objects. Bids and trump calls retain their
-existing representations.
-
-Action IDs are **global and append-only**, shared by the engine and OpenSpiel:
-
-| Phase | IDs | Exported lookup tuple |
-| --- | --- | --- |
-| `bid` | 28 = pass; 29–40 = 30–41 points; 41–45 = 1–5 marks | `BID_ACTIONS[id - 28]` |
-| `trump` | 46–52 = numbered trump; 53 = doubles; 54 = no trump | `TRUMP_ACTIONS[id - 46]` |
-| `play` | 0–27 = permanent domino IDs, independent of hand ordering | `PLAY_ACTIONS` |
-| Future contracts | 55 = Nil, 56 = Splash, 57 = Plunge; all reserved and masked out | `ACTIONS[id]` |
-
-All masks have `NUM_ACTIONS` entries (currently 58), regardless of phase. Decode
-any player action with `ACTIONS[id].value`, or encode a decision with
-`ACTION_REGISTRY.encode(phase, value)`. Observations include `num_actions` and
-`action_space_version`, `feature_schema_version`, and `ruleset_id`. Save `training_metadata()` with checkpoints
-and experiments. `phase_slots()` defines fixed neural heads: bid 21, trump 9,
-play 28. `phase_mask()`, `global_id()`, and `phase_slot()` translate their choices
-to persistent IDs. Logs also include stable `action_key` and resolved contracts.
-Future actions append after existing entries; they must never shift old IDs.
-Reserved contract tokens do not implement bidding, eligibility, or scoring rules.
-
-For normalized domino `[high|low]`, the play ID is `high*(high+1)//2 + low`.
-Use `PLAY_ACTIONS[action_id]` to decode it. Mask illegal logits before sampling.
-The environment rejects illegal IDs with `ValueError` without changing state.
-Use Python `int` IDs (convert tensor/NumPy scalars first). Pass is masked out for
-a forced bidder; the legacy `Player` API still converts a forced `None` into 30.
-
-`step(action_id)` returns a `StepResult`:
-
-- `observation` belongs to the **next acting seat**, or is `None` at episode end.
-- `rewards` is ordered by seats 0, 1, 2, 3. Partners receive equal rewards and
-  opponents receive opposite rewards. These are transition rewards, not totals.
-- `hand_result` is present only on a hand-ending transition and includes points,
-  contract, scoring team, and marks awarded.
-- `terminated` marks episode completion. Call `reset()` before stepping again.
-- `match_winner` is a team index when the target marks have been reached.
-
-With `episode="hand"` (the default), an episode is exactly one hand: four bids,
-one trump choice, and 28 plays. Only the final step pays rewards: positive marks
-awarded for the scoring team, negative marks for its opponents.
-
-With `episode="match", target_marks=7`, hands continue automatically, marks
-persist, and the shaker rotates between hands. Intermediate hand boundaries
-return both `hand_result` and the next hand's bidding observation; they do not
-terminate the episode. All rewards are zero until the match ends, then winners
-receive +1 and losers -1. Reset hand-specific policy memory at hand boundaries
-if appropriate, but keep match returns connected through those boundaries.
-
-Keep separate trajectories for each seat. Terminal rewards apply to all four
-seats, including seats that did not take the final action. This API provides
-simulation and observations; the neural network and optimizer remain
-training-code responsibilities.
-
-### Feature encoder
-
-`texas42.encoding.encode(observation)` turns an `Observation` into a list of
-`FEATURE_SIZE` (387) floats from the acting seat's perspective: its own hand,
-who played what, the current trick, revealed voids, trump, the auction, points,
-and marks. `to_numpy(observations)` batches features and legal-action masks when
-NumPy is installed. Save `training_metadata()` (which includes
-`encoder_layout_version`) with every model. See [feature encoder](docs/encoding.md)
-for the layout.
-
-### OpenSpiel integration
-
-The optional `python_texas42` OpenSpiel game supports hand and match episodes.
-It delegates rules and transitions to this engine; the base CLI and native
-self-play API still have no third-party runtime dependencies.
-
-```console
-python3 -m venv .venv
-.venv/bin/python -m pip install -e '.[openspiel]'
-.venv/bin/python -m examples.openspiel_selfplay --episode match --seed 42
-```
-
-```python
-import pyspiel
-import texas42.openspiel  # Register the adapter before loading a game.
-
-game = pyspiel.load_game("python_texas42(episode=match,target_marks=7)")
-state = game.new_initial_state()
-```
-
-The adapter provides explicit chance dealing, legal-action masks, private
-observations, perfect-recall information states, cloning, and serialization.
-Domino play IDs remain 0–27; bid IDs are 28–45 and trump IDs are 46–54 in its
-58-action vocabulary, including three disabled contract reservations. Native
-self-play, logs, and OpenSpiel use identical player action IDs and masks.
-
-See [OpenSpiel integration](docs/openspiel.md) for the research references,
-architecture, parameter and tensor layouts, and validation details. Run
-`.venv/bin/python -m unittest discover -s tests -v` to include integration tests;
-they skip when OpenSpiel is not installed. OpenSpiel publishes wheels for Linux
-and macOS; on Windows, use WSL2. Training is not implemented yet; see the
-[research roadmap](docs/roadmap.md).
-
-## License
-
-[MIT](LICENSE).
-
 ## Common agents
 
 `Agent` is the algorithm-facing protocol: `reset(seat)` and
-`act(obs: Observation) -> int`. Actions are exact Python integers in
-`obs.legal_action_ids` (global IDs 0–57). Reserved IDs 55–57 remain illegal.
-`Player` is the existing console interface with separate bid/trump/domino
-methods and object-based views. `AgentPlayer` adapts any ordinary agent to
-`Player`. Both native self-play and the adapter build observations through
-`selfplay.observation_from_view`, using shared pure legality in `legality.py`.
+`act(Observation) -> int`. Return an exact Python integer from
+`obs.legal_action_ids`; masks include all 58 global actions. Reserved IDs 55–57
+remain illegal. `Player` retains object-based `choose_bid`, `choose_trump` and
+`choose_domino` methods. `AgentPlayer` adapts ordinary agents to that console API,
+using the same legality and observation construction as native self-play.
 
-`texas42/agents/base.py` defines `Agent`, `PrivilegedAgent`, and the immutable
-`PrivilegedState`; `random.py` provides `RandomAgent`; `adapters.py` provides
-`AgentPlayer`. These modules require no NumPy, PyTorch, or OpenSpiel.
-
-Run a complete native hand with:
-
-```bash
-python -m examples.agent_selfplay
-```
-
-The example uses four agent instances, one per seat:
+Use four independent agent instances even when weights are shared. RandomAgent
+samples every legal action, including bids; the console RandomPlayer normally
+passes. RandomAgent resets its seat without rewinding its seeded RNG. Policies
+receive only their own immutable observation, never mutable engine state or
+opponents' hands. Custom agents need no base class: implement the two methods,
+inspect `obs.view`, and optionally call `encoding.encode(obs)` with its legal mask.
 
 ```python
 from texas42 import SelfPlayEnv
@@ -378,81 +122,47 @@ obs = env.reset()
 for seat, agent in enumerate(agents):
     agent.reset(seat)
 while obs is not None:
-    action = agents[obs.seat].act(obs)
-    obs = env.step(action).observation
+    obs = env.step(agents[obs.seat].act(obs)).observation
 ```
 
-To use the same agents with the console engine:
+For `engine.Game`, wrap each agent with `AgentPlayer(name, agent)` and supply four
+players in seat order. `Game.play_match()` resets agents once per match; standalone
+`play_hand()` resets once per hand. These hooks do not reset the Game's accumulated
+marks or deal RNG. Direct adapter callers must reset before requesting decisions.
+Native runners own their agents and reset them once after `env.reset()`, preserving
+memory between hands of a match. Construct fresh agents to restart RNG streams.
 
-```python
-from texas42 import Game, GameConfig
-from texas42.agents import AgentPlayer, RandomAgent
+`PrivilegedAgent.act_privileged(obs, state)` is a separate future oracle interface.
+Ordinary adapters never supply `PrivilegedState` or hidden-hand labels.
 
-players = [AgentPlayer(f"Agent {seat}", RandomAgent(seed=seat)) for seat in range(4)]
-game = Game(players, GameConfig(seed=42, target_marks=3))
-game.play_match()
-```
+## Self-play and data contracts
 
-`RandomAgent` uniformly samples all legal IDs, including auction raises.
-The existing CLI `RandomPlayer` still normally passes; CLI defaults are unchanged.
-RandomAgent seeds its `random.Random` once at construction. `reset()` changes its
-seat assignment but continues its RNG stream. Construct a fresh agent with the
-same seed to reproduce the stream. Equal seeds and observation sequences give
-equal choices.
+`SelfPlayEnv.reset(seed=...)` restarts the deal stream; `reset()` continues it.
+`reset(shaker=...)` can choose the starting shaker. Observations contain the acting
+seat, phase, immutable ID-based view, legal IDs and mask. `step(action_id)` returns
+the next observation, seat-ordered rewards, an optional completed `hand_result`,
+termination flag and match winner. Illegal actions fail without changing state.
 
-### Custom policies and episode memory
+Hand episodes finish after 33 decisions and pay terminal signed marks to each
+seat's partnership. Match episodes retain marks and rotate the shaker; rewards
+are zero until the match ends, then +1/-1. A hand-ending match transition can
+contain both a result and the next hand's observation. Keep learning trajectories
+separate by seat, and apply terminal rewards to seats that acted earlier too.
+After a collector sink failure, abort and reset; do not retry the action.
 
-Implement `reset(seat)` and `act(obs)` on an ordinary class; inheritance from
-`Agent` is unnecessary. A minimal policy (not a competitive heuristic) is:
+Schema-5 JSONL preserves actor-visible states, global actions and public history.
+Privileged initial deals are opt-in collector labels stored outside Observation.
+See [encoding and collection](docs/encoding.md) for deserialization, validation,
+feature layouts and privacy; [action compatibility](docs/action-space.md) owns
+ID mappings and old-log migration.
 
-```python
-class FirstLegalAgent:
-    def reset(self, seat):
-        self.seat = seat
-        self.memory = []
+## Development
 
-    def act(self, obs):
-        assert obs.seat == self.seat
-        return obs.legal_action_ids[0]
-```
+Read [AGENTS.md](AGENTS.md) before contributing. Tests use standard-library
+`unittest`; optional RL/OpenSpiel tests skip if their dependencies are absent.
+GitHub Actions checks core and optional integrations. Run `git diff --check`
+before review, and preserve seeded behavior when refactoring research code.
 
-A heuristic can inspect `obs.view`. A future neural policy can call
-`texas42.encoding.encode(obs)` and select a global ID using `obs.action_mask`.
-Convert tensor/NumPy scalar results with `int(...)` before returning. Keep model
-imports in your own optional policy module. Search, PIMC and belief agents use
-the same ordinary interface when acting on information available to their seat.
-No neural model, training code, heuristic AI or search implementation is included.
+## License
 
-Use a distinct agent instance for each seat, even if instances share model
-weights. Keep private memory per instance and clear it in `reset`. `Game` rejects
-multiple adapters wrapping the same agent object. `Game.play_match()` resets
-players once before the match; hand boundaries preserve agent memory. Each
-standalone `Game.play_hand()` call resets players once. These hooks do not reset
-Game's existing marks, RNG or shaker; use a fresh Game for a fresh match.
-`Player.reset(seat)` is an optional-to-override no-op for existing players.
-Direct adapter callers must reset it before asking for a decision.
-
-`SelfPlayEnv` does not own agents. Its runner calls every agent's reset after
-`env.reset()` and before the first decision, once per episode. In match mode,
-do not reset agents between hands. An aborted rollout requires a fresh episode
-and agent resets. Agents receive observations only, never mutable engine objects
-or other seats' hands. Agents are called only when their seat acts; a recurrent
-policy can inspect the existing chronological public history for intervening moves.
-
-### Privileged agents
-
-`PrivilegedAgent` defines a separate
-`act_privileged(obs, state: PrivilegedState) -> int` method, plus `reset(seat)`.
-`PrivilegedState.hands` contains immutable tuples of remaining domino IDs for
-all four absolute seats. Public context remains in `obs`. Only a future explicit
-oracle/teacher runner may supply this snapshot. `AgentPlayer` exclusively calls
-ordinary `act`; it never constructs or passes privileged state. There is no
-oracle or privileged runner yet, and no hidden fields have been added to
-`Observation` or training records.
-
-## Optional PPO trick-play training
-
-Install `pip install -e ".[rl]"` and run `python -m examples.train_ppo`.
-Stage 1 learns trick play with heuristic bidding/trump against frozen HHH;
-ordinary engine imports remain dependency-free. See [the PPO guide](docs/ppo_training.md)
-for training, checkpoints, CPU/CUDA support, and duplicate-deal evaluation.
+[MIT](LICENSE).

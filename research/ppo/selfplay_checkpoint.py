@@ -1,10 +1,8 @@
 """Version-2 phase checkpoints; version-1 play weights retain their original meaning."""
 from dataclasses import asdict
 from pathlib import Path
-import random
-import numpy as np
 import torch
-from .checkpoint import metadata as legacy_metadata, save as legacy_save
+from .checkpoint import metadata as legacy_metadata, capture, restore_rng
 from .multiphase import phases
 from .opponents import PolicySpec
 
@@ -59,10 +57,9 @@ def config_from_dict(data):
 
 def save(path, trainer):
     path = Path(path)
-    # Reuse the established optimizer/RNG/Git capture, then atomically publish v2.
-    staging = path.with_name(path.name + '.capture')
-    legacy_save(staging, trainer)
-    data = torch.load(staging, map_location='cpu', weights_only=True)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # Capture once; no intermediate version-1 file or optimizer/RNG reload.
+    data = capture(trainer)
     neural = trainer.model.neural_phases
     for key in ('trained_phase', 'training_opponent', 'training_opponents', 'opponent_selection_scheme'):
         data['metadata'].pop(key, None)
@@ -83,7 +80,6 @@ def save(path, trainer):
     temporary = path.with_name(path.name + '.tmp')
     torch.save(data, temporary)
     temporary.replace(path)
-    staging.unlink()
 
 
 def resume(path, trainer):
@@ -116,12 +112,4 @@ def resume(path, trainer):
     trainer.bc_metrics = data.get('bc_metrics')
     trainer.initial_checkpoint_sha256 = data['metadata'].get('initial_checkpoint_sha256')
     trainer.initial_checkpoint_path = data['metadata'].get('initial_checkpoint_path')
-    rng = data['rng']
-    random.setstate(rng['python'])
-    state = rng['numpy']
-    np.random.set_state((state[0], np.array(state[1], dtype=np.uint32), *state[2:]))
-    torch.set_rng_state(rng['cpu'])
-    if trainer.device.type == 'cuda' and rng['cuda']:
-        torch.cuda.set_rng_state_all(rng['cuda'])
-    trainer.sampling.set_state(rng['sampling'])
-    trainer.shuffle.set_state(rng['shuffle'])
+    restore_rng(data['rng'], trainer)

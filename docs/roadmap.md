@@ -21,21 +21,17 @@ Step numbers match the team's live planning document.
 | 3 | Perfect-information oracle | Prototype only | planned `texas42/oracle.py` |
 | 4 | Common agent interface | Done | `agents/`: protocols, RandomAgent, AgentPlayer |
 | 5 | Baseline agents | V1 baselines done | HeuristicAgent, RandomAgent, ConservativeRandomAgent, HybridAgent; [phase ablations](policy_ablation.md) |
-| 6 | Self-play training | Stage-1 PPO implemented | `research/ppo/`, [training guide](ppo_training.md) |
+| 6 | Self-play training | Play-only and multi-phase historical PPO implemented | [legacy baseline](ppo_training.md), [current training](multiphase_selfplay.md) |
 | 7 | Hidden-information reasoning | Not started | planned `texas42/belief.py` |
 | 8 | Partnership behavior | Not started | uses the arena (step 11) |
-| 9 | Bidding | Not started | |
+| 9 | Bidding | Neural bid-only/joint PPO and counterfactual tools implemented; strength to evaluate | [multi-phase PPO](multiphase_selfplay.md), [counterfactuals](counterfactual_bidding.md) |
 | 10 | Special contracts (Nello) | IDs reserved | `actions.py` IDs 55–57 |
-| 11 | Evaluation | Done (ordinary agents) | `texas42/arena.py`, [arena.md](arena.md) |
+| 11 | Evaluation | Paired arena and phase composition implemented | [methodology](arena.md), [agent composition](phase_composable_evaluation.md) |
 
-Recommended build order puts the evaluation tools before training, so every
-learned agent is measured on the same harness:
-
-```text
-4 agent interface -> 3 oracle -> 5 baselines (heuristic, PIMC) -> 11 arena
-2 encoder ---------------------> 6 DMC / PPO  <--------------------- 11 arena
-6 -> 7 beliefs -> 8 cross-play partners -> 9 bidding -> 10 Nello
-```
+Next research priorities are multi-seed bidding ablations with identical frozen
+playing weights, then joint historical self-play on held-out schedules. Existing
+infrastructure supports these experiments; recurrent memory, beliefs, oracle
+execution and partnership cross-play remain separate research milestones.
 
 ## Known gaps in the current code
 
@@ -54,19 +50,11 @@ learned agent is measured on the same harness:
 
 ### 2. Self-play setup: feature encoder
 
-`texas42/encoding.py` turns an `Observation` into a fixed-length list of floats,
-from the acting seat's point of view. See [encoding.md](encoding.md). Parallel rollout collection now uses bounded spawn workers; see
-[parallel_execution.md](parallel_execution.md). Schema-5 JSONL loading
-now restores typed policy observations, and a separately versioned public
-history preserves action chronology without changing the 387-dimensional
-encoder. Opt-in `TrainingCollector` labels preserve the full initial deal
-outside observations, including across hand boundaries in match mode. Tests
-cover round trips, rotated-seat invariance, hidden-hand privacy, chronological
-replay and incompatible versions. See [encoding.md](encoding.md) for APIs and
-JSONL collection examples. `validation.validate_episode()` checks complete schema-5
-episodes and distinguishes privileged verified replay from partial consistency
-validation without independently recorded deals. Collector failures abort the
-rollout until reset. Recurrent models remain future work; optional Stage-1 PPO now trains trick play.
+The 387-feature actor-relative encoder, schema-5 observation round trips,
+chronological public history and opt-in privileged deal labels are implemented.
+Episode validation distinguishes verified replay from partial consistency checks.
+See [encoding](encoding.md) for the authoritative API and privacy boundary.
+Recurrent features and belief/oracle label generation remain future work.
 
 ### 3. Oracle (perfect-information solver)
 
@@ -79,8 +67,9 @@ minimize them. A tested prototype uses:
 - a transposition table keyed by `(hands, leader)` storing lower/upper bounds.
   At a trick boundary, the remaining value does not depend on history.
 
-It solves a full hand from the opening lead in about 0.4 s (median) in pure
-Python. Use it for: decision regret (best move value minus chosen move value),
+Historical prototype observation (not a packaged SC42 benchmark): a full hand
+from the opening lead took about 0.4 s median in pure Python. The original note
+does not specify hardware or sample count, so this is not a reproducible performance claim. Use it for: decision regret (best move value minus chosen move value),
 double-dummy contract checks, and as the inner solver of PIMC (step 5).
 Caveat: the oracle sees hidden hands, so it penalizes moves that are correct
 under uncertainty. Report regret on the true deal and averaged over
@@ -88,29 +77,12 @@ belief-consistent deals separately.
 
 ### 4. Common agent interface
 
-Implemented in `texas42/agents/`: ordinary `Agent.reset(seat)` and
-`Agent.act(Observation) -> int`, uniform `RandomAgent`, and `AgentPlayer` for
-`engine.Game`. `Player` retains its existing object-based decisions and gains
-a no-op episode reset hook. Shared pure legality and observation construction
-keep adapter inputs identical to native self-play inputs. The CLI's existing
-human/random player defaults remain unchanged.
-
-Use four distinct agent instances, allowing shared weights but isolated private
-memory. Game resets once per match or standalone hand; native self-play runners
-reset agents once per `env.reset()`, never per hand within a match. RandomAgent
-continues its seeded RNG stream across resets. See the [README](../README.md#common-agents)
-and run `python -m examples.agent_selfplay` for a complete hand.
-
-Custom heuristic, neural, PIMC and belief policies implement the ordinary
-protocol without depending on mutable engine state. Neural imports and training
-remain outside the core interface. A separate `PrivilegedAgent` protocol accepts
-an immutable `PrivilegedState` containing remaining hands; ordinary adapters
-never provide it. The oracle and its runner remain future work.
-
-The arena now accepts four per-seat factories, resets at episode boundaries,
-and dispatches only acting-seat observations. Predetermined duplicate schedules
-and paired bootstrap intervals support reproducible comparisons. Privileged
-oracle execution remains a separate future path; see [arena.md](arena.md).
+Ordinary policies implement `reset(seat)` and `act(Observation) -> int`.
+The native environment, console adapter and arena share observations and legal
+IDs; each seat has isolated memory. See [common agents](../README.md#common-agents)
+for lifecycle and usage. A separate privileged protocol exists, but an oracle
+runner is not implemented. Search and belief policies should use ordinary
+observations unless explicitly evaluated as privileged teachers.
 
 ### 5. Baselines
 
@@ -131,19 +103,22 @@ PIMC remains future work; Stage-1 PPO provides a learned trick-play baseline.
 
 ### 6. Self-play training
 
-Implemented: masked hand-level PPO with heuristic bidding/trump, selectable frozen baseline variants or reproducible weighted mixtures, separate per-seat GAE, safe versioned checkpoints, deterministic CPU
-resumption, and arena evaluation. See [ppo_training.md](ppo_training.md).
-Multi-opponent validation and an explicit primary checkpoint-selection policy are
-implemented, with backward-compatible HHH checkpoint migration. Joint phase
-training, recurrent policies, match PPO, learned-opponent pools and true self-play
-remain future work. The following are possible extensions:
+The [legacy play-only PPO](ppo_training.md) remains a reproducible baseline.
+[Multi-phase PPO](multiphase_selfplay.md) supports independent bidding/play
+networks, frozen pretrained play, optional heuristic imitation, historical neural
+opponents, exact snapshot-roster resume, and phase diagnostics. Trump routing and
+optional training are available; effective trump learning is an empirical goal.
 
-- **Deep Monte Carlo** (DouZero): learn Q(state, action) from Monte Carlo hand
-  returns, with ε-greedy exploration over legal IDs. Simple and stable; do it first.
-- **PPO / actor-critic:** phase heads from `ACTION_REGISTRY.phase_slots()`
-  (bid 21, trump 9, play 28) or one 58-way head. Mask illegal logits before sampling.
-- Train against a pool of past checkpoints, and save `training_metadata()` with
-  every checkpoint.
+Next experiments:
+
+- Compare multiple Stage A seeds against heuristic bidding with identical play.
+- Evaluate joint historical training against HHH, CHH and the original anchor on
+  independent held-out schedules; track playing-policy forgetting.
+- Study opponent-pool curricula and cross-play partners before introducing live
+  self-play, recurrent policies, match-level PPO or privileged critics.
+- Deep Monte Carlo remains an alternative algorithm to compare under equal budgets.
+
+Short smoke tests establish mechanics, not competitive gains or generalization.
 
 ### 7. Hidden-information reasoning
 
@@ -169,10 +144,15 @@ private conventions; Other-Play is a known mitigation.
 
 ### 9. Bidding
 
-First regress hand strength (probability of reaching each bid) from oracle or
-PIMC outcomes over sampled partner/opponent hands; fix that bidder while
-training play; then fine-tune jointly with `episode="match"`. Double-dummy
-results overestimate the bidder, so calibrate against real play.
+Bidding-only and joint PPO are implemented. First-voluntary BID/PASS replay
+experiments estimate action value under fixed continuation policies; see
+[counterfactual bidding](counterfactual_bidding.md). Broader opportunity sampling,
+repeated stochastic continuations and match-value experiments remain future work.
+
+Evaluate learned bidding using the [same-play phase ablation](phase_composable_evaluation.md).
+Contract success alone does not show that bidding was preferable to passing.
+Oracle/PIMC strength labels are a possible future initialization, with calibration
+against real imperfect-information play because double-dummy outcomes overestimate it.
 
 ### 10. Special contracts
 
@@ -182,15 +162,19 @@ then mark the action implemented. See [action-space.md](action-space.md).
 
 ### 11. Evaluation
 
-Implemented: dependency-free hand/match execution, deterministic complete deal
-schedules, duplicate partnerships, explicit seat permutations, policy-perspective
-metrics, and group-resampled 95% bootstrap intervals. Matches retain agent memory
-and use official shaker rotation. Run `python -m examples.arena_benchmark`; see
-[arena.md](arena.md) for metric definitions, seed coupling, exports, and limits.
-Phase-wise baseline ablations now reuse this arena and its formatted reports.
-Next: held-out schedules, learned-checkpoint evaluation and
-cross-play matrices. Oracle execution/regret, joint phase training, and advanced
-statistical testing remain future work.
+The [arena](arena.md) owns duplicate schedules, hand/match metrics, contract
+origin/timing diagnostics and group bootstrap definitions. New two-agent
+experiments use [phase composition](phase_composable_evaluation.md); legacy
+checkpoint and multi-opponent validation interfaces remain supported.
+
+Next: multi-seed held-out comparisons, partnership cross-play matrices, and
+explicit privileged-oracle evaluation/regret. Confidence intervals over deal
+groups do not capture variation across training seeds.
+
+Shared spawn workers and deterministic merging are implemented; see
+[parallel execution](parallel_execution.md). [Evaluation performance](evaluation_performance.md)
+preserves measured bootstrap and validation benchmarks. Centralized batched
+inference, asynchronous learning and multi-host execution remain future work.
 
 ## References
 
@@ -246,46 +230,3 @@ Papers:
   Sampling in Game Tree Search" (AAAI 2010)
 - Frank & Basin, "Search in Games with Incomplete Information: A Case Study
   Using Bridge Card Play" (Artificial Intelligence, 1998)
-
-### Counterfactual bidding diagnostics
-
-Hand-mode BID/PASS replay experiments are available in
-`texas42/experiments/counterfactual_bidding.py`; see
-[counterfactual_bidding.md](counterfactual_bidding.md). First voluntary bids are
-compared under fixed continuation policies with exact BID-replay checks and
-duplicate-group bootstrap intervals. Broader opportunity sampling, repeated
-stochastic continuations, multiple interventions per group, and match-value
-experiments remain future work. Existing agents and ordinary arena metrics are
-unchanged.
-
-### Shared parallel execution
-
-`texas42.parallel` provides CPU-aware worker resolution and bounded ordered spawn
-pools. Arena/counterfactual duplicate groups and frozen CPU PPO rollouts support
-`--threads`, with deterministic merging, separate PyTorch thread controls, and
-explicit legacy/episode-seeded checkpoint rules. Centralized batched inference,
-asynchronous training and distributed multi-host execution remain future work.
-See [parallel_execution.md](parallel_execution.md) for scaling measurements.
-
-See [evaluation performance](evaluation_performance.md) for cached cluster bootstrap,
-independent `--eval-threads` validation workers, profiling, and readable log/CSV exports.
-
-## Independent phase learning and historical self-play
-
-Implemented an additional [multi-phase PPO path](multiphase_selfplay.md):
-
-- Bidding-only PPO initialized from an existing play checkpoint, with completely
-  separate trainable bidding and bitwise frozen playing modules.
-- Optional masked heuristic bidding imitation, joint chronological bid/play
-  trajectories, per-seat GAE, and phase-specific PPO diagnostics.
-- Frozen original anchors and named checkpoint opponents, reproducible weighted
-  pools, bounded historical snapshot membership, and exact roster resumption.
-- Version-2 phase-aware checkpoints, backward-compatible play-only inference,
-  duplicate-deal validation against the original anchor, and play-KL monitoring.
-- Trump routing/serialization and optional neural trump learning are prepared;
-  effective learned trump policies remain an empirical research milestone.
-
-Next: run multi-seed Stage A experiments against the identical frozen-play anchor,
-then test joint historical self-play on independent held-out schedules. Add
-recurrent memory, pool curricula, or optional forgetting regularization only as
-explicit research ablations. Smoke tests are not evidence of competitive gains.

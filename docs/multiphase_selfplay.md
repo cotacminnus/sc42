@@ -1,6 +1,6 @@
 # Multi-phase PPO and historical self-play
 
-The new `train_selfplay_ppo` entry point adds independent bidding, playing, and
+The current `train_selfplay_ppo` entry point adds independent bidding, playing, and
 optional trump actor-critics. The original `train_ppo` and version-1 checkpoints
 retain their behavior. This is hand-level PPO, not simultaneous learner-versus-
 learner training. Rules, the 387-feature encoder, 58 global actions, schema-5
@@ -29,16 +29,7 @@ about effective neural trump training is made by the small integration tests.
 
 ## Stage A: learn bidding, preserve play
 
-```bash
-python -m examples.train_selfplay_ppo \
-  --init-play-checkpoint runs/ppo-play-v1/checkpoints/best.pt \
-  --learn-phases bid --play-policy frozen --trump-policy heuristic \
-  --bid-bc-hands 4096 --opponent-pool HHH:0.5,anchor:0.5 \
-  --total-hands 262144 --rollout-decisions 1024 \
-  --ppo-epochs 4 --minibatch-size 256 --learning-rate 0.0001 \
-  --threads 8 --eval-threads 1 --device auto --seed 42 \
-  --output-dir runs/ppo-bidding-v1
-```
+Use the [Stage A command](command_reference.md#stage-a-frozen-play-learned-bidding).
 
 `anchor` is the immutable original play-only checkpoint with heuristic bid/trump.
 Its absolute path and SHA256 are recorded. The width defaults to the initial
@@ -53,17 +44,7 @@ Imitating HHH is initialization, not evidence of optimal bidding.
 
 ## Stage B: joint training
 
-```bash
-python -m examples.train_selfplay_ppo \
-  --init-checkpoint runs/ppo-bidding-v1/checkpoints/best.pt \
-  --learn-phases bid,play --trump-policy heuristic \
-  --opponent-pool HHH:0.3,anchor:0.3,self-snapshots:0.4 \
-  --snapshot-every-hands 32768 --snapshot-pool-size 8 \
-  --total-hands 524288 --rollout-decisions 4096 \
-  --ppo-epochs 4 --minibatch-size 512 --learning-rate 0.0001 \
-  --threads 8 --eval-threads 1 --device auto --seed 42 \
-  --output-dir runs/ppo-joint-v1
-```
+Use the [Stage B command](command_reference.md#stage-b-joint-training-with-historical-opponents).
 
 `--init-checkpoint` transfers all phase weights into a **new experiment** with
 fresh optimizer, counters, and RNG streams. It does not import an old snapshot
@@ -118,24 +99,14 @@ Do not remove files needed by a checkpoint you intend to resume.
 
 ## Checkpoints, resume, and evaluation
 
+See [resume and validation commands](command_reference.md#resume-and-multi-opponent-validation).
+
 Version-2 checkpoints record independent modules, neural/trained/learning/frozen
 phase metadata, original anchor identity, architecture, optimizer, counters,
 all existing RNG states, exact snapshot roster, opponent distribution, primary
 selection opponent, compatibility versions, Git SHA, and dirty-worktree flag.
 Version-1 inference remains supported. Migration initializes a new stage, never
 pretending its previously untrained bidding outputs were learned.
-
-```bash
-python -m examples.train_selfplay_ppo \
-  --resume runs/ppo-joint-v1/checkpoints/latest.pt \
-  --total-hands 1048576 --threads 4 --eval-threads 1 \
-  --output-dir runs/ppo-joint-v1
-
-python -m examples.evaluate_selfplay_ppo \
-  --checkpoint runs/ppo-bidding-v1/checkpoints/best.pt \
-  --opponents HHH,CHH,HHR,anchor --deals 4096 --seed 12345 \
-  --threads 4 --output runs/ppo-bidding-v1/heldout.json
-```
 
 Resume restores omitted options from the checkpoint. Explicit changes to phases,
 architecture, optimizer settings, opponent identities, validation procedure, or
@@ -147,7 +118,7 @@ stages. Checkpoint dependencies must remain present at their recorded paths.
 on identical paired schedules and selects `best.pt` by the primary opponent's
 mean signed marks, never an unlabeled average. Existing `evaluate_ppo --opponent
 HHH` also handles version-2 policies. Explicit historical policies are available
-through the new evaluation CLI's `--opponent-checkpoint NAME=PATH`.
+through `evaluate_selfplay_ppo`'s `--opponent-checkpoint NAME=PATH`.
 
 Progress JSONL retains primary `evaluation` and adds separate reports, identities,
 resolved-contract diagnostics, bid/pass counts, and declarer/defender outcomes.
@@ -172,9 +143,9 @@ Joint historical self-play can overfit its finite opponent pool. Short smoke tes
 establish mechanics, not stronger bidding, generalization, equilibrium, or Nash
 optimality. Recurrent memory, live self-play, privileged critics, and opponent-pool
 curricula remain future research. Benchmark warmed costs with
-`python -m examples.multiphase_benchmark --hands 64 --workers 1 4`.
+the [multi-phase benchmark command](command_reference.md#multi-phase-arguments).
 
-## Local smoke validation and measured performance
+## Historical smoke validation and measured performance
 
 The implementation was exercised with the available 256-wide play checkpoint
 (SHA256 `82810b346ecc93cf0ccc34494637fcc23182397ac6196880f298d557f2949a6c`).
@@ -218,12 +189,16 @@ inference/RSS separately, so those legacy baseline fields are unavailable rather
 than estimated. Snapshot SHA256 covers the entire file: execution provenance can
 change a file's hash even when model tensors and future sampled decisions agree.
 
-## Independent phase evaluation
+## Evaluation ownership
 
-Use `python -m examples.evaluate_agent_vs_agent` to configure both partnerships'
-bid, trump and play policies independently, including distinct checkpoint sources.
-For a bidding ablation, give both agents the **same joint-trained playing network**
-and vary only bidding; the evaluator checks actual playing tensors. See
-[phase-composable evaluation](phase_composable_evaluation.md) for commands,
-checkpoint validation, historical-policy comparisons, and log/CSV outputs.
-This is evaluation-only and does not change training or checkpoint formats.
+[Phase-composable evaluation](phase_composable_evaluation.md) is the canonical
+system for new agent comparisons, including holding the joint playing network
+constant while varying bidding. `evaluate_selfplay_ppo` remains the compatibility
+command for multi-opponent anchor/archive reports. Training validates in-memory
+models through the same shared snapshot factory and arena execution; it does not
+write a temporary checkpoint for evaluation.
+
+Checkpoint serialization and RNG restoration are shared with the legacy trainer
+in `checkpoint.py`; phase metadata and roster validation remain in
+`selfplay_checkpoint.py`. The two collectors remain distinct because their sample
+counts, RNG schemes and enabled-phase trajectories have different semantics.

@@ -10,7 +10,6 @@ from .opponents import HistoricalPool, PolicySpec
 from .buffer import RolloutBuffer
 from .rollout import initialize_worker, snapshot
 from .selfplay_rollout import phase_chunk
-from .selfplay_evaluation import PhaseFactory
 
 
 @dataclass(frozen=True)

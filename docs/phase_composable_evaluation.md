@@ -23,17 +23,7 @@ compatibility checks and safe `weights_only=True` loading remain enforced.
 
 ## Hold joint-trained playing parameters constant
 
-```bash
-python -m examples.evaluate_agent_vs_agent \
-  --agent-a-checkpoint runs/ppo-joint-v1/checkpoints/best.pt \
-  --agent-a-bid neural --agent-a-trump heuristic --agent-a-play neural \
-  --agent-b-checkpoint runs/ppo-joint-v1/checkpoints/best.pt \
-  --agent-b-bid heuristic --agent-b-trump heuristic --agent-b-play neural \
-  --deals 4096 --seed 31415926 --bootstrap-seed 0 \
-  --bootstrap-samples 2000 --threads 4 \
-  --output runs/ppo-joint-v1/bidding-ablation.json \
-  --log-dir logs/experiments/joint-bidding-ablation
-```
+Run the [same-play bidding ablation](command_reference.md#hold-joint-playing-fixed-change-bidding).
 
 The report must say `Shared playing parameters: YES` and identify bidding as the
 only differing phase. This compares neural and heuristic bidding with identical
@@ -42,23 +32,14 @@ Bidding can change downstream auctions and legal play trajectories.
 
 ## Independent checkpoint sources
 
-```bash
-python -m examples.evaluate_agent_vs_agent \
-  --agent-a-bid neural \
-  --agent-a-bid-checkpoint runs/ppo-bidding-v1/checkpoints/best.pt \
-  --agent-a-trump heuristic --agent-a-play neural \
-  --agent-a-play-checkpoint runs/ppo-joint-v1/checkpoints/best.pt \
-  --agent-b-bid conservative --agent-b-trump random --agent-b-play neural \
-  --agent-b-play-checkpoint runs/ppo-play-v1/checkpoints/best.pt \
-  --deals 4096 --seed 42 --threads 4
-```
+See [independent-source commands](command_reference.md#independent-checkpoint-sources).
 
 This holds no complete opponent policy constant: it evaluates the specified
 compositions. To compare joint PPO against the original play-only PPO, select the
 joint checkpoint as A's default with neural bid/play, and the original play-only
 checkpoint as B's default with heuristic bid/trump and neural play.
 
-To isolate conservative versus neural bidding with identical play, use the first
+To isolate conservative versus neural bidding with identical play, use the same-play
 command and change only `--agent-b-bid conservative`. To evaluate archived
 historical policies, substitute their immutable snapshot paths for either agent's
 phase sources; trained-phase validation applies equally to archived files.
@@ -67,15 +48,8 @@ ordinary bid/play checkpoints do not supply it.
 
 ## Non-neural comparisons
 
-```bash
-# HHH against HHH: deterministic paired symmetry check
-python -m examples.evaluate_agent_vs_agent --deals 64 --seed 42
-# HHH against conservative bidding with heuristic trump/play
-python -m examples.evaluate_agent_vs_agent --agent-b-bid conservative --deals 64
-# HHH against heuristic bidding with random trump/play
-python -m examples.evaluate_agent_vs_agent \
-  --agent-b-trump random --agent-b-play random --deals 64
-```
+The [non-neural recipes](command_reference.md#pure-heuristic-conservative-and-random-comparisons)
+cover HHH symmetry checks, conservative bidding and random phase substitutions.
 
 ## Reports, reproducibility and interpretation
 
@@ -98,22 +72,29 @@ neural parameters; it does not compare stochastic realizations.
 
 `CompositePolicySpec`, `PhasePolicySpec`, `CompositeAgentFactory`, and
 `evaluate_composed()` in `research/ppo/composition.py` form the reusable API.
-Factories are spawn-safe. Each distinct checkpoint is verified and cached once
+Factories are spawn-safe. `evaluate_matchups()` shares arena execution with the
+legacy in-memory validators. Checkpoint loading/caching lives in `checkpoint.py`;
+`opponents.py` owns file identities and named opponent registries. Each distinct checkpoint is verified and cached once
 per worker; seats share frozen weights but retain separate delegate state and
 RNGs. Reset assigns a seat without rewinding streams. Random streams follow the
 existing HybridAgent scheme; stochastic neural streams use separate stable seeds
 per phase. No global training RNG is consumed. CPU neural inference uses one
 numerical thread; the calling process's thread setting is restored. Existing
-play-only, multi-phase and ablation CLIs remain supported.
+play-only, multi-phase and ablation CLIs remain supported. Their argument parsing
+and report envelopes remain compatibility adapters: `evaluate_ppo` preserves its
+flat single-opponent JSON or named multi-opponent reports; `evaluate_selfplay_ppo`
+retains anchor identity checks and archived opponent registration. Both retain
+legacy `PPOAgent` inference, rather than changing an archived experiment's RNG
+scheme to the explicit per-phase streams of this API.
 
-ABAB/BABA games use the same absolute-seat deal and shaker within each duplicate
-group. Confidence intervals resample complete groups using the existing estimator.
+See [arena methodology](arena.md#comparing-partnerships) for deal/seat coupling and
+[uncertainty](arena.md#uncertainty) for complete-group bootstrap definitions.
 Changing worker count preserves experimental results; runtime metadata is separate.
 An evaluation estimates performance against the chosen continuation policies and
 deal distribution. It does not prove globally optimal bidding or Nash equilibrium.
 Success rates conditioned on different declared hands are not causal comparisons.
 
-## Measured integration check
+## Historical measured integration check
 
 A local CPU check used the Stage B smoke checkpoint
 `runs/multiphase-stage-b-smoke/checkpoints/best.pt` (SHA256

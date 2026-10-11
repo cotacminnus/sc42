@@ -6,17 +6,16 @@ from pathlib import Path
 import sys
 from time import perf_counter
 import torch
-from examples.experiment_output import record_output, add_output_arguments
+from examples.experiment_output import record_output, add_output_arguments, add_config_arguments
 from research.ppo.trainer import Config
 from research.ppo.checkpoint import load_model
 from research.ppo.multiphase import phases, PhaseActorCritic
-from research.ppo.opponents import PolicySpec, historical_pool
+from research.ppo.opponents import PolicySpec, historical_pool, policy_registry
 from research.ppo.selfplay_trainer import SelfPlayConfig, SelfPlayTrainer
 from research.ppo.selfplay_checkpoint import save, resume, config_from_dict
 from research.ppo.selfplay_evaluation import evaluate_phases, frozen_model, evaluation_diagnostics
 from research.ppo.imitation import clone_bidding, teacher_data, playing_kl
 from research.ppo.seeds import stream_seed
-from texas42.agents import VARIANTS
 from texas42.parallel import resolve_workers
 
 
@@ -25,10 +24,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     defaults = Config(learning_rate=1e-4)
     skipped = {'train_opponents', 'eval_opponents', 'selection_opponent', 'rollout_play_steps', 'sampling_scheme'}
-    for field in fields(Config):
-        if field.name not in skipped:
-            value = getattr(defaults, field.name)
-            parser.add_argument('--' + field.name.replace('_', '-'), type=type(value), default=value)
+    add_config_arguments(parser, defaults, exclude=skipped)
     source = parser.add_mutually_exclusive_group()
     source.add_argument('--init-play-checkpoint', type=Path)
     source.add_argument('--init-checkpoint', type=Path, help='New stage: weights only, fresh optimizer/RNG')
@@ -71,12 +67,8 @@ def main(argv=None):
             raise ValueError('Anchor must be the original play-only policy, not a multi-phase checkpoint')
         if saved and saved.anchor.sha256 != anchor_spec.sha256:
             raise ValueError('New stage must retain its original play anchor identity')
-        policies = [PolicySpec(name) for name in VARIANTS] + [anchor_spec]
-        for entry in args.opponent_checkpoint:
-            name, path = entry.split('=', 1)
-            if name in VARIANTS or name in ('anchor', 'self-snapshots'):
-                raise ValueError('Custom checkpoint names cannot replace built-in policies')
-            policies.append(PolicySpec.checkpoint(name, path))
+        policies = tuple(policy_registry(anchor_spec, args.opponent_checkpoint,
+                                         reserved=('self-snapshots',)).values())
         enabled = phases(args.learn_phases)
         if args.play_policy and (args.play_policy == 'trainable') != ('play' in enabled):
             raise ValueError('play-policy must agree with learn-phases')

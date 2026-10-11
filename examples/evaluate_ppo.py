@@ -1,7 +1,6 @@
 """Evaluate a Stage-1 PPO checkpoint through the existing duplicate-deal arena."""
-from examples.experiment_output import record_output, add_output_arguments
+from examples.experiment_output import record_output, add_evaluation_arguments
 import argparse
-import hashlib
 import json
 from pathlib import Path
 from time import perf_counter
@@ -23,13 +22,7 @@ def main(argv=None):
     opponents = parser.add_mutually_exclusive_group()
     opponents.add_argument('--opponent', choices=VARIANTS)
     opponents.add_argument('--opponents', help='Comma-separated validation variants')
-    parser.add_argument('--deals', type=int, default=2048)
-    parser.add_argument('--seed', type=int, default=12345)
-    parser.add_argument('--bootstrap-seed', type=int, default=0)
-    parser.add_argument('--bootstrap-samples', type=int, default=2000)
-    parser.add_argument('--output', type=Path)
-    parser.add_argument('--threads', type=int, default=1)
-    add_output_arguments(parser)
+    add_evaluation_arguments(parser)
     args = parser.parse_args(argv)
     try:
         resolve_workers(args.threads, args.deals)
@@ -45,7 +38,7 @@ def main(argv=None):
                            bootstrap_seed=args.bootstrap_seed, bootstrap_samples=args.bootstrap_samples,
                            threads=args.threads, performance=performance)
     elapsed = perf_counter() - started
-    identifier = hashlib.sha256(args.checkpoint.read_bytes()).hexdigest()
+    identifier = model.checkpoint_sha256
     print(f'Checkpoint: {args.checkpoint} (SHA256 {identifier})')
     details_by_opponent = {}
     for name, report in reports.items():

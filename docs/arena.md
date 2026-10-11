@@ -2,11 +2,10 @@
 
 `texas42.arena` runs ordinary `Agent` implementations through `EpisodeState`.
 It adds no rules, training dependencies, or changes to observation encodings.
-Results are frozen dataclasses; the runner never prints. Run the baseline with:
-
-```sh
-python -m examples.arena_benchmark --deals 30 --seed 42 --bootstrap-seed 123
-```
+Results are frozen dataclasses; the runner never prints. This document owns
+evaluation methodology and statistical definitions. See the [command reference](command_reference.md)
+for baseline commands and [phase composition](phase_composable_evaluation.md) for
+new agent-vs-agent experiments, including neural checkpoints.
 
 ## Comparing partnerships
 
@@ -128,8 +127,8 @@ with open('arena-report.json', 'w') as output:
 ```
 
 `to_dict()` includes derived success/length fields and preserves nested contract
-values. For CSV, select fields from each game/hand into rows with `csv.DictWriter`;
-retain group IDs and policy assignments so downstream analysis stays paired.
+values. Experiment CLIs export per-hand and metric CSVs through `experiment_output.py`,
+retaining group IDs and policy assignments. See [output locations](command_reference.md#4-outputs-reproducibility-and-common-pitfalls).
 The arena report is separate from schema-5 training logs.
 
 ## Uncertainty
@@ -164,9 +163,9 @@ A future privileged-oracle runner must call `PrivilegedAgent.act_privileged`
 through a separate explicit boundary. It must label those results separately
 from ordinary imperfect-information policy evaluations. PIMC, beliefs, heuristic
 agents and learned policies can use the existing ordinary factories. Next steps
-are a deterministic heuristic baseline, held-out deal schedules, checkpoint
-metadata validation in learned-agent factories, and comparisons across multiple
-training seeds. This module does not implement models, search, training, special
+are privileged-oracle execution and comparisons across multiple training seeds.
+Heuristic baselines, held-out schedules and checkpoint validation are already
+implemented outside this engine module. This module does not implement models, search, training, special
 contracts, or an oracle.
 
 ## Resolved bid origin

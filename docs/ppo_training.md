@@ -1,4 +1,4 @@
-# Stage 1: PPO trick play
+# Legacy baseline: PPO trick play
 
 The optional `research/ppo` package trains a feed-forward actor/critic using only
 `encode(Observation)`. Bidding and trump selection remain the current heuristic
@@ -7,7 +7,11 @@ any existing phase variant or a weighted mixture. Freezing these phases makes HH
 trick-play quality and avoids uniform random overbidding confounding results.
 No changes are made to rules, actions, observations, or schema-5 records.
 
-## Installation and commands
+## Scope and commands
+
+This guide owns the original play-only method and version-1 checkpoint continuity.
+Use [multi-phase PPO](multiphase_selfplay.md) for current learned bidding and historical self-play.
+Copy-ready commands and all flag defaults are in the [command reference](command_reference.md#24-start-legacy-play-only-ppo-from-scratch-parallel).
 
 Python 3.11+ is supported, subject to available PyTorch wheels for your Python
 version/platform. Install `python -m pip install -e '.[rl]'`. This extra includes
@@ -15,17 +19,6 @@ PyTorch >=2.3 and NumPy >=1.24; ordinary `texas42` imports need neither. Install
 CPU or CUDA PyTorch build appropriate to your machine using the
 [PyTorch installation selector](https://pytorch.org/get-started/locally/).
 OpenSpiel is not needed. Linux, WSL2 and Windows use the same Python code.
-
-```bash
-python -m examples.train_ppo \
-  --total-hands 100000 --rollout-play-steps 4096 \
-  --ppo-epochs 4 --minibatch-size 512 --learning-rate 0.0003 \
-  --seed 42 --device auto --output-dir runs/ppo-play-v1
-
-python -m examples.evaluate_ppo \
-  --checkpoint runs/ppo-play-v1/checkpoints/best.pt \
-  --opponent HHH --deals 2048 --seed 12345 --output runs/ppo-play-v1/test.json
-```
 
 Repeat evaluation with `--opponent CHH` and `--opponent HHR` for complementary
 comparisons. HHH keeps auction and trump rules equal and is the primary metric.
@@ -54,7 +47,7 @@ without rewinding the optional stochastic inference generator.
 
 ## Complete hands and per-seat GAE
 
-`Trainer.collect()` creates a fresh hand environment and four reset heuristics.
+`Trainer.collect()` creates a fresh hand environment and four independent reset agents.
 The learning partnership alternates between absolute teams each episode. Only
 its two seats' play actions enter the buffer, normally 14 samples per hand.
 The old network remains fixed for the entire rollout. Collection reaches the
@@ -81,17 +74,7 @@ using a dedicated generator. PPO minimizes the clipped surrogate plus value MSE
 minus legal entropy, using detached old log probabilities and targets. The buffer
 is cleared after updating. Model parameters actually change through Adam steps.
 
-| Setting | Default |
-| --- | --- |
-| Adam learning rate | 0.0003 |
-| Gamma / GAE lambda | 1.0 / 0.95 |
-| PPO clip | 0.2 |
-| Value / entropy coefficients | 0.5 / 0.01 |
-| Maximum gradient norm | 0.5 |
-| Epochs / minibatch | 4 / 512 |
-| Rollout play samples | 4096 (rounded up to a complete hand) |
-| Optional KL threshold | 0 (disabled) |
-
+Optimizer defaults are listed in the [argument reference](command_reference.md#33-ppo-training-configuration-flags).
 All are CLI options (`--gamma`, `--gae-lambda`, `--clip-epsilon`, `--value-coef`,
 `--entropy-coef`, `--max-grad-norm`, `--target-kl`). Non-finite losses or gradients
 abort training. Logs report sample-weighted optimization diagnostics, including
@@ -119,11 +102,6 @@ CUDA-trained parameters can always be evaluated on CPU. Generated runs and `.pt`
 files are Git-ignored. Preserve the committed baseline and environment versions
 for publication; a dirty working tree is explicitly recorded.
 
-```bash
-python -m examples.train_ppo --resume runs/ppo-play-v1/checkpoints/latest.pt \
-  --total-hands 200000 --seed 42 --device auto --output-dir runs/ppo-play-v1
-```
-
 Resume uses the same training configuration, with permitted execution changes described
 in [parallel_execution.md](parallel_execution.md), and verifies
 the resolved device type, and restores optimizer and RNG state. Exact continuation
@@ -150,13 +128,12 @@ or a distribution of them. It may exploit those continuation policies, and its o
 The critic is decentralized and sees the same public/private observation as the
 actor. Winning against HHH is an empirical question, not a smoke-test criterion.
 
-Future work can extend the same buffer to trump decisions, then bidding, then
-joint phase training with clearly defined returns and masks. Historical neural
-checkpoint pools and true self-play remain future generalization experiments. Recurrent policies require
+Independent phase training and frozen historical pools are implemented in the
+[separate multi-phase trainer](multiphase_selfplay.md). They do not alter this
+legacy baseline. Recurrent policies require
 sequence batching and memory isolation. Centralized privileged critics would
 require a separate explicit data path while retaining ordinary decentralized
-execution. Match-level returns need their own lifecycle and GAE design. None of
-these extensions is implemented here.
+execution. Match-level returns need their own lifecycle and GAE design. These extensions are not part of the play-only trainer.
 
 ## Parallel simulation
 
@@ -169,7 +146,6 @@ checkpoint migration, warm starts, exact resume rules, profiling, and benchmarks
 See [evaluation performance](evaluation_performance.md) for cached cluster bootstrap,
 independent `--eval-threads` validation workers, profiling, and readable log/CSV exports.
 
-
 ## Configuring training and evaluation opponents
 
 All six frozen phase variants are supported: HHH, CHH, HHR, HRR, CRR and RRR.
@@ -179,24 +155,14 @@ Only the opposing partnership changes: PPO still controls play on its two seats,
 with heuristic bidding and trump selection. The learning partnership rotates by
 episode exactly as before. Rewards, per-seat GAE and PPO optimization are unchanged.
 
-Fixed HHH training is the default and retains its original agent construction and
-sampling behavior. Single-opponent and mixture arguments are mutually exclusive:
-
-```bash
-python -m examples.train_ppo --total-hands 524288 --train-opponent HHH \
-  --threads 8 --eval-threads 1 --output-dir runs/ppo-vs-hhh
-python -m examples.train_ppo --total-hands 524288 --train-opponent CHH \
-  --eval-opponent HHH --threads 8 --eval-threads 1 --output-dir runs/ppo-vs-chh
-python -m examples.train_ppo --total-hands 524288 --train-opponent HHR \
-  --eval-opponent HHH --threads 8 --output-dir runs/ppo-vs-random-play
-python -m examples.train_ppo --total-hands 524288 \
-  --train-opponents HHH:0.7,CHH:0.2,HHR:0.1 --eval-opponents HHH,CHH,HHR \
-  --selection-opponent HHH --threads 8 --eval-threads 1 --output-dir runs/ppo-mixed
-```
+Fixed HHH training retains its original agent construction and sampling behavior.
+Single-opponent and mixture arguments are mutually exclusive. See the
+[mixed-opponent recipes](command_reference.md#legacy-mixed-opponent-training-recipes)
+for HHH, CHH, HHR, mixed training, validation, resume and warm-start commands.
 
 Names must be registered and unique; weights must be finite and strictly positive.
 Weights need not sum to one: `HHH:7,CHH:2,HHR:1` is exactly equivalent to the
-last example. Pools are sorted by name and stored as normalized rational strings
+70/20/10 mixture. Pools are sorted by name and stored as normalized rational strings
 (e.g. `7/10`) to preserve exact configuration equivalence on checkpoint reload.
 The displayed probabilities are decimals. Empty pools and invalid entries fail
 before training. Each hand draws one identity for both opposing seats; it never
@@ -223,12 +189,6 @@ HHH is primary by default when present; otherwise an explicit choice is required
 Standalone evaluation retains its single-opponent interface and adds an optional
 multi-opponent mode:
 
-```bash
-python -m examples.evaluate_ppo --checkpoint runs/ppo-mixed/checkpoints/best.pt \
-  --opponents HHH,CHH,HHR --deals 2048 --threads 4 --seed 12345 \
-  --output runs/ppo-mixed/test.json --log-dir logs/experiments/ppo-mixed-test
-```
-
 Single-opponent JSON is unchanged. Multi-opponent JSON has `evaluations` and
 `breakdowns` keyed by name, plus the checkpoint identifier. Hand and metric CSVs
 include an opponent column. Training keeps existing primary `evaluation` and
@@ -249,34 +209,19 @@ configuration. Changed distributions or selection criteria are rejected before
 restoring training state, preventing reuse of an incomparable `best_score`.
 Evaluation worker count remains an execution-only CLI option.
 
-```bash
-python -m examples.train_ppo --resume runs/ppo-mixed/checkpoints/latest.pt \
-  --total-hands 1048576 --train-opponents HHH:7,CHH:2,HHR:1 \
-  --eval-opponents HHH,CHH,HHR --selection-opponent HHH \
-  --threads 4 --eval-threads 1 --output-dir runs/ppo-mixed
-python -m examples.train_ppo --warm-start runs/ppo-play-v1/checkpoints/best.pt \
-  --total-hands 524288 --train-opponents HHH:0.5,CHH:0.3,HHR:0.2 \
-  --eval-opponents HHH,CHH,HHR --selection-opponent HHH \
-  --threads 8 --output-dir runs/ppo-mixed-warmstart
-```
-
 Match the remaining hyperparameters and sampling scheme for exact resume. A warm
 start copies only model weights into a new optimizer, counters and RNG streams;
 it is a new experiment. Neither mode changes older checkpoint files. These pools
-currently support registered baseline variants only; frozen learned opponents,
-historical snapshot pools and current-policy self-play remain future work.
+support registered baseline variants only; frozen learned opponents and historical
+snapshots belong to the [multi-phase path](multiphase_selfplay.md). Live self-play remains future work.
 Performance against random agents, especially RRR's aggressive bidding, does not
 establish competitive strength. Validate on held-out seeds against fixed policies.
 
-Benchmark warmed collection with identical budgets, a warm-up update and several
-measured updates; no strength claims follow from this benchmark:
+Use `examples.opponent_benchmark` from the [command reference](command_reference.md#legacy-mixed-opponent-training-recipes)
+for warmed collection measurements. The historical measurements below use identical
+budgets and several measured updates; no strength claims follow.
 
-```bash
-python -m examples.opponent_benchmark --workers 1 4 \
-  --hands-per-update 256 --updates 3 --output runs/opponent-performance.json
-```
-
-### Measured CPU smoke validation and throughput
+### Historical CPU smoke validation and throughput
 
 Four seed-42 smoke runs each completed 256 hands, 3,584 experiences and 14
 updates on four rollout workers, with separate HHH/CHH/HHR validation. The
@@ -307,22 +252,12 @@ also include different policies, game trajectories and measurement variability,
 so they cannot be attributed solely to configuration overhead. CPU simulations
 and PPO optimization remain the main work. No GPU performance claim is made.
 
-## Independent-phase PPO and historical self-play
+## Related workflows
 
-The original play-only trainer is preserved. For neural bidding with bitwise
-frozen pretrained play, joint bid/play training, optional heuristic imitation,
-frozen checkpoint opponents, and historical snapshot mixtures, see
-[multi-phase training](multiphase_selfplay.md). Use `examples.train_selfplay_ppo`
-and `examples.evaluate_selfplay_ppo`; new checkpoints use version 2 while existing
-play-only checkpoint inference remains supported. Neither stage changes the
-engine, observation schema, action IDs, or terminal signed-mark rewards.
+- [Multi-phase PPO](multiphase_selfplay.md): independent bidding/play networks and historical opponents.
+- [Phase-composable evaluation](phase_composable_evaluation.md): canonical new two-agent experiments.
+- [Arena](arena.md): metric definitions and paired statistical methodology.
 
-## Independent phase evaluation
-
-Use `python -m examples.evaluate_agent_vs_agent` to configure both partnerships'
-bid, trump and play policies independently, including distinct checkpoint sources.
-For a bidding ablation, give both agents the **same joint-trained playing network**
-and vary only bidding; the evaluator checks actual playing tensors. See
-[phase-composable evaluation](phase_composable_evaluation.md) for commands,
-checkpoint validation, historical-policy comparisons, and log/CSV outputs.
-This is evaluation-only and does not change training or checkpoint formats.
+Legacy `evaluate_many()` still accepts in-memory training models. It shares frozen
+snapshot preparation and arena execution with phase-aware evaluation while preserving
+`PPOAgent` inference and existing single/multi-opponent report schemas.
