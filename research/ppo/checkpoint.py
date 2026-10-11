@@ -23,9 +23,8 @@ def metadata(opponents=None, selection="HHH"):
                 checkpoint_selection_opponent=selection, trained_phase='play')
 
 
-def save(path, trainer):
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
+def capture(trainer):
+    """Capture shared training state in memory before adding version-specific fields."""
     try:
         sha = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True, stderr=subprocess.DEVNULL).strip()
         dirty = bool(subprocess.check_output(['git', 'status', '--porcelain'], text=True))
@@ -41,9 +40,28 @@ def save(path, trainer):
                          cuda=torch.cuda.get_rng_state_all() if torch.cuda.is_available() else [],
                          sampling=trainer.sampling.get_state(), shuffle=trainer.shuffle.get_state()),
                 sampling_device=trainer.device.type)
+    return data
+
+
+def save(path, trainer):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = capture(trainer)
     temporary = path.with_suffix('.tmp')
     torch.save(data, temporary)
     temporary.replace(path)
+
+
+def restore_rng(rng, trainer):
+    """Restore the identical RNG payload used by both checkpoint generations."""
+    random.setstate(rng['python'])
+    state = rng['numpy']
+    np.random.set_state((state[0], np.array(state[1], dtype=np.uint32), *state[2:]))
+    torch.set_rng_state(rng['cpu'])
+    if rng['cuda'] and trainer.device.type == 'cuda':
+        torch.cuda.set_rng_state_all(rng['cuda'])
+    trainer.sampling.set_state(rng['sampling'])
+    trainer.shuffle.set_state(rng['shuffle'])
 
 
 def read(path):
@@ -97,6 +115,27 @@ def load_model(path, device='cpu'):
     return model.to(device).eval(), data
 
 
+_FROZEN_MODELS = {}
+
+
+def load_frozen(identity, *, verify=False):
+    """One verified CPU model per path/SHA in each process, shared by evaluators.
+
+    The cache contains only immutable inference weights and compatibility metadata,
+    not optimizer state. Historical rollout workers prune it to their active roster.
+    """
+    from .opponents import CheckpointIdentity
+    key = (identity.path, identity.sha256)
+    if verify or key not in _FROZEN_MODELS:
+        if CheckpointIdentity.from_path(identity.path).sha256 != identity.sha256:
+            raise ValueError(f'Frozen checkpoint identity changed: {identity.path}')
+    if key not in _FROZEN_MODELS:
+        model, data = load_model(identity.path, 'cpu')
+        model.eval().requires_grad_(False)
+        _FROZEN_MODELS[key] = model, data['metadata']
+    return _FROZEN_MODELS[key]
+
+
 def resume(path, trainer):
     data = read(path)
     if data['metadata']['checkpoint_version'] != 1:
@@ -126,12 +165,4 @@ def resume(path, trainer):
     trainer.optimizer.load_state_dict(data['optimizer'])
     for key, value in data['progress'].items():
         setattr(trainer, key, value)
-    rng = data['rng']
-    random.setstate(rng['python'])
-    ns = rng['numpy']
-    np.random.set_state((ns[0], np.array(ns[1], dtype=np.uint32), *ns[2:]))
-    torch.set_rng_state(rng['cpu'])
-    if rng['cuda'] and trainer.device.type == 'cuda':
-        torch.cuda.set_rng_state_all(rng['cuda'])
-    trainer.sampling.set_state(rng['sampling'])
-    trainer.shuffle.set_state(rng['shuffle'])
+    restore_rng(data['rng'], trainer)

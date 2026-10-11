@@ -9,6 +9,22 @@ from .seeds import stream_seed
 DEFAULT_OPPONENTS = (('HHH', '1'),)
 
 
+@dataclass(frozen=True)
+class CheckpointIdentity:
+    """File identity shared by frozen opponents and phase-composable evaluation."""
+    path: str
+    sha256: str
+
+    @classmethod
+    def from_path(cls, path):
+        import hashlib
+        from pathlib import Path
+        path = Path(path).resolve()
+        with path.open('rb') as source:
+            digest = hashlib.file_digest(source, 'sha256').hexdigest()
+        return cls(str(path), digest)
+
+
 def canonical_opponents(entries):
     """Exact normalized rational probabilities avoid ratio/resume discrepancies."""
     pairs, seen = [], set()
@@ -127,18 +143,26 @@ class PolicySpec:
 
     @classmethod
     def checkpoint(cls, name, path):
-        import hashlib
-        from pathlib import Path
-        path = Path(path).resolve()
-        with path.open('rb') as source:
-            identifier = hashlib.file_digest(source, 'sha256').hexdigest()
-        return cls(name, 'checkpoint', str(path), identifier)
+        identity = CheckpointIdentity.from_path(path)
+        return cls(name, 'checkpoint', identity.path, identity.sha256)
 
     def factory(self):
         if self.kind == 'variant':
             return variant_factory(self.name)
         from .selfplay_evaluation import FrozenFactory
         return FrozenFactory(self)
+
+
+def policy_registry(anchor, checkpoints=(), *, reserved=()):
+    """The built-in variants, original anchor and explicitly named frozen archives."""
+    registry = {name: PolicySpec(name) for name in VARIANTS}
+    registry['anchor'] = anchor
+    for entry in checkpoints:
+        name, path = entry.split('=', 1)
+        if not name or name in registry or name in reserved:
+            raise ValueError('Duplicate/empty or reserved checkpoint opponent name')
+        registry[name] = PolicySpec.checkpoint(name, path)
+    return registry
 
 
 @dataclass(frozen=True, slots=True)

@@ -85,15 +85,15 @@ def phase_chunk(task):
     global _LEARNER, _VERSION
     weights, hidden, neural, learn, seed, indices, pool = task
     # Bound process-local opponent caches to the current roster plus anchor.
-    from .selfplay_evaluation import _MODELS
+    from .checkpoint import _FROZEN_MODELS
     allowed = {pool.anchor, *pool.policies, *pool.snapshots}
     for spec in tuple(_FACTORIES):
         if spec not in allowed:
             del _FACTORIES[spec]
     identities = {(s.path, s.sha256) for s in allowed if s.kind == 'checkpoint'}
-    for key in tuple(_MODELS):
+    for key in tuple(_FROZEN_MODELS):
         if key not in identities:
-            del _MODELS[key]
+            del _FROZEN_MODELS[key]
     version = (hashlib.sha256(weights).digest(), hidden, neural)
     if version != _VERSION:
         factory = PhaseFactory(weights, hidden, neural)

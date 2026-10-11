@@ -5,7 +5,7 @@ from pathlib import Path
 from time import perf_counter
 
 from examples.benchmark_output import format_report, format_breakdown, format_performance, table
-from examples.experiment_output import record_output, add_output_arguments
+from examples.experiment_output import record_output, add_evaluation_arguments
 from research.ppo.composition import (CheckpointIdentity, PhasePolicySpec, CompositePolicySpec,
                                      CompositeAgentFactory, comparison_metadata, evaluate_composed)
 from research.ppo.diagnostics import evaluation_diagnostics
@@ -34,16 +34,10 @@ def main(argv=None):
             choices = ('neural', 'heuristic', 'random', 'conservative') if phase == 'bid' else ('neural', 'heuristic', 'random')
             p.add_argument(f'--agent-{agent}-{phase}', choices=choices, default='heuristic')
             p.add_argument(f'--agent-{agent}-{phase}-checkpoint', type=Path)
-    p.add_argument('--deals', type=int, default=2048)
-    p.add_argument('--seed', type=int, default=42)
-    p.add_argument('--bootstrap-seed', type=int, default=0)
-    p.add_argument('--bootstrap-samples', type=int, default=2000)
-    p.add_argument('--threads', type=int, default=1)
+    add_evaluation_arguments(p, seed=42)
     p.add_argument('--stochastic-neural', action='store_true', help='Seeded sampling instead of greedy neural inference')
     p.add_argument('--episode', choices=('hand', 'match'), default='hand')
     p.add_argument('--target-marks', type=int, default=7)
-    p.add_argument('--output', type=Path)
-    add_output_arguments(p)
     args = p.parse_args(argv)
     started = perf_counter()
     try:

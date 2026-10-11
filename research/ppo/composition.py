@@ -1,27 +1,13 @@
 """Evaluation-only phase composition; PyTorch is loaded only for neural policies."""
 from dataclasses import asdict, dataclass
-import hashlib
-from pathlib import Path
 import random
+from time import perf_counter
 
 from texas42.agents import HeuristicAgent, RandomAgent, ConservativeRandomAgent
 from .seeds import stream_seed
+from .opponents import CheckpointIdentity
 
 PHASES = ('bid', 'trump', 'play')
-_CHECKPOINTS = {}
-
-
-@dataclass(frozen=True)
-class CheckpointIdentity:
-    path: str
-    sha256: str
-
-    @classmethod
-    def from_path(cls, path):
-        path = Path(path).resolve()
-        with path.open('rb') as source:
-            digest = hashlib.file_digest(source, 'sha256').hexdigest()
-        return cls(str(path), digest)
 
 
 @dataclass(frozen=True)
@@ -60,20 +46,9 @@ class CompositePolicySpec:
         return '[' + ' | '.join(f'{s.strategy.title()} {p.title()}' for p, s in self.items()) + ']'
 
 
-def _checkpoint(identity, *, verify=False):
-    if verify or identity not in _CHECKPOINTS:
-        if CheckpointIdentity.from_path(identity.path) != identity:
-            raise ValueError(f'Checkpoint identity changed: {identity.path}')
-    if identity not in _CHECKPOINTS:
-        from .checkpoint import load_model
-        model, data = load_model(identity.path, 'cpu')
-        model.eval().requires_grad_(False)
-        _CHECKPOINTS[identity] = (model, data['metadata'])
-    return _CHECKPOINTS[identity]
-
-
 def phase_network(spec, phase):
-    model, metadata = _checkpoint(spec.checkpoint)
+    from .checkpoint import load_frozen
+    model, metadata = load_frozen(spec.checkpoint)
     if metadata['checkpoint_version'] == 1:
         available = ('play',)
     else:
@@ -159,7 +134,8 @@ class CompositeAgentFactory:
             if multiprocessing.current_process().name != 'MainProcess':
                 torch.set_num_threads(1)
         for identity in identities:
-            _checkpoint(identity, verify=True)
+            from .checkpoint import load_frozen
+            load_frozen(identity, verify=True)
         for phase, policy in self.spec.items():
             if policy.strategy == 'neural':
                 phase_network(policy, phase)
@@ -187,18 +163,42 @@ def comparison_metadata(a, b):
         only_one_phase_differs=len(differing) == 1, differing_phases=differing)
 
 
-def evaluate_composed(a, b, *, stochastic=False, **kwargs):
-    """Use the unchanged arena; preserve the caller's numerical thread setting."""
+def evaluate_matchups(factory, opponents, *, neural=False, performance=None, **kwargs):
+    """Shared arena execution for composed, checkpoint and in-memory policies.
+
+    Named opponent factories retain their own inference and seed semantics. This
+    consolidates only execution/thread management, not policy implementations.
+    """
     from texas42.arena import compare_agents
-    has_neural = any(s.strategy == 'neural' for spec in (a, b) for _, s in spec.items())
     previous = None
-    if has_neural:
+    if neural:
         import torch
         previous = torch.get_num_threads()
         torch.set_num_threads(1)
     try:
-        return compare_agents(CompositeAgentFactory(a, not stochastic),
-                              CompositeAgentFactory(b, not stochastic), **kwargs)
+        reports = {}
+        for name, opponent in opponents:
+            started, telemetry = perf_counter(), {}
+            reports[name] = compare_agents(factory, opponent, performance=telemetry, **kwargs)
+            telemetry['evaluation_total_seconds'] = perf_counter() - started
+            if performance is not None:
+                performance[name] = telemetry
+        return reports
     finally:
         if previous is not None:
             torch.set_num_threads(previous)
+
+
+def evaluate_composed(a, b, *, stochastic=False, performance=None, **kwargs):
+    """Canonical two-agent composition API, backed by the paired arena."""
+    neural = any(s.strategy == 'neural' for spec in (a, b) for _, s in spec.items())
+    telemetry = {}
+    report = evaluate_matchups(CompositeAgentFactory(a, not stochastic),
+        ((b.name, CompositeAgentFactory(b, not stochastic)),), neural=neural,
+        performance=telemetry, **kwargs)[b.name]
+    if performance is not None:
+        # Keep the public performance shape of this single-comparison API.
+        values = telemetry[b.name]
+        values.pop('evaluation_total_seconds')
+        performance.update(values)
+    return report

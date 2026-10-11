@@ -19,9 +19,14 @@ def snapshot(model):
     return out.getvalue()
 
 
-def from_snapshot(weights, hidden_size):
+def from_snapshot(weights, hidden_size, neural_phases=None):
+    """Restore either architecture without consuming the caller's global RNG."""
     with torch.random.fork_rng(devices=[]):
-        model = ActorCritic(hidden_size)
+        if neural_phases is None:
+            model = ActorCritic(hidden_size)
+        else:
+            from .multiphase import PhaseActorCritic
+            model = PhaseActorCritic(hidden_size, neural_phases)
     model.load_state_dict(torch.load(BytesIO(weights), map_location='cpu', weights_only=True))
     return model.eval()
 

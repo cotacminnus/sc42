@@ -2,7 +2,7 @@
 import csv
 import hashlib
 from functools import wraps
-from dataclasses import asdict
+from dataclasses import asdict, fields
 import json
 from pathlib import Path
 import sys
@@ -17,6 +17,25 @@ def add_output_arguments(parser):
     parser.add_argument('--log-dir', type=Path,
                         help='Directory for readable logs and CSV exports '
                              '(default: logs/experiments/<command>-<run-id>/)')
+
+
+def add_evaluation_arguments(parser, *, seed=12345):
+    """Common flags for the three checkpoint/composition evaluation commands."""
+    parser.add_argument('--deals', type=int, default=2048)
+    parser.add_argument('--seed', type=int, default=seed)
+    parser.add_argument('--bootstrap-seed', type=int, default=0)
+    parser.add_argument('--bootstrap-samples', type=int, default=2000)
+    parser.add_argument('--threads', type=int, default=1)
+    parser.add_argument('--output', type=Path)
+    add_output_arguments(parser)
+
+
+def add_config_arguments(parser, defaults, *, exclude=()):
+    """Expose shared scalar PPO settings while leaving stage-specific flags local."""
+    for field in fields(defaults):
+        if field.name not in exclude:
+            value = getattr(defaults, field.name)
+            parser.add_argument('--' + field.name.replace('_', '-'), type=type(value), default=value)
 
 
 class Tee:

@@ -1,5 +1,5 @@
 """Train masked PPO trick play against configured frozen variants using complete hand episodes."""
-from examples.experiment_output import record_output, add_output_arguments
+from examples.experiment_output import record_output, add_output_arguments, add_config_arguments
 import argparse
 from dataclasses import asdict, fields
 import json
@@ -18,11 +18,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     default = Config()
     opponent_fields = ('train_opponents', 'eval_opponents', 'selection_opponent')
-    for field in fields(Config):
-        if field.name in opponent_fields:
-            continue
-        value = getattr(default, field.name)
-        parser.add_argument('--' + field.name.replace('_', '-'), type=type(value), default=value)
+    add_config_arguments(parser, default, exclude=opponent_fields)
     training = parser.add_mutually_exclusive_group()
     training.add_argument('--train-opponent', choices=VARIANTS)
     training.add_argument('--train-opponents', help='NAME:WEIGHT,NAME:WEIGHT,...')

@@ -174,6 +174,48 @@ class MultiPhaseTests(unittest.TestCase):
         for bad in ({'learn_phases': ('trump',)}, {'snapshot_pool_size': 0}, {'primary_opponent': 'unknown'}):
             with self.assertRaises(ValueError): self.config(**bad)
 
+    def test_shared_checkpoint_capture_restores_every_rng_stream(self):
+        from research.ppo.checkpoint import resume as resume_legacy
+        def draws(trainer):
+            return (random.random(), np.random.random(), torch.rand(3),
+                    torch.rand(3, generator=trainer.sampling),
+                    torch.rand(3, generator=trainer.shuffle))
+        for version in (1, 2):
+            config = Config(total_hands=4, hidden_size=8, device='cpu', rollout_play_steps=14)
+            original = Trainer(config) if version == 1 else self.trainer()
+            self.addCleanup(original.close)
+            buffer, _ = original.collect(); original.update(buffer)
+            path = self.path / f'version-{version}.pt'
+            saver, restore = (save_legacy, resume_legacy) if version == 1 else (save, resume)
+            # Saving must not deserialize a temporary legacy file or consume RNG.
+            with patch('torch.load', side_effect=AssertionError('Unexpected checkpoint reload')):
+                saver(path, original)
+            expected = draws(original)
+            continued = Trainer(config) if version == 1 else self.trainer()
+            self.addCleanup(continued.close)
+            restore(path, continued)
+            actual = draws(continued)
+            self.assertEqual(expected[:2], actual[:2])
+            self.assertTrue(all(torch.equal(x, y) for x, y in zip(expected[2:], actual[2:])))
+            self.assertEqual(read(path)['metadata']['checkpoint_version'], version)
+            self.assertFalse(path.with_name(path.name + '.capture').exists())
+
+    def test_named_opponent_registry_preserves_anchor_and_archives(self):
+        from research.ppo.opponents import policy_registry
+        registry = policy_registry(self.anchor, (f'archive={self.anchor_path}',))
+        self.assertEqual(tuple(registry), (*VARIANTS, 'anchor', 'archive'))
+        self.assertIs(registry['anchor'], self.anchor)
+        self.assertEqual(registry['archive'].sha256, self.anchor.sha256)
+        for entries in ((f'HHH={self.anchor_path}',), (f'anchor={self.anchor_path}',),
+                        (f'x={self.anchor_path}', f'x={self.anchor_path}')):
+            with self.assertRaisesRegex(ValueError, 'name'):
+                policy_registry(self.anchor, entries)
+        # The historical pool reserves this label; standalone archive evaluation
+        # historically permits it as an explicit checkpoint name.
+        self.assertIn('self-snapshots', policy_registry(self.anchor, (f'self-snapshots={self.anchor_path}',)))
+        with self.assertRaises(ValueError):
+            policy_registry(self.anchor, (f'self-snapshots={self.anchor_path}',), reserved=('self-snapshots',))
+
     def test_worker_invariance_and_optimizer(self):
         c = self.config(learn_phases=('bid', 'play'), rollout_decisions=64,
             opponent_probabilities=(('HHH', '1'), ('anchor', '1'), ('self-snapshots', '1')))

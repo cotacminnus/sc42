@@ -229,15 +229,20 @@ class NeuralCompositionTests(unittest.TestCase):
     def test_cached_loading_and_phase_random_streams(self):
         from unittest.mock import patch
         from research.ppo.checkpoint import load_model
-        from research.ppo.composition import _CHECKPOINTS
+        from research.ppo.checkpoint import _FROZEN_MODELS
         n = self.neural(self.joint)
-        _CHECKPOINTS.pop(n.checkpoint, None)
+        _FROZEN_MODELS.pop((n.checkpoint.path, n.checkpoint.sha256), None)
         spec = CompositePolicySpec('A', n, n, n)
         with patch('research.ppo.checkpoint.load_model', wraps=load_model) as loader:
             factory = CompositeAgentFactory(spec, greedy=False)
             factory.prepare()
             agents = [factory(seat, 42) for seat in range(4)]
             for seat, agent in enumerate(agents): agent.reset(seat)
+            # Historical opponents and phase composition must share one load/cache.
+            from research.ppo.opponents import PolicySpec
+            from research.ppo.selfplay_evaluation import frozen_model
+            historical = frozen_model(PolicySpec.checkpoint('archive', self.joint))
+            self.assertIs(historical.networks['play'], agents[0].delegates['play'].network)
             self.assertEqual(loader.call_count, 1)
             self.assertEqual(len({id(a.delegates['play'].network) for a in agents}), 1)
             self.assertEqual(len({id(a.delegates['play'].generator) for a in agents}), 4)
@@ -245,6 +250,78 @@ class NeuralCompositionTests(unittest.TestCase):
         right = CompositeAgentFactory(replace(spec, trump=PhasePolicySpec('random')), greedy=False)(0, 123)
         import torch
         self.assertTrue(torch.equal(left.delegates['play'].generator.get_state(), right.delegates['play'].generator.get_state()))
+
+    def test_legacy_in_memory_evaluation_matches_composition(self):
+        from research.ppo.checkpoint import load_model
+        from research.ppo.evaluation import evaluate_many
+        from research.ppo.opponents import PolicySpec
+        from research.ppo.selfplay_evaluation import evaluate_phases
+        for path in (self.legacy, self.joint):
+            model, _ = load_model(path)
+            n = self.neural(path)
+            neural = getattr(model, 'neural_phases', ('play',))
+            a = CompositePolicySpec('A', *(n if p in neural else PhasePolicySpec()
+                                          for p in ('bid', 'trump', 'play')))
+            # Include a stochastic opponent to guard its existing phase RNG stream.
+            expected = evaluate_many(model, opponents=('HHH', 'CHH', 'HHR'), deals=3,
+                                     seed=42, bootstrap_samples=11)
+            for name in expected:
+                composed = evaluate_composed(a, variant(name, 'B'), num_deals=3,
+                                              seed=42, bootstrap_samples=11)
+                self.assertEqual(expected[name].to_dict(), composed.to_dict())
+            archive = PolicySpec.checkpoint('archive', self.clone)
+            reports = evaluate_phases(model, (archive,), deals=3, seed=42,
+                                      bootstrap_samples=11, threads=2)
+            other = self.neural(self.clone)
+            b = CompositePolicySpec('B', other, other, other)
+            composed = evaluate_composed(a, b, num_deals=3, seed=42, bootstrap_samples=11)
+            self.assertEqual(reports['archive'].to_dict(), composed.to_dict())
+
+    def test_compatibility_cli_report_envelopes_and_csv(self):
+        import csv
+        from contextlib import redirect_stdout
+        from io import StringIO
+        from examples.evaluate_ppo import main as legacy
+        from examples.evaluate_selfplay_ppo import main as phases
+        from research.ppo.checkpoint import load_model
+        from research.ppo.evaluation import evaluate_many
+        from examples.heuristic_benchmark import breakdown
+        from research.ppo.selfplay_evaluation import evaluate_phases
+        from research.ppo.opponents import PolicySpec
+        from research.ppo.diagnostics import evaluation_diagnostics
+        root = Path(self.tmp.name)
+        for count in (1, 2):
+            names = ('HHH', 'HHR')[:count]
+            output, logs = root / f'legacy-{count}.json', root / f'logs-{count}'
+            with redirect_stdout(StringIO()):
+                legacy(['--checkpoint', str(self.legacy), '--opponents', ','.join(names),
+                        '--deals', '2', '--bootstrap-samples', '5', '--output', str(output),
+                        '--log-dir', str(logs)])
+            model, _ = load_model(self.legacy)
+            reports = evaluate_many(model, opponents=names, deals=2, bootstrap_samples=5)
+            expected = (dict(reports[names[0]].to_dict(), checkpoint_id=model.checkpoint_sha256,
+                             breakdown=breakdown(reports[names[0]])) if count == 1 else
+                        dict(checkpoint_id=model.checkpoint_sha256,
+                             evaluations={n:r.to_dict() for n,r in reports.items()},
+                             breakdowns={n:breakdown(r) for n,r in reports.items()}))
+            self.assertEqual(json.loads(output.read_text()), json.loads(json.dumps(expected)))
+            with (logs / f'legacy-{count}.csv').open() as source:
+                rows = list(csv.DictReader(source))
+            self.assertEqual(len(rows), 4 * count)
+            self.assertEqual('opponent' in rows[0], count == 2)
+        output, logs = root / 'phases.json', root / 'phase-logs'
+        with redirect_stdout(StringIO()):
+            phases(['--checkpoint', str(self.joint), '--opponents', 'anchor,archive',
+                    '--opponent-checkpoint', f'archive={self.clone}', '--deals', '2',
+                    '--bootstrap-samples', '5', '--output', str(output), '--log-dir', str(logs)])
+        model, _ = load_model(self.joint)
+        policies = (PolicySpec.checkpoint('anchor', self.legacy), PolicySpec.checkpoint('archive', self.clone))
+        reports = evaluate_phases(model, policies, deals=2, bootstrap_samples=5)
+        expected = dict(checkpoint_id=model.checkpoint_sha256, anchor_id=policies[0].sha256,
+            opponent_identities={s.name:s.sha256 for s in policies}, same_playing_parameters=True,
+            evaluations={n:r.to_dict() for n,r in reports.items()},
+            breakdowns={n:evaluation_diagnostics(r) for n,r in reports.items()})
+        self.assertEqual(json.loads(output.read_text()), json.loads(json.dumps(expected)))
 
     def test_checkpoint_resolution_and_missing_sources(self):
         import argparse
