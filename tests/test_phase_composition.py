@@ -365,6 +365,107 @@ class NeuralCompositionTests(unittest.TestCase):
         self.assertEqual(rows[0]['agent_a_play_sha256'], rows[0]['agent_b_play_sha256'])
         self.assertEqual(rows[0]['agent_b_play_strategy'], 'neural')
 
+    def test_game_cli_neural_checkpoint_routing_and_parameter_isolation(self):
+        from texas42.cli import make_players
+        from texas42.engine import Game, GameConfig
+        options = (
+            dict(checkpoint=self.joint),
+            dict(checkpoint=self.joint, trump='neural'),
+            dict(bid='neural', bid_checkpoint=self.joint, play_checkpoint=self.legacy),
+            dict(trump='random', play='neural', play_checkpoint=self.legacy),
+        )
+        players = make_players(42, True, ('neural', 'neural', 'neural', 'CHH'), options)
+        agents = [p.agent for p in players]
+        self.assertEqual(tuple(p.strategy for _, p in agents[0].spec.items()),
+                         ('neural', 'heuristic', 'neural'))
+        self.assertEqual(len({id(a) for a in agents}), 4)
+        self.assertIs(agents[0].delegates['play'].network, agents[1].delegates['play'].network)
+        self.assertIs(agents[2].delegates['play'].network, agents[3].delegates['play'].network)
+        self.assertIs(agents[2].delegates['bid'].network, phase_network(self.neural(self.joint), 'bid'))
+        self.assertIs(agents[1].delegates['trump'].network, phase_network(self.neural(self.joint), 'trump'))
+        self.assertEqual(agents[3].spec.bidding.strategy, 'conservative')
+        self.assertEqual(agents[3].spec.trump.strategy, 'random')
+        import torch
+        networks = [agents[0].delegates['play'].network, agents[2].delegates['play'].network]
+        before = [{k: v.clone() for k, v in n.state_dict().items()} for n in networks]
+        records = []
+        game = Game(players, GameConfig(seed=42, target_marks=2), write=lambda _: None,
+                    log_state=records.append)
+        result = game.play_hand()
+        self.assertEqual(len(records), 33)
+        self.assertEqual(sum(result.team_points), 42)
+        for record in records:
+            self.assertNotIn('hands', record['observation']['view'])
+            self.assertIn(record['action_id'], record['observation']['legal_action_ids'])
+            self.assertLess(record['action_id'], 55)
+        for n, saved in zip(networks, before):
+            self.assertTrue(all(torch.equal(v, n.state_dict()[k]) for k, v in saved.items()))
+            self.assertTrue(all(not p.requires_grad and p.grad is None for p in n.parameters()))
+        # Same composition can serve human opponents without changing the human API.
+        human = make_players(42, player_types=('human', 'neural', 'HHH', 'neural'),
+                             policy_options=({}, options[0], {}, options[1]))
+        from texas42.players import HumanPlayer
+        self.assertIsInstance(human[0], HumanPlayer)
+        with self.assertRaisesRegex(ValueError, 'Neural bid unavailable'):
+            make_players(42, True, ('neural', 'HHH', 'HHH', 'HHH'),
+                         (dict(checkpoint=self.legacy), {}, {}, {}))
+        legacy_players = make_players(42, True, ('neural', 'HHH', 'HHH', 'HHH'),
+                                      (dict(checkpoint=self.legacy, bid='heuristic'), {}, {}, {}))
+        self.assertEqual(legacy_players[0].agent.spec.bidding.strategy, 'heuristic')
+
+    def test_game_cli_neural_logs_replay_and_are_reproducible(self):
+        import io
+        import torch
+        from contextlib import redirect_stdout
+        from texas42.cli import main
+        from texas42 import observation_from_record
+        root = Path(self.tmp.name)
+        args = ['--all-ai', '--players', 'neural', 'neural', 'neural', 'neural',
+                '--seed', '42', '--target-marks', '2']
+        for seat in range(1, 5):
+            args += [f'--player-{seat}-checkpoint', str(self.joint)]
+            if seat in (2, 4):
+                args += [f'--player-{seat}-bid', 'heuristic']
+        threads, rng = torch.get_num_threads(), torch.get_rng_state().clone()
+        runs = []
+        for index in range(2):
+            path = root / f'match-{index}.jsonl'
+            output = io.StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(main(args + ['--self-play-log', str(path)]), 0)
+            self.assertIn('SHA256', output.getvalue())
+            self.assertIn('[Neural Bid | Heuristic Trump | Neural Play]', output.getvalue())
+            self.assertIn('[Heuristic Bid | Heuristic Trump | Neural Play]', output.getvalue())
+            runs.append([json.loads(line) for line in path.read_text().splitlines()])
+        self.assertEqual(runs[0], runs[1])
+        self.assertEqual(torch.get_num_threads(), threads)
+        self.assertTrue(torch.equal(torch.get_rng_state(), rng))
+        env = SelfPlayEnv(episode='match', target_marks=2, seed=42)
+        obs = env.reset()
+        for record in runs[0]:
+            self.assertEqual(observation_from_record(record), obs)
+            transition = env.step(record['action_id'])
+            self.assertEqual(record['match_marks'], list(env.match_marks))
+            self.assertEqual(record['rewards'], list(transition.rewards))
+            obs = transition.observation
+        self.assertIsNone(obs)
+        self.assertTrue(runs[0][-1]['terminated'])
+
+    def test_game_cli_rejects_untrained_or_incompatible_neural_phases(self):
+        import io
+        from contextlib import redirect_stderr
+        from texas42.cli import main
+        for phase, checkpoint in (('bid', self.legacy), ('trump', self.legacy),
+                                  ('bid', self.untrained)):
+            with self.subTest(phase=phase, checkpoint=checkpoint), redirect_stderr(io.StringIO()) as output:
+                with self.assertRaises(SystemExit) as error:
+                    main(['--all-ai', '--players', 'neural', 'HHH', 'HHH', 'HHH',
+                          '--player-1-bid', 'heuristic',
+                          '--player-1-checkpoint', str(checkpoint), f'--player-1-{phase}', 'neural'])
+            self.assertEqual(error.exception.code, 2)
+            self.assertIn(f'Neural {phase} unavailable', output.getvalue())
+            self.assertIn(str(checkpoint), output.getvalue())
+
 
 if __name__ == '__main__':
     unittest.main()

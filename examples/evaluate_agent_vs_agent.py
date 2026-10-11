@@ -6,23 +6,17 @@ from time import perf_counter
 
 from examples.benchmark_output import format_report, format_breakdown, format_performance, table
 from examples.experiment_output import record_output, add_evaluation_arguments
-from research.ppo.composition import (CheckpointIdentity, PhasePolicySpec, CompositePolicySpec,
-                                     CompositeAgentFactory, comparison_metadata, evaluate_composed)
+from research.ppo.composition import (CompositeAgentFactory, comparison_metadata, evaluate_composed,
+                                     resolve_policy_spec)
 from research.ppo.diagnostics import evaluation_diagnostics
 
 
 def policy_spec(args, agent):
     prefix = f'agent_{agent}_'
-    policies = []
-    for phase in ('bid', 'trump', 'play'):
-        strategy = getattr(args, prefix + phase)
-        override = getattr(args, prefix + phase + '_checkpoint')
-        if override is not None and strategy != 'neural':
-            raise ValueError(f'Agent {agent.upper()} {phase}: checkpoint override requires neural strategy')
-        path = override or getattr(args, prefix + 'checkpoint')
-        identity = CheckpointIdentity.from_path(path) if strategy == 'neural' and path else None
-        policies.append(PhasePolicySpec(strategy, identity))
-    return CompositePolicySpec(agent.upper(), *policies)
+    return resolve_policy_spec(agent.upper(),
+        tuple(getattr(args, prefix + phase) for phase in ('bid', 'trump', 'play')),
+        getattr(args, prefix + 'checkpoint'),
+        tuple(getattr(args, prefix + phase + '_checkpoint') for phase in ('bid', 'trump', 'play')))
 
 
 @record_output

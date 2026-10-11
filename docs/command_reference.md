@@ -39,6 +39,11 @@ python -m unittest discover -s tests -v
 
 ```bash
 python -m texas42 --seed 42 --target-marks 7
+# Human in seat 1, with independently selected policy bots
+python -m texas42 --players human HHH CHH HHR --seed 42
+# Opposing HHH/CHH partnerships, with a replayable match log
+python -m texas42 --all-ai --players HHH CHH HHH CHH \
+  --seed 42 --target-marks 1 --self-play-log logs/hhh-vs-chh.jsonl
 python -m texas42 --all-ai --seed 42 --target-marks 1 \
   --self-play-log logs/selfplay.jsonl
 python -m examples.agent_selfplay
@@ -46,6 +51,64 @@ python -m examples.openspiel_selfplay --episode hand --seed 42
 ```
 
 The OpenSpiel example requires the optional OpenSpiel/pyspiel installation. The standalone agent_selfplay example has no command-line arguments. Console --self-play-log requires --all-ai and writes JSONL; it is not neural-network training.
+
+Console `--players P1 P2 P3 P4` selects each seat independently. Choices are
+`human`, `placeholder` (the original always-pass random bot), `neural`, and the six variants
+in the table below. Seats 1/3 partner against seats 2/4. Variant bots reuse the
+existing `HybridAgent` through `AgentPlayer`; each seat has its own agent and random
+streams, reset once per match. Non-neural players require no ML dependencies. `RRR` bids uniformly
+among legal actions, unlike `placeholder`. Multiple `human` seats share the same
+terminal, so avoid viewing another player's private prompts when playing locally.
+
+Without `--players`, the original defaults remain: human in seat 1 and three
+placeholder bots, or four placeholders with `--all-ai`. Explicit player selections
+take precedence over these defaults; `--all-ai` rejects any human selection. Four
+bot selections also run without `--all-ai`, but logging still requires that flag.
+
+#### Neural console players and phase ablations
+
+Install the optional `rl` extra for neural players. `neural` defaults to greedy
+neural bidding and play, with heuristic trump. The checkpoint must supply trained
+neural bid and play networks. For an original play-only checkpoint, explicitly
+select `--player-N-bid heuristic`; unavailable neural phases are never replaced silently.
+For seat `N` (1–4), `--player-N-bid`, `--player-N-trump` and `--player-N-play` override
+the preset (`neural` or a named variant). Bidding accepts `neural`, `heuristic`,
+`random`, `conservative`; trump/play accept the first three. Phase options are
+rejected on `human` and `placeholder` players.
+
+```bash
+# Play against neural bots; your partner in seat 3 remains HHH
+python -m texas42 --players human neural HHH neural --seed 42 \
+  --player-2-checkpoint runs/ppo-play-v1/checkpoints/best.pt --player-2-bid heuristic \
+  --player-4-checkpoint runs/ppo-play-v1/checkpoints/best.pt --player-4-bid heuristic
+
+# Hold joint PPO playing fixed on all seats; change only partnership bidding
+python -m texas42 --all-ai --players neural neural neural neural --seed 42 \
+  --player-1-checkpoint runs/ppo-joint-v1/checkpoints/best.pt \
+  --player-2-checkpoint runs/ppo-joint-v1/checkpoints/best.pt --player-2-bid heuristic \
+  --player-3-checkpoint runs/ppo-joint-v1/checkpoints/best.pt \
+  --player-4-checkpoint runs/ppo-joint-v1/checkpoints/best.pt --player-4-bid heuristic \
+  --self-play-log logs/console-bidding-ablation.jsonl
+
+# Independent checkpoints and conservative bidding on one seat
+python -m texas42 --players human neural HHH CHH --seed 42 \
+  --player-2-bid-checkpoint runs/ppo-bidding-v1/checkpoints/best.pt \
+  --player-2-play-checkpoint runs/ppo-joint-v1/checkpoints/best.pt \
+  --player-4-play neural \
+  --player-4-play-checkpoint runs/ppo-play-v1/checkpoints/best.pt
+```
+
+Each neural phase resolves `--player-N-PHASE-checkpoint` before
+`--player-N-checkpoint`. A checkpoint override requires a neural strategy.
+Version-1 checkpoints support play only; version-2 checkpoints must record the
+requested phase as trained and neural. Console output identifies the selected
+phases, paths and SHA256 values. Frozen CPU weights are cached and shared across
+seats; private agent state and phase RNG streams remain independent. Gameplay
+uses the same `CompositeAgentFactory` as phase-composable evaluation, with one
+PyTorch inference thread and no training or parameter updates.
+
+The console runs ordinary matches; use the [agent-vs-agent evaluation commands](#agent-vs-agent-phase-composition)
+for duplicate deals, actual parameter-equality checks and confidence intervals.
 
 ### 2.2 Policy baselines and ablations
 

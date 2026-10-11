@@ -46,6 +46,26 @@ class CompositePolicySpec:
         return '[' + ' | '.join(f'{s.strategy.title()} {p.title()}' for p, s in self.items()) + ']'
 
 
+def resolve_policy_spec(name, strategies, checkpoint=None, phase_checkpoints=None):
+    """Resolve CLI phase overrides once for both console and arena composition."""
+    overrides = (None,) * 3 if phase_checkpoints is None else phase_checkpoints
+    if len(strategies) != 3 or len(overrides) != 3:
+        raise ValueError('Specify bid, trump and play policies in that order')
+    policies = []
+    identities = {}
+    for phase, strategy, override in zip(PHASES, strategies, overrides):
+        if override is not None and strategy != 'neural':
+            raise ValueError(f'{name} {phase}: checkpoint override requires neural strategy')
+        path = override or checkpoint
+        identity = None
+        if strategy == 'neural' and path is not None:
+            if path not in identities:
+                identities[path] = CheckpointIdentity.from_path(path)
+            identity = identities[path]
+        policies.append(PhasePolicySpec(strategy, identity))
+    return CompositePolicySpec(name, *policies)
+
+
 def phase_network(spec, phase):
     from .checkpoint import load_frozen
     model, metadata = load_frozen(spec.checkpoint)

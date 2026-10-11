@@ -72,6 +72,10 @@ neural parameters; it does not compare stochastic realizations.
 
 `CompositePolicySpec`, `PhasePolicySpec`, `CompositeAgentFactory`, and
 `evaluate_composed()` in `research/ppo/composition.py` form the reusable API.
+`resolve_policy_spec()` shares default/phase checkpoint resolution between the
+arena CLI and [console player selection](command_reference.md#neural-console-players-and-phase-ablations).
+The console uses these same factories through `AgentPlayer` to combine human
+players and independently composed bots, without changing arena methodology.
 Factories are spawn-safe. `evaluate_matchups()` shares arena execution with the
 legacy in-memory validators. Checkpoint loading/caching lives in `checkpoint.py`;
 `opponents.py` owns file identities and named opponent registries. Each distinct checkpoint is verified and cached once
