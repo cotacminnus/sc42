@@ -217,3 +217,13 @@ peak-memory monitoring). Original rollout instrumentation does not report neural
 inference/RSS separately, so those legacy baseline fields are unavailable rather
 than estimated. Snapshot SHA256 covers the entire file: execution provenance can
 change a file's hash even when model tensors and future sampled decisions agree.
+
+## Independent phase evaluation
+
+Use `python -m examples.evaluate_agent_vs_agent` to configure both partnerships'
+bid, trump and play policies independently, including distinct checkpoint sources.
+For a bidding ablation, give both agents the **same joint-trained playing network**
+and vary only bidding; the evaluator checks actual playing tensors. See
+[phase-composable evaluation](phase_composable_evaluation.md) for commands,
+checkpoint validation, historical-policy comparisons, and log/CSV outputs.
+This is evaluation-only and does not change training or checkpoint formats.

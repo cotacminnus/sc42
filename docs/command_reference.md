@@ -315,3 +315,27 @@ The usual PPO optimizer, device, budget, evaluation interval, and checkpoint
 interval flags are supported. The new learning rate defaults to 0.0001. The old
 `--rollout-play-steps`, variant-only training opponent flags, and legacy sampling
 scheme flags belong to `train_ppo`, not the new entry point.
+
+## Agent-vs-agent phase composition
+
+```bash
+python -m examples.evaluate_agent_vs_agent \
+  --agent-a-checkpoint runs/ppo-joint-v1/checkpoints/best.pt \
+  --agent-a-bid neural --agent-a-trump heuristic --agent-a-play neural \
+  --agent-b-checkpoint runs/ppo-joint-v1/checkpoints/best.pt \
+  --agent-b-bid heuristic --agent-b-trump heuristic --agent-b-play neural \
+  --deals 4096 --seed 31415926 --bootstrap-seed 0 \
+  --bootstrap-samples 2000 --threads 4 \
+  --output runs/ppo-joint-v1/bidding-ablation.json \
+  --log-dir logs/experiments/joint-bidding-ablation
+```
+
+Every agent phase accepts `neural`, `heuristic`, or `random`; bidding also accepts
+`conservative`. All phase defaults are heuristic. `--agent-a-PHASE-checkpoint`
+(and B) overrides the corresponding agent's default checkpoint. Version-1 sources
+support neural play only; version-2 neural sources must declare the requested
+phase trained. `--stochastic-neural` enables seeded neural sampling.
+`--episode hand|match` and `--target-marks` are also supported. Existing evaluation
+commands remain unchanged. See [phase-composable evaluation](phase_composable_evaluation.md)
+for independent sources, archived policies, pure heuristics, conservative/random
+comparisons, reusable API, and parameter-identity metadata.

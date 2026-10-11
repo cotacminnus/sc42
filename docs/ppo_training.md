@@ -316,3 +316,13 @@ frozen checkpoint opponents, and historical snapshot mixtures, see
 and `examples.evaluate_selfplay_ppo`; new checkpoints use version 2 while existing
 play-only checkpoint inference remains supported. Neither stage changes the
 engine, observation schema, action IDs, or terminal signed-mark rewards.
+
+## Independent phase evaluation
+
+Use `python -m examples.evaluate_agent_vs_agent` to configure both partnerships'
+bid, trump and play policies independently, including distinct checkpoint sources.
+For a bidding ablation, give both agents the **same joint-trained playing network**
+and vary only bidding; the evaluator checks actual playing tensors. See
+[phase-composable evaluation](phase_composable_evaluation.md) for commands,
+checkpoint validation, historical-policy comparisons, and log/CSV outputs.
+This is evaluation-only and does not change training or checkpoint formats.

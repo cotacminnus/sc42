@@ -215,6 +215,22 @@ def record_output(function):
             'evaluate_selfplay_ppo': ('PPO phases', option('--opponents') or 'HHH,CHH,HHR,anchor'),
             'arena_benchmark': ('Random', 'Random'),
         }.get(name)
+        if name == 'evaluate_agent_vs_agent':
+            labels = tuple(' / '.join(option(f'--agent-{agent}-{phase}') or 'heuristic'
+                for phase in ('bid', 'trump', 'play')) for agent in ('a', 'b'))
+            composition_context = {}
+            for agent in ('a', 'b'):
+                for phase in ('bid', 'trump', 'play'):
+                    key = f'agent_{agent}_{phase}'
+                    strategy = option(f'--agent-{agent}-{phase}') or 'heuristic'
+                    composition_context[key + '_strategy'] = strategy
+                    if strategy == 'neural':
+                        path = Path(option(f'--agent-{agent}-{phase}-checkpoint') or option(f'--agent-{agent}-checkpoint'))
+                        composition_context[key + '_checkpoint'] = str(path.resolve())
+                        with path.open('rb') as source:
+                            composition_context[key + '_sha256'] = hashlib.file_digest(source, 'sha256').hexdigest()
+            for row in rows + (metrics or []):
+                row.update(composition_context)
         if labels:
             context = dict(policy_a=labels[0], policy_b=labels[1])
             if option('--checkpoint'):
