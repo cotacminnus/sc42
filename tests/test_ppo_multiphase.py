@@ -15,8 +15,8 @@ if TORCH:
     from research.ppo.checkpoint import save as save_legacy, load_model, read
     from research.ppo.selfplay_checkpoint import save, resume
     from research.ppo.selfplay_trainer import SelfPlayConfig, SelfPlayTrainer
-    from research.ppo.multiphase import PhaseActorCritic
-    from research.ppo.opponents import PolicySpec, HistoricalPool, historical_pool
+    from research.ppo.multiphase import PhaseActorCritic, LearnerPhaseSpec, resolve_learner_phases, PHASES
+    from research.ppo.opponents import PolicySpec, HistoricalPool, historical_pool, CheckpointIdentity, policy_registry
     from research.ppo.selfplay_evaluation import evaluate_phases, frozen_model, evaluation_diagnostics
     from research.ppo.imitation import clone_bidding, teacher_data, playing_kl
     from research.ppo.agent import PPOAgent
@@ -25,6 +25,7 @@ if TORCH:
     from texas42.agents import VARIANTS, Agent, HeuristicAgent
     from texas42.selfplay import SelfPlayEnv
     from texas42.encoding import encode
+    from texas42.parallel import resolve_workers
 
 
 @unittest.skipUnless(TORCH, 'optional rl extra is not installed')
@@ -51,6 +52,255 @@ class MultiPhaseTests(unittest.TestCase):
         trainer = SelfPlayTrainer(self.config(**changes), self.initial)
         self.addCleanup(trainer.close)
         return trainer
+
+    def phase_source(self, name='joint', trained=('bid', 'trump', 'play')):
+        trainer = self.trainer(learn_phases=tuple(trained))
+        # Explicit checkpoint metadata fixture for phase-loading tests; no strength claim.
+        trainer.model.trained_phases = tuple(trained)
+        path = self.path / f'{name}.pt'
+        save(path, trainer)
+        return path, CheckpointIdentity.from_path(path)
+
+    def test_independent_phase_states_and_optimizer_membership(self):
+        from itertools import product
+        path, identity = self.phase_source()
+        initial, _ = load_model(path)
+        registry = policy_registry(self.anchor)
+        for states in product(('heuristic', 'neural-frozen', 'neural-train'), repeat=3):
+            if 'neural-train' not in states:
+                with self.assertRaises(ValueError):
+                    resolve_learner_phases(states, (None,) * 3, registry, identity)
+                continue
+            with self.subTest(states=states):
+                specs = resolve_learner_phases(states, (None,) * 3, registry, identity)
+                learn = tuple(p for p, state in zip(PHASES, states) if state == 'neural-train')
+                t = SelfPlayTrainer(self.config(learner_phases=specs, learn_phases=learn,
+                    total_hands=2, rollout_decisions=100, max_rollout_hands=2), initial)
+                self.addCleanup(t.close)
+                ids = {id(p) for group in t.optimizer.param_groups for p in group['params']}
+                self.assertEqual(ids, {id(p) for phase in learn for p in t.model.networks[phase].parameters()})
+                before = {p: {k:v.clone() for k,v in n.state_dict().items()} for p,n in t.model.networks.items()}
+                b, _ = t.collect()
+                self.assertEqual(t.hands, 2)
+                self.assertTrue(all(PHASES[r.observation_features[:3].index(1.)] in learn for r in b.records))
+                self.assertTrue(all(r.legal_action_mask[r.action_id] and r.action_id < 55 for r in b.records))
+                if b:
+                    metrics = t.update(b)
+                    self.assertTrue(all(np.isfinite(v) for v in metrics.values()))
+                for phase in PHASES:
+                    if phase not in learn:
+                        self.assertTrue(all(torch.equal(v, t.model.networks[phase].state_dict()[k])
+                                            for k,v in before[phase].items()))
+
+    def test_sources_freezing_new_initialization_and_architecture(self):
+        path, identity = self.phase_source(trained=('bid','play'))
+        registry = policy_registry(self.anchor, (f'archive={path}',))
+        initial, _ = load_model(path)
+        states = ('neural-frozen', 'neural-train', 'neural-frozen')
+        specs = resolve_learner_phases(states, ('archive', 'new', 'anchor'), registry, identity)
+        self.assertEqual(specs[1].initialization, 'representation')
+        t = SelfPlayTrainer(self.config(learn_phases=('trump',), learner_phases=specs), initial)
+        self.addCleanup(t.close)
+        for phase, source in (('bid', initial.networks['bid']), ('play', self.initial)):
+            self.assertTrue(all(torch.equal(v, source.state_dict()[k]) for k,v in t.model.networks[phase].state_dict().items()))
+        self.assertNotIn('trump', t.model.trained_phases)
+        self.assertTrue(all(torch.equal(v, initial.networks['play'].trunk.state_dict()[k])
+                            for k,v in t.model.networks['trump'].trunk.state_dict().items()))
+        for phase in ('bid', 'trump'):
+            for state in ('neural-frozen', 'neural-train'):
+                choices = ['heuristic', 'heuristic', 'neural-train']; choices[PHASES.index(phase)] = state
+                sources = [None, None, 'anchor']; sources[PHASES.index(phase)] = 'anchor'
+                with self.assertRaisesRegex(ValueError, 'no trained neural'):
+                    resolve_learner_phases(choices, sources, registry, identity)
+        with self.assertRaisesRegex(ValueError, 'no trained neural'):
+            resolve_learner_phases(('neural-train','neural-frozen','neural-frozen'),
+                                  (None,None,None), registry, identity)
+        with self.assertRaisesRegex(ValueError, 'heuristic'):
+            resolve_learner_phases(('heuristic','heuristic','neural-train'),
+                                  ('archive',None,'anchor'), registry, identity)
+        bad = replace(specs[0], source=replace(identity, sha256='0'*64))
+        with self.assertRaisesRegex(ValueError, 'changed'):
+            SelfPlayTrainer(self.config(learn_phases=('trump',), learner_phases=(bad,*specs[1:])), initial)
+
+    def test_trump_only_empty_paths_terminal_rewards_and_budget(self):
+        from research.ppo.selfplay_rollout import collect_phase_hand
+        t = self.trainer(learn_phases=('trump',), total_hands=8, rollout_decisions=50, max_rollout_hands=3)
+        transitions = []
+        original = SelfPlayEnv.step
+        def step(env, action):
+            result = original(env, action)
+            if result.terminated: transitions.append(result)
+            return result
+        rows = []
+        with patch.object(SelfPlayEnv, 'step', step):
+            for episode in range(12):
+                rows.append(collect_phase_hand(t.model, 42, episode, ('trump',), t.opponent_pool()))
+        self.assertTrue(any(not any(r['paths']) for r in rows))
+        self.assertTrue(any(any(r['paths']) for r in rows))
+        for row, transition in zip(rows, transitions):
+            team = (row['episode']+42)%2
+            records = [r for path in row['paths'] for r in path]
+            self.assertEqual(len(records), int(row['bidder']%2 == team))
+            self.assertEqual(row['decisions'], 33)
+            self.assertEqual(sum(row['points']), 42)
+            if records:
+                r, = records
+                self.assertEqual(r.seat, row['bidder'])
+                self.assertTrue(r.done)
+                self.assertEqual(r.reward, transition.rewards[r.seat])
+                self.assertEqual(r.observation_features[:3], (0.,1.,0.))
+        b, _ = t.collect()
+        self.assertEqual(t.hands, 3)  # Explicit safeguard, independent of samples.
+        self.assertLessEqual(len(b), 3)
+        if b:
+            before = {k:v.clone() for k,v in t.model.networks['trump'].state_dict().items()}
+            t.update(b)
+            self.assertTrue(any(not torch.equal(v,t.model.networks['trump'].state_dict()[k]) for k,v in before.items()))
+        # A real hand whose opponent declares produces no fictitious terminal record.
+        empty = next(r for r in rows if not any(r['paths']))
+        t.hands = empty['episode']
+        t.config = replace(t.config, total_hands=t.hands+1)
+        b, _ = t.collect()
+        self.assertEqual(len(b), 0)
+        with self.assertRaisesRegex(ValueError, 'skip'):
+            t.update(b)
+
+    def test_trump_worker_invariance_resume_and_frozen_parameters(self):
+        path, identity = self.phase_source(trained=('bid','play'))
+        initial, _ = load_model(path)
+        specs = resolve_learner_phases(('neural-frozen','neural-train','neural-frozen'),
+                                      (None,None,None), policy_registry(self.anchor), identity)
+        c = self.config(learner_phases=specs, learn_phases=('trump',), total_hands=16,
+                        max_rollout_hands=8, rollout_decisions=4)
+        records = metrics = weights = None
+        for workers in (1,2,4,0):
+            t = SelfPlayTrainer(replace(c, threads=workers), initial); self.addCleanup(t.close)
+            # Requests are upper bounds: CI affinity/quotas can expose fewer CPUs.
+            self.assertEqual(t.workers, resolve_workers(workers, min(c.total_hands, c.rollout_decisions)))
+            b, _ = t.collect()
+            self.assertGreater(len(b),0)
+            current = (b.records.copy(), b.advantages.copy(), t.opponent_assignments.copy(), t.hands)
+            m = t.update(b)
+            if records is not None:
+                self.assertEqual(current,records); self.assertEqual(m,metrics)
+                self.assertTrue(all(torch.equal(v,t.model.state_dict()[k]) for k,v in weights.items()))
+            records, metrics = current,m
+            weights = {k:v.clone() for k,v in t.model.state_dict().items()}
+            for phase in ('bid','play'):
+                self.assertTrue(all(torch.equal(v,initial.networks[phase].state_dict()[k])
+                                    for k,v in t.model.networks[phase].state_dict().items()))
+            t.close()
+        saved = self.path/'trump.pt'; save(saved,t)
+        new_initial, data = load_model(saved)
+        self.assertEqual(data['metadata']['learn_phases'], ('trump',))
+        self.assertEqual(data['metadata']['learner_phases'][1]['initialization'], 'representation')
+        t.config = replace(t.config, total_hands=24)
+        b,_=t.collect(); expected=b.records.copy(); m=t.update(b)
+        r=SelfPlayTrainer(replace(c,total_hands=24,threads=2),new_initial); self.addCleanup(r.close)
+        resume(saved,r)
+        b,_=r.collect(); self.assertEqual(b.records,expected); self.assertEqual(r.update(b),m)
+        self.assertTrue(all(torch.equal(v,r.model.state_dict()[k]) for k,v in t.model.state_dict().items()))
+        changed = replace(specs[2], source=CheckpointIdentity(self.anchor.path,self.anchor.sha256))
+        wrong = SelfPlayTrainer(replace(c,learner_phases=(*specs[:2],changed)),new_initial)
+        self.addCleanup(wrong.close)
+        with self.assertRaisesRegex(ValueError,'mismatch'): resume(saved,wrong)
+
+    def test_composed_opponents_and_snapshot_phase_sources(self):
+        import json
+        path, identity = self.phase_source()
+        definition = self.path/'opponent.json'
+        definition.write_text(json.dumps(dict(bid=dict(strategy='neural',source='archive'),
+            trump=dict(strategy='heuristic'),play=dict(strategy='neural',source='anchor'))))
+        registry=policy_registry(self.anchor,(f'archive={path}',),compositions=(f'mix={definition}',))
+        spec=registry['mix']; factory=spec.factory(); factory.prepare()
+        a,b=factory(0,1),factory(2,2)
+        self.assertIs(a.delegates['play'].network,b.delegates['play'].network)
+        self.assertIsNot(a.delegates['play'],b.delegates['play'])
+        self.assertTrue(all(not p.requires_grad for p in a.delegates['bid'].network.parameters()))
+        t=self.trainer(opponent_policies=tuple(registry.values()),opponent_probabilities=(('mix','1'),))
+        buffer,_=t.collect(); t.update(buffer)
+        snapshot=t.publish_snapshot(self.path/'snapshots')
+        registry=policy_registry(self.anchor,(f'archive={snapshot.path}',),compositions=(f'mix={definition}',))
+        registry['mix'].factory().prepare()
+        saved=self.path/'composed.pt'; save(saved,t)
+        model,data=load_model(saved)
+        from research.ppo.selfplay_checkpoint import config_from_dict
+        c=config_from_dict(data['config'])
+        r=SelfPlayTrainer(c,model); self.addCleanup(r.close); resume(saved,r)
+        self.assertEqual(r.config.opponent_policies,t.config.opponent_policies)
+        self.assertEqual(r.snapshots,t.snapshots)
+        for threads in (1,2):
+            report=evaluate_phases(t.model,(spec,),deals=2,bootstrap_samples=5,threads=threads)
+            if threads==1: expected=report
+            else: self.assertEqual(report,expected)
+
+    def test_generalized_cli_trump_resume_compositions_and_conflicts(self):
+        import contextlib
+        import io
+        import json
+        from examples.train_selfplay_ppo import main
+        path, identity = self.phase_source(trained=('bid','play'))
+        definition = self.path/'pretrump.json'
+        definition.write_text(json.dumps(dict(bid=dict(strategy='neural',source='pretrump'),
+            trump=dict(strategy='heuristic'),play=dict(strategy='neural',source='pretrump'))))
+        directory=self.path/'trump-cli'
+        args=['--init-checkpoint',str(path),'--learner-bid','neural-frozen',
+            '--learner-trump','neural-train','--learner-play','neural-frozen',
+            '--opponent-checkpoint',f'pretrump={path}','--opponent-composition',f'composed={definition}',
+            '--opponent-pool','composed:0.7,HHH:0.3','--eval-opponents','composed,HHH,anchor',
+            '--selection-opponent','composed','--total-hands','8','--rollout-decisions','2',
+            '--max-rollout-hands','4','--ppo-epochs','1','--minibatch-size','4','--eval-deals','2',
+            '--bootstrap-samples','5','--forgetting-hands','1','--device','cpu',
+            '--output-dir',str(directory),'--log-dir',str(self.path/'trump-logs')]
+        with contextlib.redirect_stdout(io.StringIO()): t=main(args)
+        self.assertGreater(t.updates,0)
+        self.assertEqual(t.config.learn_phases,('trump',))
+        latest=directory/'checkpoints/latest.pt'
+        for phase in ('bid','play'):
+            source,_=load_model(path)
+            self.assertTrue(all(torch.equal(v,source.networks[phase].state_dict()[k])
+                                for k,v in t.model.networks[phase].state_dict().items()))
+        progress=[json.loads(line) for line in (directory/'progress.jsonl').read_text().splitlines()]
+        self.assertEqual(set(progress[-1]['evaluations']),{'composed','HHH','anchor'})
+        self.assertTrue(all(all(row['frozen_phases_verified'].values()) for row in progress))
+        self.assertEqual(read(directory/'checkpoints/best.pt')['metadata']['checkpoint_selection_opponent'],'composed')
+        with contextlib.redirect_stdout(io.StringIO()):
+            r=main(['--resume',str(latest),'--total-hands','12','--threads','2',
+                '--learner-trump-source','init','--output-dir',str(self.path/'trump-resume'),
+                '--log-dir',str(self.path/'trump-resume-logs')])
+        self.assertEqual(r.hands,12)
+        self.assertEqual(r.config.learner_phases,t.config.learner_phases)
+        for flags in (['--learn-phases','bid'], ['--play-policy','trainable'],
+                      ['--trump-policy','heuristic'], ['--learner-bid-source','anchor']):
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                main(args + ['--output-dir',str(self.path/'invalid'),*flags])
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            main(['--resume',str(self.anchor_path)])
+
+    def test_zero_sample_cli_skips_optimizer_and_saves_resumable_checkpoint(self):
+        import contextlib
+        import io
+        from examples.train_selfplay_ppo import main
+        from research.ppo.selfplay_rollout import collect_phase_hand
+        # Find a deterministic first hand declared by the opponent with heuristic bidding.
+        seed = next(seed for seed in range(32) if not any(collect_phase_hand(
+            self.initial,seed,0,('trump',),HistoricalPool((('HHH','1'),),self.policies,self.anchor))['paths']))
+        args=['--init-play-checkpoint',str(self.anchor_path),'--learner-bid','heuristic',
+            '--learner-trump','neural-train','--learner-play','heuristic',
+            '--opponent-pool','HHH:1','--total-hands','1','--seed',str(seed),
+            '--eval-deals','1','--bootstrap-samples','2','--forgetting-hands','1',
+            '--output-dir',str(self.path/'empty'),'--log-dir',str(self.path/'empty-logs')]
+        with contextlib.redirect_stdout(io.StringIO()), patch.object(SelfPlayTrainer,'update',
+                side_effect=AssertionError('Empty buffer must not reach PPO update')):
+            t=main(args)
+        self.assertEqual(t.samples,0); self.assertEqual(t.updates,0); self.assertEqual(t.hands,1)
+        model,data=load_model(self.path/'empty/checkpoints/latest.pt')
+        self.assertEqual(model.trained_phases,())
+        self.assertFalse(data['optimizer']['state'])
+        from research.ppo.selfplay_checkpoint import config_from_dict
+        resumed=SelfPlayTrainer(replace(config_from_dict(data['config']),total_hands=2),model)
+        self.addCleanup(resumed.close); resume(self.path/'empty/checkpoints/latest.pt',resumed)
+        self.assertEqual(resumed.hands,1)
 
     def test_exact_transfer_phase_routing_and_frozen_play(self):
         t = self.trainer()
@@ -171,7 +421,9 @@ class MultiPhaseTests(unittest.TestCase):
         self.assertEqual(fallback.choose(1, 0), ('self-snapshots', self.anchor))
         for bad in ('', 'HHH:0', 'HHH:nan', 'HHH:1,HHH:2', 'unknown:1', 'HHH:-1'):
             with self.assertRaises(ValueError): historical_pool(bad, self.policies, self.anchor)
-        for bad in ({'learn_phases': ('trump',)}, {'snapshot_pool_size': 0}, {'primary_opponent': 'unknown'}):
+        # Trump-only is now a valid zero-to-one-sample rollout configuration.
+        self.assertEqual(self.config(learn_phases=('trump',)).learn_phases, ('trump',))
+        for bad in ({'learn_phases': ()}, {'snapshot_pool_size': 0}, {'primary_opponent': 'unknown'}):
             with self.assertRaises(ValueError): self.config(**bad)
 
     def test_shared_checkpoint_capture_restores_every_rng_stream(self):

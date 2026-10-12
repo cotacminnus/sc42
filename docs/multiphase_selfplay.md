@@ -22,10 +22,25 @@ policies; frozen neural continuations and opponents use greedy actions. All
 networks retain global IDs and the authoritative observation masks. Reserved
 contracts remain illegal. Ordinary actors and critics see no hidden hands.
 
-`--learn-phases bid,trump,play --trump-policy neural` enables the prepared trump
-module. Heuristic trump is the default; trump-only training is rejected. No claim
-about effective neural trump training is made by the small integration tests.
+`--learn-phases bid,trump,play` enables all three modules; `trump` alone is supported.
+No claim about effective neural trump training is made by the small integration tests.
 `--play-policy frozen|trainable` is optional and must agree with learning phases.
+
+For independent sources and routing, each learner phase can be `heuristic`,
+`neural-frozen`, or `neural-train`. Frozen neural phases act greedily and are excluded
+from Adam; trainable phases sample masked actions and enter PPO. `LearnerPhaseSpec`
+records initialization status, immutable source identity, and trainability because
+an evaluation `PhasePolicySpec` alone has no optimizer/initialization semantics.
+Both paths use the same phase networks, rollout function, and PPO optimizer.
+Legacy construction retains its original initialization RNG sequence; resolved
+phase metadata describes both legacy and explicit configurations.
+
+See [independent-phase commands](command_reference.md#independent-learner-phases-and-trump-only-training).
+Sources resolve once at stage initialization. A trained phase copies the complete
+actor/critic; a new trainable phase transfers only a trained trunk and receives
+fresh heads. Frozen phases cannot use untrained sources. All sources must match
+the stage's hidden width. The play-only anchor cannot supply neural bidding/trump.
+An archived initialization never changes automatically when later snapshots appear.
 
 ## Stage A: learn bidding, preserve play
 
@@ -63,6 +78,13 @@ always finishing hands and respecting `--total-hands`. Variable-trump collection
 uses deterministic waves of at most eight hands, so a final wave can overshoot
 the decision target. Boundaries do not depend on worker scheduling.
 
+Trump-only hands yield zero or one sample: only the learner's winning bidder has
+a trajectory. Empty seat trajectories receive no rewards and do not enter GAE.
+The collector stops at the actual decision target, total-hand budget, or
+`max_rollout_hands` safeguard (4096 by default). An empty batch skips optimization,
+advances progress, and remains resumable. No auction is altered to create samples.
+Frozen neural parameters are checked bitwise after every rollout/update.
+
 Each seat's last trained action receives the engine's final signed marks once,
 even if that action was its auction call. Earlier rewards are zero. GAE traverses
 that seat's entire enabled sequence, with terminal bootstrap zero. Gamma advances
@@ -83,6 +105,15 @@ separate versioned streams. An episode's opponent is fixed for the whole hand.
 `self-snapshots` chooses uniformly from the active historical roster, falling back
 to the anchor until the first snapshot. Snapshot publication occurs at update
 boundaries; interval thresholds may overshoot by one rollout.
+
+[Composed opponent registration](command_reference.md#register-composed-training-opponents)
+reuses `CompositePolicySpec` and `CompositeAgentFactory` for independent frozen
+phase sources. A `PolicySpec` stores the resolved composition and its digest;
+each underlying checkpoint retains its own SHA256. Registry-only archives can
+supply one trained phase without enabling their other networks. Complete frozen
+checkpoint opponents must have every routed neural phase trained. Snapshot
+publication waits until all routed phases have received training; empty batches
+never publish snapshots. Source files are immutable dependencies of exact resume.
 
 CPU workers cache frozen learner snapshots and neural opponents. Cached opponents
 are bounded by the active roster and explicit policy registry. Each seat has an
@@ -105,6 +136,9 @@ Version-2 checkpoints record independent modules, neural/trained/learning/frozen
 phase metadata, original anchor identity, architecture, optimizer, counters,
 all existing RNG states, exact snapshot roster, opponent distribution, primary
 selection opponent, compatibility versions, Git SHA, and dirty-worktree flag.
+Optional version-2 fields now record resolved learner source/trainability,
+initial trained-versus-representation status, named compositions, and optimizer
+parameter names. Older version-2 files load with legacy initialization semantics.
 Version-1 inference remains supported. Migration initializes a new stage, never
 pretending its previously untrained bidding outputs were learned.
 
@@ -128,8 +162,10 @@ reports completed-trick certainty; hand mode always resolves within one hand.
 ## Forgetting and research interpretation
 
 A fixed anchor-generated public observation dataset reports KL(anchor play ||
-current play), with `--forgetting-hands` controlling its size. Bidding-only weights
-must remain bitwise equal to the anchor; joint updates can change them. No KL
+current play), with `--forgetting-hands` controlling its size. With heuristic play
+the diagnostic is unavailable. Legacy Stage A playing weights stay equal to the
+anchor; explicit configurations freeze their selected playing source, which may
+be a different joint checkpoint. Joint updates can change those weights. No KL
 regularizer is implemented; no arbitrary coefficient is silently introduced.
 
 For Stage A, compare learned bidding versus **heuristic bidding with the exact
@@ -138,6 +174,11 @@ schedule only for selection, then independent large held-out duplicate schedules
 Report intervals, contract values, bid origin, auction frequencies, roles, and
 both SHA256 identities. Different auctions induce different downstream states;
 conditional contract success rates are not causal bidding comparisons.
+
+For trump-only experiments, compare with the same frozen joint bidding/playing
+networks and heuristic trump. The [held-out command](command_reference.md#held-out-trump-ablation)
+checks actual parameter equality. Use independent final deals after selecting
+checkpoints on the fixed validation schedule; a short smoke run tests mechanics.
 
 Joint historical self-play can overfit its finite opponent pool. Short smoke tests
 establish mechanics, not stronger bidding, generalization, equilibrium, or Nash

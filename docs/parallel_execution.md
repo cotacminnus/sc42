@@ -17,6 +17,10 @@ with a minimum of one. Missing information is ignored; if all information is
 missing, the fallback is one. This is best-effort detection, not a universal
 resource monitor. Explicit requests cannot override detected CPU limits.
 
+Worker-invariance tests check resolved counts rather than assuming every requested
+worker is available. This keeps the same trajectory/update assertions valid on
+CI hosts with restricted CPU affinity or quotas.
+
 `OrderedPool` uses portable multiprocessing **spawn**, bounded submission (at most
 twice the worker count outstanding), ordered collection, and explicit shutdown.
 A failure cancels queued work and waits for the bounded set of running tasks;

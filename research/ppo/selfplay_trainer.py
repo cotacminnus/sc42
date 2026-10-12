@@ -5,7 +5,7 @@ from time import perf_counter
 import torch
 from texas42.parallel import OrderedPool, resolve_workers
 from .trainer import Config, Trainer
-from .multiphase import PhaseActorCritic, phases
+from .multiphase import PhaseActorCritic, LearnerPhaseSpec, phases, PHASES
 from .opponents import HistoricalPool, PolicySpec
 from .buffer import RolloutBuffer
 from .rollout import initialize_worker, snapshot
@@ -25,13 +25,22 @@ class SelfPlayConfig(Config):
     snapshot_pool_size: int = 8
     bid_bc_hands: int = 0
     forgetting_hands: int = 8
+    learner_phases: tuple = ()  # Empty migrates the legacy initialization path.
+    max_rollout_hands: int = 4096  # Bounds zero-sample trump-only collection.
 
     def __post_init__(self):
         super().__post_init__()
         enabled = phases(self.learn_phases)
-        if not {'bid', 'play'} & set(enabled):
-            raise ValueError('Trump-only training is not supported; include bid or play')
         object.__setattr__(self, 'learn_phases', enabled)
+        specs = tuple(LearnerPhaseSpec(**s) if isinstance(s, dict) else s for s in self.learner_phases)
+        object.__setattr__(self, 'learner_phases', specs)
+        if specs:
+            if len(specs) != 3 or not all(isinstance(s, LearnerPhaseSpec) for s in specs):
+                raise ValueError('Expected three learner phase specifications')
+            if not any(s.state == 'neural-train' for s in specs):
+                raise ValueError('Training requires at least one neural-train phase')
+            if tuple(p for p, s in zip(PHASES, specs) if s.state == 'neural-train') != enabled:
+                raise ValueError('learn_phases must match neural-train learner phases')
         if self.anchor is None or self.anchor.kind != 'checkpoint':
             raise ValueError('An immutable original play checkpoint anchor is required')
         pool = HistoricalPool(self.opponent_probabilities, self.opponent_policies, self.anchor)
@@ -40,7 +49,7 @@ class SelfPlayConfig(Config):
         if (not self.evaluation_names or len(set(self.evaluation_names)) != len(self.evaluation_names)
                 or not set(self.evaluation_names) <= names or self.primary_opponent not in self.evaluation_names):
             raise ValueError('Evaluation names and primary opponent must exist in frozen policy registry')
-        for key in ('rollout_decisions', 'snapshot_every_hands', 'snapshot_pool_size', 'forgetting_hands'):
+        for key in ('rollout_decisions', 'snapshot_every_hands', 'snapshot_pool_size', 'forgetting_hands', 'max_rollout_hands'):
             if type(getattr(self, key)) is not int or getattr(self, key) <= 0:
                 raise ValueError(f'{key} must be positive')
         if type(self.bid_bc_hands) is not int or self.bid_bc_hands < 0:
@@ -54,14 +63,42 @@ class SelfPlayTrainer(Trainer):
         super().__init__(config)
         if initial.hidden_size != config.hidden_size:
             raise ValueError('Initial checkpoint architecture does not match hidden_size')
-        if isinstance(initial, PhaseActorCritic):
+        if config.learner_phases:
+            from .checkpoint import load_frozen
+            from .composition import PhasePolicySpec, phase_network
+            neural = tuple(p for p, s in zip(PHASES, config.learner_phases) if s.state != 'heuristic')
+            model = PhaseActorCritic(config.hidden_size, neural)
+            trained = []
+            for phase, spec in zip(PHASES, config.learner_phases):
+                if spec.state == 'heuristic':
+                    continue
+                source, metadata = load_frozen(spec.source, verify=True)
+                if source.hidden_size != config.hidden_size:
+                    raise ValueError(f'{phase} source architecture does not match hidden_size')
+                if spec.initialization == 'trained':
+                    network = phase_network(PhasePolicySpec('neural', spec.source), phase)
+                    model.networks[phase].load_state_dict(network.state_dict(), strict=True)
+                    trained.append(phase)
+                else:
+                    # Prefer the play representation; otherwise use the first trained
+                    # phase in canonical order. Never transfer an untrained trunk.
+                    available = ('play',) if metadata['checkpoint_version'] == 1 else tuple(
+                        p for p in PHASES if p in metadata['trained_phases'] and p in metadata['neural_phases'])
+                    if not available:
+                        raise ValueError(f'{phase} initialization source has no trained representation')
+                    reference = 'play' if 'play' in available else available[0]
+                    network = source.networks[reference] if isinstance(source, PhaseActorCritic) else source
+                    model.networks[phase].trunk.load_state_dict(network.trunk.state_dict(), strict=True)
+            model.trained_phases = tuple(trained)
+        elif isinstance(initial, PhaseActorCritic):
             neural = tuple(p for p in ('bid', 'trump', 'play')
                            if p in initial.neural_phases or p in config.learn_phases)
             model = PhaseActorCritic(config.hidden_size, neural)
             model.load_state_dict(initial.state_dict())
         else:
             model = PhaseActorCritic.from_play(initial, config.learn_phases)
-        model.trained_phases = tuple(getattr(initial, 'trained_phases', ('play',)))
+        if not config.learner_phases:
+            model.trained_phases = tuple(getattr(initial, 'trained_phases', ('play',)))
         model.configure_learning(config.learn_phases)
         self.model = model.to(self.device)
         self.optimizer = torch.optim.Adam((p for p in model.parameters() if p.requires_grad),
@@ -69,12 +106,21 @@ class SelfPlayTrainer(Trainer):
         self.sampling_scheme = 'multiphase-episode-v1'
         minimum = self.minimum_decisions
         self.workers = resolve_workers(config.threads, min(config.total_hands,
-                                math.ceil(config.rollout_decisions / minimum)))
+                                math.ceil(config.rollout_decisions / max(1, minimum))))
         self.snapshots = []
         self.last_snapshot = 0
         self.anchor_sha256 = config.anchor.sha256
         self.initial_checkpoint_sha256 = getattr(initial, 'checkpoint_sha256', None)
         self.initial_checkpoint_path = getattr(initial, 'checkpoint_path', None)
+        # The same resolved specification describes legacy and explicit phase syntax.
+        # Retain the old weight-construction path above to preserve its RNG sequence.
+        from .opponents import CheckpointIdentity
+        identity = (CheckpointIdentity(self.initial_checkpoint_path, self.initial_checkpoint_sha256)
+                    if self.initial_checkpoint_path else None)
+        self.learner_phases = config.learner_phases or tuple(
+            LearnerPhaseSpec('heuristic', initialization='none') if p not in model.neural_phases else
+            LearnerPhaseSpec('neural-train' if p in config.learn_phases else 'neural-frozen', identity,
+                             'trained' if p in model.trained_phases else 'representation') for p in PHASES)
         self.phase_counts = {}
         self.bc_metrics = None
         self.forgetting_data = None
@@ -98,7 +144,11 @@ class SelfPlayTrainer(Trainer):
         try:
             while actual < c.rollout_decisions and self.hands + len(indices) < c.total_hands:
                 remaining = c.total_hands - self.hands - len(indices)
-                count = min(math.ceil((c.rollout_decisions - actual) / self.minimum_decisions), remaining)
+                if not self.minimum_decisions:
+                    remaining = min(remaining, c.max_rollout_hands - len(indices))
+                    if remaining <= 0:
+                        break
+                count = min(math.ceil((c.rollout_decisions - actual) / max(1, self.minimum_decisions)), remaining)
                 # Neural trump produces a variable extra sample. Fixed-size waves
                 # keep boundaries independent of worker scheduling and use actual
                 # accumulated decisions. At most one eight-hand wave overshoots.
@@ -140,6 +190,8 @@ class SelfPlayTrainer(Trainer):
             stats['hands'] += 1
             stats['reward_sum'] += row['reward']
             for path in row['paths']:
+                if not path:
+                    continue  # A defending learner has no trump action/reward trajectory.
                 buffer.add_trajectory(path, c.gamma, c.gae_lambda)
                 for record in path:
                     phase = ('bid', 'trump', 'play')[record.observation_features[:3].index(1.0)]
@@ -159,14 +211,20 @@ class SelfPlayTrainer(Trainer):
         return buffer, sum(r['reward'] for r in rows) / count
 
     def update(self, buffer):
-        trained = set(getattr(self.model, 'trained_phases', ('play',))) | set(self.phase_counts)
+        if not len(buffer):
+            raise ValueError('No trainable decisions collected; skip the PPO update')
         metrics = super().update(buffer)
+        # A KL early stop can leave a collected phase without an optimizer step.
+        trained = set(getattr(self.model, 'trained_phases', ('play',))) | {
+            p for p in PHASES if p + '_policy_loss' in metrics}
         self.model.trained_phases = tuple(p for p in ('bid', 'trump', 'play') if p in trained)
         return metrics
 
     def publish_snapshot(self, directory):
         from pathlib import Path
         from .selfplay_checkpoint import save
+        if not set(self.model.neural_phases) <= set(self.model.trained_phases):
+            raise ValueError('Cannot publish a frozen opponent with untrained neural phases')
         path = Path(directory) / f'policy-{self.hands:09d}.pt'
         if path.exists():
             raise ValueError(f'Immutable snapshot already exists: {path}')
