@@ -46,6 +46,15 @@ phase sources; trained-phase validation applies equally to archived files.
 Neural trump requires a compatible checkpoint recording trained neural trump;
 ordinary bid/play checkpoints do not supply it.
 
+The same compositions can now serve as frozen training opponents through
+[named JSON registration](command_reference.md#register-composed-training-opponents).
+Training reuses this factory and its per-phase validation/cache; all opponent
+parameters remain frozen. For a trump ablation, the learner can freeze the same
+joint bidding and playing sources while training trump. Use the
+[held-out trump comparison](command_reference.md#held-out-trump-ablation) to verify
+that only trump differs. Source selection for a new training stage copies weights;
+it never follows a moving snapshot file during training.
+
 ## Non-neural comparisons
 
 The [non-neural recipes](command_reference.md#pure-heuristic-conservative-and-random-comparisons)

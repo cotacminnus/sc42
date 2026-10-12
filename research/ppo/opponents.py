@@ -1,9 +1,14 @@
 """Small spawn-safe variant pools, independent of neural model definitions."""
+from __future__ import annotations
 from dataclasses import dataclass
 from fractions import Fraction
 import random
+from typing import TYPE_CHECKING
 from texas42.agents import VARIANTS, variant_factory, HeuristicAgent
 from .seeds import stream_seed
+
+if TYPE_CHECKING:
+    from .composition import CompositePolicySpec
 
 
 DEFAULT_OPPONENTS = (('HHH', '1'),)
@@ -132,14 +137,33 @@ class PolicySpec:
     kind: str = 'variant'
     path: str | None = None
     sha256: str | None = None
+    composition: CompositePolicySpec | None = None
 
     def __post_init__(self):
-        if not self.name or self.kind not in ('variant', 'checkpoint'):
+        if not self.name or self.kind not in ('variant', 'checkpoint', 'composite'):
             raise ValueError('Invalid frozen policy specification')
         if self.kind == 'variant' and self.name not in VARIANTS:
             raise ValueError(f'Unknown variant: {self.name}')
         if self.kind == 'checkpoint' and (not self.path or not self.sha256 or len(self.sha256) != 64):
             raise ValueError('Checkpoint policy requires a path and SHA256 identity')
+        if self.kind == 'composite':
+            from .composition import CompositePolicySpec, PhasePolicySpec
+            import hashlib
+            import json
+            spec = self.composition
+            if isinstance(spec, dict):
+                spec = CompositePolicySpec(spec['name'], *(PhasePolicySpec(p['strategy'],
+                    CheckpointIdentity(**p['checkpoint']) if p.get('checkpoint') else None)
+                    for p in (spec['bidding'], spec['trump'], spec['playing'])))
+                object.__setattr__(self, 'composition', spec)
+            if not isinstance(spec, CompositePolicySpec) or spec.name != self.name or self.path is not None:
+                raise ValueError('Composite policy requires a matching named phase specification')
+            digest = hashlib.sha256(json.dumps(spec.to_dict(), sort_keys=True).encode()).hexdigest()
+            if self.sha256 is not None and self.sha256 != digest:
+                raise ValueError('Composite policy identity mismatch')
+            object.__setattr__(self, 'sha256', digest)
+        elif self.composition is not None:
+            raise ValueError('Phase composition applies only to composite policies')
 
     @classmethod
     def checkpoint(cls, name, path):
@@ -149,11 +173,39 @@ class PolicySpec:
     def factory(self):
         if self.kind == 'variant':
             return variant_factory(self.name)
+        if self.kind == 'composite':
+            from .composition import CompositeAgentFactory
+            return CompositeAgentFactory(self.composition)
         from .selfplay_evaluation import FrozenFactory
         return FrozenFactory(self)
 
+    def identities(self):
+        """All immutable checkpoint dependencies, including independent phases."""
+        if self.kind == 'checkpoint':
+            return (CheckpointIdentity(self.path, self.sha256),)
+        if self.kind == 'composite':
+            return tuple(dict.fromkeys(s.checkpoint for _, s in self.composition.items() if s.checkpoint))
+        return ()
 
-def policy_registry(anchor, checkpoints=(), *, reserved=()):
+
+def checkpoint_source(source, registry, initial=None):
+    """Resolve an initial, named archive/anchor, or file to one immutable identity."""
+    from os import PathLike
+    if not isinstance(source, (str, PathLike)) or not str(source):
+        raise ValueError('Checkpoint source must be a nonempty name or path')
+    if source == 'init':
+        if initial is None:
+            raise ValueError('init requires an initialization checkpoint')
+        return initial
+    if source in registry:
+        spec = registry[source]
+        if spec.kind != 'checkpoint':
+            raise ValueError(f'{source} is not a single checkpoint source')
+        return CheckpointIdentity(spec.path, spec.sha256)
+    return CheckpointIdentity.from_path(source)
+
+
+def policy_registry(anchor, checkpoints=(), *, reserved=(), compositions=(), initial=None):
     """The built-in variants, original anchor and explicitly named frozen archives."""
     registry = {name: PolicySpec(name) for name in VARIANTS}
     registry['anchor'] = anchor
@@ -162,6 +214,24 @@ def policy_registry(anchor, checkpoints=(), *, reserved=()):
         if not name or name in registry or name in reserved:
             raise ValueError('Duplicate/empty or reserved checkpoint opponent name')
         registry[name] = PolicySpec.checkpoint(name, path)
+    for entry in compositions:
+        import json
+        from pathlib import Path
+        from .composition import CompositePolicySpec, PhasePolicySpec
+        name, path = entry.split('=', 1)
+        if not name or name in registry or name in reserved:
+            raise ValueError('Duplicate/empty or reserved composed opponent name')
+        data = json.loads(Path(path).read_text())
+        if set(data) != {'bid', 'trump', 'play'}:
+            raise ValueError('Opponent composition must specify bid, trump and play')
+        parts = []
+        for phase in ('bid', 'trump', 'play'):
+            value = data[phase]
+            if not isinstance(value, dict) or 'strategy' not in value or set(value) - {'strategy', 'source'}:
+                raise ValueError(f'Invalid {phase} opponent specification')
+            identity = checkpoint_source(value['source'], registry, initial) if 'source' in value else None
+            parts.append(PhasePolicySpec(value['strategy'], identity))
+        registry[name] = PolicySpec(name, 'composite', composition=CompositePolicySpec(name, *parts))
     return registry
 
 

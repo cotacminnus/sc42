@@ -24,10 +24,11 @@ def collect_phase_hand(model, seed, episode, learn_phases, pool):
     started = perf_counter()
     key = spec
     if key not in _FACTORIES:
-        _FACTORIES[key] = spec.factory()
+        factory = spec.factory()
+        if hasattr(factory, 'prepare'):
+            factory.prepare()
+        _FACTORIES[key] = factory
     factory = _FACTORIES[key]
-    if hasattr(factory, 'prepare'):
-        factory.prepare()
     loading = perf_counter() - started
     agents = []
     for seat in range(4):
@@ -68,7 +69,8 @@ def collect_phase_hand(model, seed, episode, learn_phases, pool):
     for seat, path in paths.items():
         if not expected <= len(path) <= expected + int('trump' in learn_phases):
             raise RuntimeError('Incorrect controlled-seat trajectory length')
-        path[-1] = replace(path[-1], reward=float(transition.rewards[seat]), done=True)
+        if path:
+            path[-1] = replace(path[-1], reward=float(transition.rewards[seat]), done=True)
     try:
         from pathlib import Path
         rss = int(Path('/proc/self/statm').read_text().split()[1]) * os.sysconf('SC_PAGE_SIZE')
@@ -76,7 +78,7 @@ def collect_phase_hand(model, seed, episode, learn_phases, pool):
         rss = None
     return dict(worker_rss_bytes=rss, episode=episode, paths=tuple(tuple(p) for p in paths.values()),
                 reward=transition.rewards[team], opponent=label, opponent_sha256=spec.sha256,
-                decisions=decisions, points=transition.hand_result.team_points,
+                decisions=decisions, points=transition.hand_result.team_points, bidder=transition.hand_result.bidder,
                 inference_seconds=inference, opponent_loading_seconds=loading,
                 neural_inference_seconds=neural_inference + sum(getattr(a, 'neural_inference_seconds', 0.0) for a in agents))
 
@@ -90,7 +92,7 @@ def phase_chunk(task):
     for spec in tuple(_FACTORIES):
         if spec not in allowed:
             del _FACTORIES[spec]
-    identities = {(s.path, s.sha256) for s in allowed if s.kind == 'checkpoint'}
+    identities = {(i.path, i.sha256) for s in allowed for i in s.identities()}
     for key in tuple(_FROZEN_MODELS):
         if key not in identities:
             del _FROZEN_MODELS[key]

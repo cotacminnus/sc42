@@ -15,7 +15,10 @@ class FrozenFactory:
     spec: object
 
     def prepare(self):
-        frozen_model(self.spec)
+        model = load_frozen(self.spec)[0]
+        neural = getattr(model, 'neural_phases', ('play',))
+        if not set(neural) <= set(getattr(model, 'trained_phases', ('play',))):
+            raise ValueError(f'Frozen opponent {self.spec.path} contains untrained neural phases')
 
     def __call__(self, seat, seed):
         return PPOAgent(frozen_model(self.spec), seed=seed, greedy=True)

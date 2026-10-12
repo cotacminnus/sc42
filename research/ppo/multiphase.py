@@ -1,9 +1,66 @@
 """Independent phase modules: frozen play cannot share a trainable bid trunk."""
 import torch
+from dataclasses import dataclass
 from torch import nn
 from .model import ActorCritic
+from .opponents import CheckpointIdentity, checkpoint_source
 
 PHASES = ('bid', 'trump', 'play')
+
+
+@dataclass(frozen=True)
+class LearnerPhaseSpec:
+    """Resolved initialization provenance and optimizer membership for one phase."""
+    state: str
+    source: CheckpointIdentity | None = None
+    initialization: str = 'trained'
+
+    def __post_init__(self):
+        if isinstance(self.source, dict):
+            object.__setattr__(self, 'source', CheckpointIdentity(**self.source))
+        if self.state not in ('heuristic', 'neural-frozen', 'neural-train'):
+            raise ValueError('Learner state must be heuristic, neural-frozen or neural-train')
+        if self.state == 'heuristic':
+            if self.source is not None or self.initialization != 'none':
+                raise ValueError('Heuristic phases have no neural source')
+        elif self.initialization not in ('trained', 'representation'):
+            raise ValueError('Unknown phase initialization')
+        elif self.initialization == 'trained' and self.source is None:
+            raise ValueError('A trained neural phase requires a checkpoint source')
+        elif self.state == 'neural-frozen' and self.initialization != 'trained':
+            raise ValueError('Frozen neural phases require a trained source')
+
+
+def resolve_learner_phases(states, sources, registry, initial):
+    """Resolve new CLI states; missing trainable init phases transfer only a trunk."""
+    from .checkpoint import load_frozen
+    from .composition import PhasePolicySpec, phase_network
+    if len(states) != 3 or len(sources) != 3:
+        raise ValueError('Specify three learner phases and sources in bid,trump,play order')
+    result = []
+    for phase, state, source in zip(PHASES, states, sources):
+        if state == 'heuristic':
+            if source is not None:
+                raise ValueError(f'{phase}: heuristic policy cannot have a source')
+            result.append(LearnerPhaseSpec(state, initialization='none'))
+            continue
+        requested = source or 'init'
+        identity = checkpoint_source('init' if requested == 'new' else requested, registry, initial)
+        _, metadata = load_frozen(identity, verify=True)
+        trained = ('play',) if metadata['checkpoint_version'] == 1 else tuple(
+            p for p in metadata['neural_phases'] if p in metadata['trained_phases'])
+        initialization = 'trained'
+        if requested == 'new' or phase not in trained:
+            if state != 'neural-train' or requested not in ('init', 'new'):
+                raise ValueError(f'{phase}: source {requested} has no trained neural {phase}; '
+                                 'use a trained source, or neural-train with source new')
+            initialization = 'representation'
+        if initialization == 'trained':
+            phase_network(PhasePolicySpec('neural', identity), phase)
+        result.append(LearnerPhaseSpec(state, identity, initialization))
+    if len(result) != 3 or not any(s.state == 'neural-train' for s in result):
+        raise ValueError('Training requires at least one neural-train phase')
+    return tuple(result)
 
 
 def phases(value):

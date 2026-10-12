@@ -26,7 +26,8 @@ def validate(data):
         raise ValueError('Incompatible phase configuration')
     if m.get('opponent_selection_scheme') != 'multiphase-opponent-v1' or m.get('snapshot_selection_scheme') != 'historical-snapshot-v1':
         raise ValueError('Incompatible historical opponent sampling scheme')
-    if not set(phases(m['trained_phases'])) <= set(neural):
+    trained = phases(m['trained_phases']) if m['trained_phases'] else ()
+    if not set(trained) <= set(neural):
         raise ValueError('Incompatible trained-phase metadata')
     if m.get('original_play_sha256') != data['config']['anchor']['sha256']:
         raise ValueError('Incompatible original play identity')
@@ -40,7 +41,19 @@ def validate(data):
             feature_size=expected['feature_size'], num_actions=expected['num_actions']) for p in ('bid', 'trump', 'play')}:
         raise ValueError('Incompatible phase network dimensions')
     # Validate and canonicalize specifications, including historical membership.
-    config_from_dict(data['config'])
+    config = config_from_dict(data['config'])
+    if 'learner_phases' in m:
+        from .multiphase import LearnerPhaseSpec, PHASES
+        specs = tuple(LearnerPhaseSpec(**s) for s in m['learner_phases'])
+        if (len(specs) != 3 or tuple(p for p,s in zip(PHASES,specs) if s.state != 'heuristic') != neural
+                or tuple(p for p,s in zip(PHASES,specs) if s.state == 'neural-train') != learn):
+            raise ValueError('Incompatible learner phase metadata')
+    if config.learner_phases:
+        from .multiphase import PHASES
+        if tuple(p for p, s in zip(PHASES, config.learner_phases) if s.state != 'heuristic') != neural:
+            raise ValueError('Incompatible resolved learner phases')
+        if m.get('learner_phases') != [asdict(s) for s in config.learner_phases]:
+            raise ValueError('Incompatible learner source provenance')
     for spec in data['snapshots']:
         spec_from_dict(spec)
 
@@ -77,6 +90,8 @@ def save(path, trainer):
     data['snapshots'] = [asdict(spec) for spec in trainer.snapshots]
     data['progress']['last_snapshot'] = trainer.last_snapshot
     data['bc_metrics'] = trainer.bc_metrics
+    data['metadata']['learner_phases'] = [asdict(s) for s in trainer.learner_phases]
+    data['metadata']['optimizer_parameters'] = [name for name, p in trainer.model.named_parameters() if p.requires_grad]
     temporary = path.with_name(path.name + '.tmp')
     torch.save(data, temporary)
     temporary.replace(path)
@@ -98,18 +113,30 @@ def resume(path, trainer):
         raise ValueError('Exact resume requires the same optimizer device type')
     if trainer.config.total_hands < data['progress']['hands']:
         raise ValueError('total_hands precedes saved progress')
+    membership = [name for name, p in trainer.model.named_parameters() if p.requires_grad]
+    if data['metadata'].get('optimizer_parameters', membership) != membership:
+        raise ValueError('Exact resume optimizer phase membership mismatch')
     trainer.model.load_state_dict(data['model'], strict=True)
     trainer.model.trained_phases = tuple(data['metadata']['trained_phases'])
     trainer.optimizer.load_state_dict(data['optimizer'])
     trainer.snapshots = [spec_from_dict(s) for s in data['snapshots']]
     # Ensure every immutable dependency still exists and has its saved identity.
-    from .selfplay_evaluation import frozen_model
+    from .checkpoint import load_frozen
+    active = {n for n, _ in trainer.config.opponent_probabilities} | set(trainer.config.evaluation_names)
     for spec in (trainer.config.anchor, *trainer.config.opponent_policies, *trainer.snapshots):
-        if spec.kind == 'checkpoint':
-            frozen_model(spec)
+        for identity in spec.identities():
+            load_frozen(identity, verify=True)
+        if spec.kind != 'variant' and (spec.name in active or spec in trainer.snapshots or spec == trainer.config.anchor):
+            spec.factory().prepare()
+    for spec in trainer.config.learner_phases:
+        if spec.source:
+            load_frozen(spec.source, verify=True)
     for key, value in data['progress'].items():
         setattr(trainer, key, value)
     trainer.bc_metrics = data.get('bc_metrics')
     trainer.initial_checkpoint_sha256 = data['metadata'].get('initial_checkpoint_sha256')
     trainer.initial_checkpoint_path = data['metadata'].get('initial_checkpoint_path')
+    if 'learner_phases' in data['metadata']:
+        from .multiphase import LearnerPhaseSpec
+        trainer.learner_phases = tuple(LearnerPhaseSpec(**s) for s in data['metadata']['learner_phases'])
     restore_rng(data['rng'], trainer)

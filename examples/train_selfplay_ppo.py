@@ -9,8 +9,8 @@ import torch
 from examples.experiment_output import record_output, add_output_arguments, add_config_arguments
 from research.ppo.trainer import Config
 from research.ppo.checkpoint import load_model
-from research.ppo.multiphase import phases, PhaseActorCritic
-from research.ppo.opponents import PolicySpec, historical_pool, policy_registry
+from research.ppo.multiphase import phases, PhaseActorCritic, PHASES, resolve_learner_phases
+from research.ppo.opponents import PolicySpec, CheckpointIdentity, historical_pool, policy_registry
 from research.ppo.selfplay_trainer import SelfPlayConfig, SelfPlayTrainer
 from research.ppo.selfplay_checkpoint import save, resume, config_from_dict
 from research.ppo.selfplay_evaluation import evaluate_phases, frozen_model, evaluation_diagnostics
@@ -33,11 +33,18 @@ def main(argv=None):
     parser.add_argument('--learn-phases', default='bid')
     parser.add_argument('--play-policy', choices=('frozen', 'trainable'), help='Validated against learn-phases')
     parser.add_argument('--trump-policy', choices=('heuristic', 'neural'), default='heuristic')
+    for phase in PHASES:
+        parser.add_argument(f'--learner-{phase}', choices=('heuristic', 'neural-frozen', 'neural-train'))
+        parser.add_argument(f'--learner-{phase}-source',
+                            help='init, anchor, registered checkpoint, file path, or new (fresh heads)')
     parser.add_argument('--opponent-pool', default='HHH:0.5,anchor:0.5')
     parser.add_argument('--opponent-checkpoint', action='append', default=[], metavar='NAME=PATH')
+    parser.add_argument('--opponent-composition', action='append', default=[], metavar='NAME=JSON_PATH')
     parser.add_argument('--eval-opponents', default='HHH,CHH,anchor')
     parser.add_argument('--selection-opponent', default='anchor')
     parser.add_argument('--rollout-decisions', type=int, default=1024)
+    parser.add_argument('--max-rollout-hands', type=int, default=4096,
+                        help='maximum hands in a trump-only rollout, even when no samples occur')
     parser.add_argument('--snapshot-every-hands', type=int, default=32768)
     parser.add_argument('--snapshot-pool-size', type=int, default=8)
     parser.add_argument('--bid-bc-hands', type=int, default=0)
@@ -58,6 +65,8 @@ def main(argv=None):
         if args.init_play_checkpoint and isinstance(initial, PhaseActorCritic):
             raise ValueError('--init-play-checkpoint requires an original play-only checkpoint')
         saved = config_from_dict(data['config']) if data['metadata']['checkpoint_version'] == 2 else None
+        if args.resume and saved is None:
+            raise ValueError('Resume requires a multi-phase checkpoint; use --init-play-checkpoint for migration')
         anchor_path = args.anchor_checkpoint or (Path(saved.anchor.path) if saved else source)
         anchor_spec = PolicySpec.checkpoint('anchor', anchor_path)
         anchor = frozen_model(anchor_spec)
@@ -67,13 +76,66 @@ def main(argv=None):
             raise ValueError('Anchor must be the original play-only policy, not a multi-phase checkpoint')
         if saved and saved.anchor.sha256 != anchor_spec.sha256:
             raise ValueError('New stage must retain its original play anchor identity')
-        policies = tuple(policy_registry(anchor_spec, args.opponent_checkpoint,
-                                         reserved=('self-snapshots',)).values())
-        enabled = phases(args.learn_phases)
-        if args.play_policy and (args.play_policy == 'trainable') != ('play' in enabled):
-            raise ValueError('play-policy must agree with learn-phases')
-        if (args.trump_policy == 'neural') != ('trump' in enabled):
-            raise ValueError('Neural trump requires trump in learn-phases; heuristic trump cannot be trained')
+        identity = CheckpointIdentity.from_path(source)
+        initialization_identity = (CheckpointIdentity(data['metadata']['initial_checkpoint_path'],
+            data['metadata']['initial_checkpoint_sha256']) if args.resume and
+            data['metadata'].get('initial_checkpoint_path') else identity)
+        registry = policy_registry(anchor_spec, args.opponent_checkpoint,
+            reserved=('self-snapshots', 'init', 'new'), compositions=args.opponent_composition, initial=initialization_identity)
+        if args.resume and not {'--opponent-checkpoint', '--opponent-composition'} & explicit:
+            registry = {p.name: p for p in saved.opponent_policies}
+        policies = tuple(registry.values())
+        enabled = phases(args.learn_phases) if not args.resume or '--learn-phases' in explicit else saved.learn_phases
+        phase_flags = {f'--learner-{p}{suffix}' for p in PHASES for suffix in ('', '-source')}
+        configured = bool(phase_flags & explicit)
+        learner = saved.learner_phases if args.resume else ()
+        if configured:
+            existing_neural = getattr(initial, 'neural_phases', ('play',))
+            states = []
+            for phase in PHASES:
+                default = 'neural-frozen' if phase in existing_neural else 'heuristic'
+                if '--learn-phases' in explicit and phase in enabled:
+                    default = 'neural-train'
+                if args.resume and saved.learner_phases:
+                    default = saved.learner_phases[PHASES.index(phase)].state
+                states.append(getattr(args, 'learner_' + phase) or default)
+            selected = tuple(p for p, state in zip(PHASES, states) if state == 'neural-train')
+            if '--learn-phases' in explicit and selected != enabled:
+                raise ValueError('--learn-phases conflicts with --learner-* trainability; use one consistent configuration')
+            if not selected:
+                raise ValueError('Training requires at least one neural-train learner phase')
+            enabled = phases(selected)
+            sources = [getattr(args, 'learner_' + p + '_source') for p in PHASES]
+            if args.resume:
+                # Omitted sources preserve original initialization provenance, not the resume file.
+                learner = tuple(saved.learner_phases)
+                if not learner:
+                    raise ValueError('Use legacy flags to resume a legacy configuration; initialize a new stage for learner source options')
+                resolved = []
+                for i, state in enumerate(states):
+                    if sources[i] is None:
+                        resolved.append(replace(learner[i], state=state))
+                    else:
+                        probe_states = [s.state for s in learner]
+                        probe_states[i] = state
+                        probe_sources = [('new' if s.initialization == 'representation' else s.source.path)
+                                         if s.source else None for s in learner]
+                        probe_sources[i] = sources[i]
+                        resolved.append(resolve_learner_phases(probe_states, probe_sources, registry, initialization_identity)[i])
+                learner = tuple(resolved)
+            else:
+                learner = resolve_learner_phases(states, sources, registry, identity)
+        if learner:
+            if args.play_policy and learner[2].state != 'neural-' + ('train' if args.play_policy == 'trainable' else 'frozen'):
+                raise ValueError('--play-policy conflicts with learner play state')
+            if '--trump-policy' in explicit and (args.trump_policy == 'neural') != (learner[1].state != 'heuristic'):
+                raise ValueError('--trump-policy conflicts with learner trump state')
+        else:
+            if args.play_policy and (args.play_policy == 'trainable') != ('play' in enabled):
+                raise ValueError('play-policy must agree with learn-phases')
+            if '--trump-policy' in explicit and (args.trump_policy == 'neural') != (
+                    'trump' in enabled or 'trump' in getattr(initial, 'neural_phases', ())):
+                raise ValueError('Neural trump requires trump in learn-phases; heuristic trump cannot be trained')
         pool = historical_pool(args.opponent_pool, policies, anchor_spec)
         base = {f.name: getattr(args, f.name) for f in fields(Config) if f.name not in skipped}
         if '--hidden-size' not in explicit:
@@ -83,7 +145,8 @@ def main(argv=None):
             evaluation_names=tuple(args.eval_opponents.split(',')), primary_opponent=args.selection_opponent,
             rollout_decisions=args.rollout_decisions, snapshot_every_hands=args.snapshot_every_hands,
             snapshot_pool_size=args.snapshot_pool_size, bid_bc_hands=args.bid_bc_hands,
-            forgetting_hands=args.forgetting_hands, sampling_scheme='episode-v1')
+            forgetting_hands=args.forgetting_hands, sampling_scheme='episode-v1',
+            learner_phases=learner, max_rollout_hands=args.max_rollout_hands)
         if args.resume:
             if saved is None:
                 raise ValueError('Resume requires a multi-phase checkpoint; use --init-play-checkpoint for migration')
@@ -92,21 +155,31 @@ def main(argv=None):
                        if '--' + f.name.replace('_', '-') in explicit}
             for flag, key in (('--opponent-pool', 'opponent_probabilities'),
                               ('--opponent-checkpoint', 'opponent_policies'),
+                              ('--opponent-composition', 'opponent_policies'),
                               ('--eval-opponents', 'evaluation_names'), ('--selection-opponent', 'primary_opponent')):
                 if flag in explicit:
                     changes[key] = getattr(config, key)
+            if configured:
+                changes.update(learner_phases=learner, learn_phases=enabled)
             config = replace(saved, **changes)
-        if config.learn_phases == ('bid',) and isinstance(initial, PhaseActorCritic):
+        if not config.learner_phases and config.learn_phases == ('bid',) and isinstance(initial, PhaseActorCritic):
             if not all(torch.equal(a.cpu(), b.cpu()) for a, b in zip(
                     initial.networks['play'].parameters(), anchor.parameters())):
                 raise ValueError('Bidding-only anchor comparisons require identical pretrained playing weights; initialize from play-only or Stage A')
+        active = {n for n, _ in config.opponent_probabilities} | set(config.evaluation_names) | {'anchor'}
+        for spec in config.opponent_policies:
+            if spec.name not in active:
+                continue  # An archive used only as a phase source need not expose every phase.
+            factory = spec.factory()
+            if hasattr(factory, 'prepare'):
+                factory.prepare()
         trainer = SelfPlayTrainer(config, initial)
         if args.resume:
             resume(args.resume, trainer)
         elif args.bid_bc_hands:
             bc = clone_bidding(trainer, args.bid_bc_hands)
             print(f'Bidding imitation: {bc["samples"]} samples; loss {bc["loss"]:.4f}; accuracy {bc["accuracy"]:.1%}')
-    except (ValueError, FileNotFoundError) as exc:
+    except (ValueError, OSError) as exc:
         parser.error(str(exc))
     directory.mkdir(parents=True, exist_ok=True)
     (directory / 'config.json').write_text(json.dumps(asdict(config), indent=2) + '\n')
@@ -115,8 +188,11 @@ def main(argv=None):
     validation_seed = stream_seed(config.seed, 'selfplay-validation-v1')
     bootstrap_seed = stream_seed(config.seed, 'selfplay-validation-bootstrap-v1')
     reference = teacher_data(config.seed, config.forgetting_hands, anchor=anchor)
-    frozen_play_state = {k: v.detach().cpu().clone() for k, v in trainer.model.networks['play'].state_dict().items()}
+    frozen_states = {p: {k: v.detach().cpu().clone() for k, v in trainer.model.networks[p].state_dict().items()}
+                     for p in trainer.model.neural_phases if p not in config.learn_phases}
     print(f'Multi-phase PPO: learn {",".join(config.learn_phases)}, neural {",".join(trainer.model.neural_phases)}')
+    for phase, spec in zip(PHASES, trainer.learner_phases):
+        print(f'  {phase}: {spec.state}; initialization={spec.initialization}; source={spec.source}')
     print(f'Anchor: {config.anchor.path}\nAnchor SHA256: {config.anchor.sha256}')
     print(f'Device: {trainer.device}; workers: {trainer.workers}; torch threads: {config.torch_threads}; validation workers: {resolve_workers(args.eval_threads)}')
     print(f'Primary selection opponent: {config.primary_opponent}; training pool: {config.opponent_probabilities}')
@@ -125,20 +201,23 @@ def main(argv=None):
             before, update_started = trainer.hands, perf_counter()
             buffer, reward = trainer.collect()
             sample_count = len(buffer)
-            metrics = trainer.update(buffer)
-            frozen_play_verified = None
-            if 'play' not in config.learn_phases:
-                frozen_play_verified = all(torch.equal(v.detach().cpu(), frozen_play_state[k])
-                    for k, v in trainer.model.networks['play'].state_dict().items())
-                if not frozen_play_verified:
-                    raise RuntimeError('Frozen playing parameters changed during bidding training')
+            trainer.optimization_seconds = 0.0
+            metrics = trainer.update(buffer) if sample_count else {}
+            frozen_verified = {p: all(torch.equal(v.detach().cpu(), frozen_states[p][k])
+                for k, v in trainer.model.networks[p].state_dict().items()) for p in frozen_states}
+            if not all(frozen_verified.values()):
+                raise RuntimeError('Frozen phase parameters changed during training')
+            frozen_play_verified = frozen_verified.get('play')
             final = trainer.hands == config.total_hands
             row = dict(hands=trainer.hands, play_samples=trainer.samples, training_samples=trainer.samples,
                 updates=trainer.updates, optimizer_steps=trainer.optimizer_steps, mean_reward=reward,
                 phase_samples=trainer.phase_counts, training_by_opponent=trainer.opponent_metrics,
                 train_opponents=config.opponent_probabilities, opponent_assignments=trainer.opponent_assignments,
                 selection_opponent=config.primary_opponent, metrics=metrics, bc_metrics=trainer.bc_metrics,
-                anchor_sha256=trainer.anchor_sha256, frozen_play_verified=frozen_play_verified, playing_anchor_kl=playing_kl(trainer.model, anchor, reference),
+                anchor_sha256=trainer.anchor_sha256, frozen_play_verified=frozen_play_verified,
+                learner_phases=[asdict(s) for s in trainer.learner_phases],
+                frozen_phases_verified=frozen_verified,
+                playing_anchor_kl=playing_kl(trainer.model, anchor, reference) if 'play' in trainer.model.neural_phases else None,
                 collection_seconds=trainer.collection_seconds, optimization_seconds=trainer.optimization_seconds,
                 rollout_performance=trainer.rollout_performance, execution=trainer.execution_metadata(),
                 collection_hands_per_second=(trainer.hands - before) / trainer.collection_seconds,
@@ -147,7 +226,8 @@ def main(argv=None):
             print(f'Update {trainer.updates}: {trainer.hands}/{config.total_hands} hands; samples {trainer.phase_counts}; reward {reward:+.4f}')
             for phase in config.learn_phases:
                 print(f'  {phase}: policy {metrics.get(phase + "_policy_loss", 0):.5f}, entropy {metrics.get(phase + "_entropy", 0):.4f}, KL {metrics.get(phase + "_approx_kl", 0):.6f}')
-            if trainer.hands - trainer.last_snapshot >= config.snapshot_every_hands:
+            if (sample_count and set(trainer.model.neural_phases) <= set(trainer.model.trained_phases)
+                    and trainer.hands - trainer.last_snapshot >= config.snapshot_every_hands):
                 spec = trainer.publish_snapshot(directory / 'snapshots')
                 print(f'Historical snapshot: {spec.name} SHA256 {spec.sha256}')
             if trainer.hands - trainer.last_eval >= config.eval_every_hands or final:
@@ -179,7 +259,8 @@ def main(argv=None):
             row['update_seconds'] = perf_counter() - update_started
             row['runtime_seconds'] = perf_counter() - started
             row['hands_per_second'] = (trainer.hands - initial_hands) / row['runtime_seconds']
-            print(f'Collection {trainer.collection_seconds:.3f}s ({row["collection_hands_per_second"]:.1f} hands/s); optimization {trainer.optimization_seconds:.3f}s; validation {row["evaluation_seconds"]:.3f}s; anchor play KL {row["playing_anchor_kl"]:.6g}')
+            kl_text = 'N/A (heuristic play)' if row['playing_anchor_kl'] is None else f'{row["playing_anchor_kl"]:.6g}'
+            print(f'Collection {trainer.collection_seconds:.3f}s ({row["collection_hands_per_second"]:.1f} hands/s); optimization {trainer.optimization_seconds:.3f}s; validation {row["evaluation_seconds"]:.3f}s; anchor play KL {kl_text}')
             with (directory / 'progress.jsonl').open('a') as sink:
                 sink.write(json.dumps(row, allow_nan=False) + '\n')
     finally:
