@@ -25,6 +25,7 @@ if TORCH:
     from texas42.agents import VARIANTS, Agent, HeuristicAgent
     from texas42.selfplay import SelfPlayEnv
     from texas42.encoding import encode
+    from texas42.parallel import resolve_workers
 
 
 @unittest.skipUnless(TORCH, 'optional rl extra is not installed')
@@ -174,7 +175,8 @@ class MultiPhaseTests(unittest.TestCase):
         records = metrics = weights = None
         for workers in (1,2,4,0):
             t = SelfPlayTrainer(replace(c, threads=workers), initial); self.addCleanup(t.close)
-            if workers in (1,2,4): self.assertEqual(t.workers,workers)
+            # Requests are upper bounds: CI affinity/quotas can expose fewer CPUs.
+            self.assertEqual(t.workers, resolve_workers(workers, min(c.total_hands, c.rollout_decisions)))
             b, _ = t.collect()
             self.assertGreater(len(b),0)
             current = (b.records.copy(), b.advantages.copy(), t.opponent_assignments.copy(), t.hands)
