@@ -60,6 +60,44 @@ it never follows a moving snapshot file during training.
 The [non-neural recipes](command_reference.md#pure-heuristic-conservative-and-random-comparisons)
 cover HHH symmetry checks, conservative bidding and random phase substitutions.
 
+## Controlled training comparisons
+
+Use the [held-out phase recipes](command_reference.md#held-out-phase-ablations)
+after training; checkpoint selection uses a separate fixed validation schedule.
+For bidding-only or trump-only learning, compare with the exact selected frozen
+continuations, which may differ from original anchor. Checkpoint provenance alone
+cannot establish that continuing playing parameters are identical.
+
+| Learned phase under test | Hold constant | Required shared-network checks |
+| --- | --- | --- |
+| Bidding | Trump and play routes/sources | Playing YES; trump YES if both neural, otherwise identical chosen strategy |
+| Trump | Bidding and play routes/sources | Bidding YES and playing YES |
+| Playing | Bidding and trump routes/sources | Bidding/trump YES when both neural; otherwise identical chosen strategies |
+
+Require only the tested phase in differing_phases. To compare two learned versions
+of a phase, set both neural and override just B's source for that phase. To compare
+with a heuristic, set B's tested phase heuristic and preserve its other sources.
+Different legal states and downstream actions are expected after the phase under
+test diverges. This controls policy components, not every realized game trajectory.
+
+An all-phase joint model versus HHH varies multiple components. The same model
+versus the original play-only anchor can also vary several components, including
+playing weights. Those are useful complete-policy comparisons but do not isolate
+one learned phase. Pure deterministic self-comparisons are paired symmetry checks.
+
+Canonical phase-composable evaluation requires each selected neural phase to be
+marked trained. An initialization/zero-sample
+checkpoint containing an untrained routed phase is not a frozen learned source for
+that phase. Version 1 can supply play only; version 2 supports its validated trained
+subset. Greedy inference is the default across these evaluation commands.
+evaluate_selfplay_ppo retains multiple named opponent reports and anchor identity
+checks but does not accept the training CLI's opponent-composition JSON flag;
+use evaluate_agent_vs_agent for independent phase selections, including archives.
+The older checkpoint evaluation commands route neural_phases automatically and
+do not impose the canonical per-selected-phase trained check on the learner.
+Use them with checkpoints whose routed phases are all trained; use the canonical
+command for explicit availability validation and component ablation.
+
 ## Reports, reproducibility and interpretation
 
 JSON retains every existing arena field and adds `composition` and `breakdown`.

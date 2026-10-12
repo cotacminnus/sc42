@@ -153,11 +153,17 @@ The experiment identifies the first voluntary bid chosen by the target policy in
 
 ### 2.4 Start legacy play-only PPO from scratch (parallel)
 
+**Recipe 1 — original play-only PPO.** No pretrained checkpoint is needed. This
+creates the version-1 original play model with heuristic learner bid/trump and HHH
+opponents. The explicit episode-v1 sampling scheme makes the intended parallel
+stream clear; an archived legacy-v1 reproduction must instead retain its original
+sequential scheme and all original optimizer/software settings.
+
 ```bash
 python -m examples.train_ppo \
   --total-hands 524288 --rollout-play-steps 4096 \
   --ppo-epochs 4 --minibatch-size 512 \
-  --learning-rate 0.0003 --seed 42 --device auto \
+  --learning-rate 0.0003 --sampling-scheme episode-v1 --seed 42 --device auto \
   --threads 8 --eval-threads 1 --torch-threads 1 \
   --output-dir runs/ppo-parallel-v1
 ```
@@ -277,6 +283,9 @@ For a faster pure-engine baseline, use python -m examples.arena_benchmark --deal
 
 ### 3.3 PPO training configuration flags
 
+This table is for **legacy `examples.train_ppo`**. The complete modern argument
+reference and its different defaults are [below](#multi-phase-arguments).
+
 | Argument | Default | Purpose |
 | --- | --- | --- |
 | --total-hands | 100000 | Cumulative training hands budget. |
@@ -349,42 +358,385 @@ For a reproducible series of experiments: (1) run one baseline/ablation schedule
 
 ## Multi-phase PPO commands
 
-See [multi-phase training](multiphase_selfplay.md) for parameter transfer, credit assignment and checkpoint compatibility. Existing play-only commands remain available.
+Use `examples.train_selfplay_ppo` for new experiments with independently configured
+phases, neural opponents, or historical self-play. Use `examples.train_ppo` to
+reproduce the version-1 play-only baseline. Both train complete **hand** episodes;
+there is no training `--episode` or match-PPO option. Install the `rl` extra first.
+The following examples specify research configurations, not proven optimal settings.
+
+### Workflow finder
+
+| Recipe | Purpose | Prerequisite |
+| --- | --- | --- |
+| [1: original play-only](#24-start-legacy-play-only-ppo-from-scratch-parallel) | Reproduce `train_ppo`; creates the original play checkpoint | No pretrained checkpoint |
+| [2: bidding-only](#stage-a-frozen-play-learned-bidding) | Learn bidding, preserve pretrained play | Compatible version-1 play checkpoint |
+| [3: modern playing-only](#playing-only-with-the-modern-trainer) | Learn play with heuristic bid/trump using the version-2 path | Compatible version-1 play checkpoint |
+| [4: trump-only](#independent-learner-phases-and-trump-only-training) | Learn trump, preserve joint bid/play | Version-2 checkpoint with trained bid/play |
+| [5: all phases versus HHH](#all-three-phases-against-hhh) | Learn bid/trump/play against one fixed heuristic | Compatible version-1 play checkpoint |
+| [6: historical self-play](#stage-b-joint-training-with-historical-opponents) | New stage using frozen snapshots and fixed baselines | Recipe 5 checkpoint with all routed phases trained |
+| [7: exact resume](#resume-and-multi-opponent-validation) | Restore optimizer, progress, RNGs and historical roster | Existing version-2 checkpoint and its dependencies |
+| [8: mixed trainability](#mixed-phase-training) | Freeze any neural continuation or use a heuristic | Trained source for every frozen phase |
+| [9: independent sources](#independent-phase-checkpoints) | Load each learner phase from a different file | Compatible trained phase checkpoints, same hidden width |
+| [10: composed opponents](#register-composed-training-opponents) | Independent frozen opponent phases | JSON definition and compatible phase checkpoints |
+| [11: archived opponent](#training-against-an-archived-checkpoint) | Train against one fixed historical policy | Existing immutable trained snapshot/checkpoint |
+| [12: controlled evaluation](#held-out-phase-ablations) | Compare one phase while holding continuations constant | Trained checkpoint(s), independent final deal seed |
+
+Before running a recipe, confirm the named input files exist and satisfy its
+trained-phase prerequisites. Output directories must be new unless resuming.
+An output path in an example is not evidence that the checkpoint already exists.
+Recipe 1 can produce `runs/ppo-play-v1/checkpoints/best.pt`; later recipes use that
+file as a prerequisite. Archive filenames must be replaced with actual retained
+snapshot paths: publication intervals do not guarantee an exact hand-number suffix.
+
+### Multi-phase arguments
+
+All arguments below belong to **`examples.train_selfplay_ppo`**. `-h`/`--help`
+prints available flags. Defaults apply to a new run; omitted settings on resume
+normally come from the saved configuration. Table values are checked against
+argparse, `Config`, and `SelfPlayConfig`, rather than inferred from example commands.
+
+#### A. Budget and PPO optimization
+
+| Argument | Type / accepted values | New-run default | Effect, interactions and consequences |
+| --- | --- | --- | --- |
+| `--total-hands` | Integer > 0 | `100000` | Cumulative completed training-hand budget, including earlier hands on resume. Finishes hands; never exceeds this budget. It is not a sample or update count. |
+| `--rollout-decisions` | Integer > 0 | `1024` | Target number of **trainable learner actions** in one fixed-policy rollout. Frozen, heuristic and opponent actions do not count. Whole hands/waves may overshoot; the final budget-limited batch can be smaller. |
+| `--max-rollout-hands` | Integer > 0 | `4096` | Caps hands per **trump-only** rollout, even if no samples occur. Has no effect when bid or play is trainable. Reaching the cap returns collected samples, possibly none, so another rollout can continue within the total budget. |
+| `--ppo-epochs` | Integer > 0 | `4` | Passes over the collected batch; each pass reshuffles. Increases data reuse and potential policy drift, not environment hands. `target-kl` can stop passes early. |
+| `--minibatch-size` | Integer > 0 | `512` | Samples per Adam step. Last minibatch may be smaller; a batch smaller than this still runs. Influences optimizer-step count and mixed-phase composition. |
+| `--learning-rate` | Finite float > 0 | `0.0001` | Adam rate for all enabled phase modules. There is no separate per-phase rate. The legacy trainer defaults to `0.0003`. |
+| `--gamma` | Float in `[0,1]` | `1.0` | Discount per **that seat's trainable decision**, not every engine turn. Frozen/heuristic continuations create no extra discount steps. Changing trained phases changes this decision-time convention. |
+| `--gae-lambda` | Float in `[0,1]` | `0.95` | GAE decay within a complete seat/hand trajectory. Lower values rely more on old value estimates; no GAE crosses seats or hands. |
+| `--clip-epsilon` | Finite float in `(0,1)` | `0.2` | PPO probability-ratio clipping range `1±epsilon`; uses original legal masks/log probabilities. Does not guarantee a maximum KL change. |
+| `--entropy-coef` | Finite float ≥ 0 | `0.01` | Subtracted legal-policy entropy weight in the loss. Zero disables it; it applies only to trained actions. No illegal/reserved logits contribute. |
+| `--value-coef` | Finite float ≥ 0 | `0.5` | Weight on signed-mark return MSE. Zero removes critic regression from the combined loss, while GAE still uses old value predictions. |
+| `--max-grad-norm` | Finite float > 0 | `0.5` | Gradient-norm clipping before Adam. Logged `gradient_norm` is measured **before** clipping. Frozen modules have no gradients. |
+| `--target-kl` | Finite float ≥ 0 | `0.0` | Zero disables early stopping. Otherwise checks approximate KL before applying each minibatch and skips the violating minibatch and remaining passes. An excessively small threshold can produce a no-optimizer-steps error. |
+| `--hidden-size` | Integer > 0, compatible with sources | Initialization checkpoint's width; argparse fallback `256` | Width of both hidden layers in every phase network. Omission adopts the loaded checkpoint width; explicit mismatch is rejected. All learner sources must match this width, encoder, ruleset and action vocabulary. |
+
+A **hand** executes four auction decisions, one trump decision and 28 plays.
+A **sample** is one enabled learner action. A **rollout** is the complete-hand
+collection made before changing weights. A **minibatch** is a shuffled slice of
+that rollout. An **epoch** visits its samples once; an **optimizer step** updates
+weights using one minibatch. With `B` samples and no KL early stop, one PPO update
+uses `ppo_epochs × ceil(B/minibatch_size)` optimizer steps. An empty batch has none.
+For example, bidding-only needs 512 hands for a full 1024-sample batch; play-only
+needs 74 hands and supplies 1036 samples. More hands do not imply proportionally
+more updates if batch size, sparse trump samples, final truncation or learning
+phases change. Samples are collected again from the updated policy next rollout.
+
+#### B. Learner phases and legacy compatibility
+
+| Argument | Accepted values | New-run default / resolution | Meaning |
+| --- | --- | --- | --- |
+| `--learner-bid` | `heuristic`, `neural-frozen`, `neural-train` | Unset; see rules below | Independent bidding route and optimizer membership. |
+| `--learner-trump` | Same three states | Unset; see rules below | Only the winning bidder acts; training samples can be sparse. |
+| `--learner-play` | Same three states | Unset; see rules below | Seven play actions per learner seat if trainable. |
+| `--learner-bid-source` | Source token or path | Unset → `init` for a neural phase | Resolve only the bidding initialization. |
+| `--learner-trump-source` | Source token or path | Unset → `init` for a neural phase | Resolve only the trump initialization. |
+| `--learner-play-source` | Source token or path | Unset → `init` for a neural phase | Resolve only the playing initialization. |
+| `--learn-phases` | Nonempty distinct comma-separated subset of `bid,trump,play`, no spaces | `bid` | Legacy set of trainable neural phases; order canonicalizes to bid/trump/play. Explicit use alongside modern states must identify exactly the same trained set. |
+| `--play-policy` | `frozen`, `trainable` | Unset | Legacy assertion: in modern syntax requires neural-frozen or neural-train play respectively; heuristic play satisfies neither. With legacy syntax it must agree with membership in learn-phases. |
+| `--trump-policy` | `heuristic`, `neural` | argparse `heuristic`; asserted only if explicitly supplied | Checks the effective trump route. Omission does not switch an inherited neural trump module to heuristic. Use explicit learner states for independent routing. |
+
+| Effective state | Rollout action selection | Included in buffer / Adam |
+| --- | --- | --- |
+| `heuristic` | Existing deterministic HeuristicAgent V1 | No / no |
+| `neural-frozen` | Greedy legal action from frozen network | No / no |
+| `neural-train` | Masked stochastic action from the rollout's policy snapshot | Yes / yes |
+
+**Omission rules matter.** If any learner state **or source** flag is supplied,
+the modern configuration path is active. Unmentioned phases declared neural in
+the initialization checkpoint default to neural-frozen; the others default to
+heuristic. An explicit `--learn-phases` makes otherwise unspecified members
+neural-train. There must ultimately be at least one trainable phase. A source flag
+alone does not opt its phase into training. Resume instead inherits saved states
+and sources before checking explicit overrides.
+
+Without any learner flags, legacy phase construction applies: learn-phases defaults
+to bid, enables neural learning for those phases, and retains existing neural
+continuations from version-2 initialization (play remains neural for version 1).
+Thus default version-1 initialization learns bid with frozen play and heuristic
+trump; a version-2 file declaring neural trump can retain frozen neural trump.
+Do not rely on the literal argparse trump default to disable it. Different
+initialization paths are not promised to yield identical newly initialized weights
+or RNG sequences; preserve the original syntax/environment for legacy reproduction.
+
+All nonempty trainable subsets are supported, including trump alone. Every
+frozen neural phase must have a trained compatible source. All-frozen/heuristic
+configurations belong to evaluation, not training. Conflicting explicit legacy
+and modern choices fail before training; prefer spelling all three modern states
+for a new experiment. An older run whose saved configuration used legacy syntax
+must resume with that syntax, or initialize a new stage to adopt source flags.
+
+#### C. Checkpoint entry points and neural sources
+
+| Argument | Type / accepted values | Default | Meaning and constraints |
+| --- | --- | --- | --- |
+| `--init-play-checkpoint` | Path to compatible version-1 checkpoint | Unset | Pretrained play-only initialization; rejects a version-2 model. New optimizer, counters, RNGs and roster. |
+| `--init-checkpoint` | Path to compatible version-1 or version-2 checkpoint | Unset | New stage from model parameters. Does not import optimizer, old best score, progress or historical roster. |
+| `--anchor-checkpoint` | Path to original version-1 play checkpoint | Inferred | Version-1 initialization uses that same file as anchor. Version-2 initialization/resume retains the original anchor identity from metadata; an override must match its SHA256. |
+| `--resume` | Path to compatible version-2 checkpoint | Unset | Exact saved-stage continuation. Mutually exclusive with the two initialization flags. Restore omitted settings, model, optimizer, counters, RNGs and active roster. |
+
+If no entry-point source is supplied, the CLI loads
+`runs/ppo-play-v1/checkpoints/best.pt`; it does **not** create a pretrained model.
+A compatible original play-only anchor is required even if learner play is heuristic.
+The three entry-point flags are mutually exclusive. A renamed/moved anchor can be
+supplied by `--anchor-checkpoint` with the same bytes, but other recorded immutable
+dependencies still need to be accessible at their saved paths.
+
+| Learner source | Resolution / initialization |
+| --- | --- |
+| `init` | The initialization checkpoint. Copy the full requested trained phase (trunk, policy and value heads). Only for neural-train, a missing trained phase instead gets representation transfer and fresh heads, explicitly recorded. On resume, explicit `init` refers to the original stage initialization identity, not the evolving resume file. |
+| `anchor` | The immutable original play-only checkpoint. Valid for neural play only; bid/trump requests fail even when trainable. |
+| `new` | Trainable phases only. From the initialization file, copy the trained play trunk, or the first trained phase trunk in bid/trump/play order if play is unavailable. Initialize fresh policy/value heads even if the requested phase was already trained. Requires a trained representation. |
+| Registered name | Register with `--opponent-checkpoint NAME=PATH`. Must identify a single checkpoint containing the requested trained neural phase; variants and composed policies are not phase sources. |
+| Direct or archived path | Same trained-phase requirement as a registered name. An archived snapshot is a fixed file, not a live subscription to later snapshots. |
+
+All heuristic phases reject sources; frozen phases cannot use `new` or untrained
+weights. Version-1 output layers have bid/trump logits, but those are **not trained
+bid/trump policies**. Version-2 sources must declare the requested phase in both
+neural_phases and trained_phases. Source paths resolve to absolute paths and SHA256
+before training. Source parameters are copied into independent learner modules;
+training never modifies the file. Exact resume verifies identities and optimizer
+membership. Different phase sources may be supplied independently, subject to
+learner-width compatibility. See [mechanics](multiphase_selfplay.md#initialization-and-freezing).
+
+#### D. Training opponents and historical snapshots
+
+| Argument | Type / accepted values | Default | Meaning and interactions |
+| --- | --- | --- | --- |
+| `--opponent-pool` | Nonempty `NAME:WEIGHT,...`; unique registered names, finite positive weights | `HHH:0.5,anchor:0.5` | One opponent controls both opposing seats for a complete hand. Ratios normalize to sorted exact rational probabilities; `HHH:7,anchor:3` equals `HHH:0.7,anchor:0.3`. Realized counts fluctuate. |
+| `--opponent-checkpoint` | Repeatable `NAME=PATH` | No archives | Register an immutable compatible checkpoint for learner sources, training or validation. Names cannot duplicate built-ins/anchor or reserved `init`, `new`, `self-snapshots`. Active whole-checkpoint opponents need all routed neural phases trained. |
+| `--opponent-composition` | Repeatable `NAME=JSON_PATH` | No compositions | Register a frozen phase-composable opponent. Source checkpoint registrations are resolved before JSON definitions; earlier composed names cannot serve as single phase sources. See [JSON recipe](#register-composed-training-opponents). |
+| `--snapshot-every-hands` | Integer > 0 | `32768` | Publication threshold since last snapshot, checked at rollout/update boundaries. Publishes only following a nonempty batch when every routed neural phase is trained. Threshold may overshoot; not every exact multiple produces a filename. |
+| `--snapshot-pool-size` | Integer > 0 | `8` | Maximum active historical policies. Evicts oldest membership, not files. The separate anchor is never evicted. No CLI switch disables publication; snapshots can be produced even if the current pool does not sample them. |
+
+Built-in variants are defined [once above](#22-policy-baselines-and-ablations):
+HHH is heuristic in all phases; CHH passes unless forced but retains heuristic
+trump/play; HHR changes only play to random. HRR, CRR and RRR supply other fixed
+ablations. `anchor` uses heuristic bid/trump and the original frozen neural play.
+Registered checkpoints restore their declared neural phases and use heuristic
+fallbacks. Composed opponents specify phases independently, including different
+neural files. They always remain frozen and use greedy neural inference.
+
+`self-snapshots` first uses the **original anchor** if the active roster is empty;
+it does not automatically use the stage's initial joint model. Once published
+policies exist it selects uniformly from the active roster using a separate
+seed stream. A new stage starts with an empty roster; resume restores the exact
+saved roster. Keep files immutable and preserve evicted archives needed by older
+checkpoints. This is a learning partnership against frozen opponents, not four
+simultaneously updated PPO players. No live learner opponent is implemented.
+
+#### E. Validation and checkpoint selection
+
+| Argument | Type / accepted values | Default | Meaning and interactions |
+| --- | --- | --- | --- |
+| `--eval-opponents` | Nonempty, unique comma-separated exact registry names; no separator whitespace | `HHH,CHH,anchor` | Separate reports using the same fixed paired schedules. May include registered archives/compositions, but not the dynamic `self-snapshots` pool entry; register a concrete snapshot to evaluate it. |
+| `--selection-opponent` | One name present in eval-opponents | `anchor` | `best.pt` maximizes this opponent's mean signed marks/hand, strictly greater than the previous best; ties retain the earlier best. Does not automatically change when training opponents or validation names change. |
+| `--eval-every-hands` | Integer > 0 | `5000` | Validation threshold since last evaluation, checked after collection/update. May overshoot by a rollout; also evaluates at total-hand completion, including an empty final batch. |
+| `--eval-deals` | Integer > 0 | `128` | Duplicate-deal **groups per opponent** per validation. Two swapped games/group in hand mode, so 128 means 256 games against each opponent. Increasing this changes the selection experiment/cost. |
+| `--bootstrap-samples` | Integer > 0 | `200` | Complete-group percentile-bootstrap replicates in validation, not PPO minibatches. CLI cannot disable validation bootstrap with zero. Evaluation CLIs have their own defaults. |
+| `--checkpoint-every-hands` | Integer > 0 | `5000` | Save latest.pt at threshold and final completion. Intermediate progress since last save is not guaranteed recoverable after interruption. Independent of best.pt selection/publication. |
+
+For HHH-only training/selection, supply **all three** of `--opponent-pool HHH:1`,
+`--eval-opponents HHH`, and `--selection-opponent HHH`; changing the training pool
+alone leaves anchor selection and the three default validation opponents intact.
+Training deals collect stochastic learner actions and are never used as validation
+trajectories. Validation is greedy on a fixed separately seeded schedule. The final
+held-out comparison uses a new seed and is not fed back into checkpoint selection.
+
+A duplicate group has ABAB and BABA partnership seating on the same absolute-seat
+deal and shaker. Win rate averages games; signed marks averages completed hands
+from the policy partnership's perspective. Bootstrap resamples **whole groups**,
+including both swapped games, and interpolates 95% percentile bounds. It is an
+uncertainty estimate under the experiment's opponents/deals, not proof of optimal
+play. [Arena definitions](arena.md) own detailed metric/statistical semantics.
+
+#### F. Execution, diagnostics and files
+
+| Argument | Type / accepted values | Default | Meaning and interactions |
+| --- | --- | --- | --- |
+| `--seed` | Integer `0 ≤ seed < 2^63` | `42` | Experiment seed for separate deal, action, shuffle, opponent, snapshot, imitation and validation streams. Record it with software versions; it is not a hardware-independent bitwise guarantee. |
+| `--device` | `auto`, `cpu`, `cuda` | `auto` | Main optimizer device; auto chooses CUDA when available. Explicit unavailable CUDA fails. Rollout/evaluation neural inference runs on CPU even when optimization uses CUDA. |
+| `--threads` | Integer ≥ 0 | `1` | Maximum simulation processes; 1 is sequential, 0 auto. Auto caps at 8; both auto/positive requests respect CPU affinity, physical-core information, quotas and independent-task count. Scheduling does not seed decisions. |
+| `--eval-threads` | Integer ≥ 0 | `1` | Independent validation worker request using the same safe resolver. Runtime-only; changing it does not alter training samples or exact-resume configuration. Small jobs may be faster sequentially. |
+| `--torch-threads` | Integer > 0 | `1` | Main-process PyTorch intra-op CPU threads, not simulations. Worker numerical threads are 1 to prevent oversubscription. Changing this stored setting is not accepted for exact resume. |
+| `--output-dir` | Directory path | `runs/ppo-selfplay` | Config/progress/checkpoints/snapshots. New stages reject an existing progress.jsonl; resume can use the same directory or a new directory while preserving dependency paths. |
+| `--log-dir` | Directory path | `logs/experiments/<command>-<run-id>/` | Readable training.log and training.csv. Training log appends; CSV is regenerated from available progress after successful completion. Reuse explicitly to keep a resumed transcript together. |
+| `--forgetting-hands` | Integer > 0 | `8` | Size in anchor-generated hands of the fixed play-observation KL dataset. KL(anchor play || current play) is diagnostic, not a penalty. Must remain positive even with heuristic learner play; then KL is unavailable. |
+| `--bid-bc-hands` | Integer ≥ 0 | `0` | Optional HHH bidding imitation before PPO; zero disables. Requires trainable bidding. Four masked-cross-entropy epochs use separate data/shuffle streams and a temporary optimizer. Logs loss/accuracy, including forced and voluntary subsets. Not rerun on resume; an explicit value must still match the saved configuration. |
+
+Worker detection and CPU/CUDA boundaries are explained in [parallel execution](parallel_execution.md).
+Use the same numerical backend for determinism checks. Exact cross-GPU, CUDA-build
+or PyTorch-version reproducibility is not guaranteed. Increasing workers, epochs
+or CPU numerical threads is not a guarantee of higher hands/second.
+
+| Artifact | Contents / use |
+| --- | --- |
+| `OUTPUT/config.json` | Resolved stored configuration; initial sources and identities for explicit phases, opponent definitions, optimization settings. Legacy configurations can leave learner_phases empty; metadata/startup output records their effective states. |
+| `OUTPUT/progress.jsonl` | One row per completed collection/update cycle; cumulative counters, per-rollout samples/rewards, timing and validation reports. Not an experience dataset or a continuously written per-action log. |
+| `OUTPUT/checkpoints/best.pt` | Model/optimizer/counters/RNGs at the best primary validation score. Use for final evaluation or a new stage; it may be older than latest.pt. |
+| `OUTPUT/checkpoints/latest.pt` | Most recent periodically saved completed cycle. Preferred exact-resume point. Restores best_score and validation/publication thresholds too. |
+| `OUTPUT/snapshots/policy-NNNNNNNNN.pt` | Immutable published frozen policies; filenames use actual cumulative hands. Active roster bounded, archived files retained. |
+| `LOG/training.log` | Invocation, resolved policies/SHA256, progress, validation summaries and timings. Stdout is mirrored as it happens; errors on stderr are not necessarily in this file. |
+| `LOG/training.csv` | Flattened per-progress-row metrics, phase samples/losses, opponent counts, primary/per-opponent validation and worker/time fields. Generated after a successful command return; interrupted runs may have progress without a refreshed CSV. |
+
+Read `hands`, `training_samples`, `updates`, and `optimizer_steps` as different
+cumulative counts. Modern `play_samples` is a compatibility alias for **all**
+training samples; actual playing counts are `phase_samples.play` per rollout.
+`mean_reward` averages all collected hand rewards, including zero-sample hands;
+`training_by_opponent` separates counts and means. `metrics` contains aggregate
+and `bid_*`/`trump_*`/`play_*` losses, entropy, KL and clipping statistics. A phase
+absent from a batch has no optimized phase metrics; console fallback zeros are
+not evidence it trained. `frozen_phases_verified` must remain true for every frozen
+neural phase; `frozen_play_verified` is its play compatibility field. A heuristic
+phase is not reported as a verified pretrained network. `playing_anchor_kl` can be
+nonzero for frozen joint play because its reference is the **original anchor**,
+not the stage's selected play source. No KL regularizer is implemented.
+
+Performance fields separate collection, optimization, validation, checkpoint and
+update time. Throughputs distinguish hands from learned decisions. Worker inference
+and loading durations are sums across workers, not additive wall-time stages;
+RSS samples at hand boundaries do not measure continuous peak memory. Startup,
+imitation and fixed-dataset construction precede the reported training-loop runtime.
 
 ### Stage A: frozen play, learned bidding
+
+**Recipe 2 — bidding-only.** Requires an existing compatible original play-only
+checkpoint, for example Recipe 1's best.pt. Explicit modern states preserve that
+play network bitwise and create new bid heads from its representation. Trump is
+heuristic. Set imitation hands to zero to ablate the optional teacher initialization.
 
 ```bash
 python -m examples.train_selfplay_ppo \
   --init-play-checkpoint runs/ppo-play-v1/checkpoints/best.pt \
-  --learn-phases bid --play-policy frozen --trump-policy heuristic \
+  --learner-bid neural-train --learner-bid-source new \
+  --learner-trump heuristic --learner-play neural-frozen --learner-play-source anchor \
   --bid-bc-hands 4096 --opponent-pool HHH:0.5,anchor:0.5 \
+  --eval-opponents HHH,CHH,anchor --selection-opponent anchor \
   --total-hands 262144 --rollout-decisions 1024 \
   --ppo-epochs 4 --minibatch-size 256 --learning-rate 0.0001 \
   --threads 8 --eval-threads 1 --device auto --seed 42 \
-  --output-dir runs/ppo-bidding-v1
+  --output-dir runs/ppo-bidding-v1 --log-dir logs/experiments/ppo-bidding-v1
 ```
 
-### Stage B: joint training with historical opponents
+Check `phase_samples.bid`, `frozen_phases_verified.play=true`, and the source SHA256.
+For an independent parameter-equality check, use the controlled bidding evaluation
+below. The older equivalent routing syntax is `--learn-phases bid --play-policy frozen
+--trump-policy heuristic`; it retains its own established initialization sequence.
+
+### Playing-only with the modern trainer
+
+**Recipe 3.** Requires the original play checkpoint. Use this path to include play
+in a version-2 experiment that can later change phases/opponents. For an exact
+legacy method/seed reproduction use Recipe 1 instead; neither path guarantees
+identical training samples to the other.
 
 ```bash
 python -m examples.train_selfplay_ppo \
-  --init-checkpoint runs/ppo-bidding-v1/checkpoints/best.pt \
-  --learn-phases bid,play --trump-policy heuristic \
-  --opponent-pool HHH:0.3,anchor:0.3,self-snapshots:0.4 \
+  --init-play-checkpoint runs/ppo-play-v1/checkpoints/best.pt \
+  --learner-bid heuristic --learner-trump heuristic --learner-play neural-train \
+  --opponent-pool HHH:1 --eval-opponents HHH --selection-opponent HHH \
+  --total-hands 100000 --rollout-decisions 4096 --ppo-epochs 4 --minibatch-size 512 \
+  --threads 4 --eval-threads 1 --seed 42 --device auto \
+  --output-dir runs/ppo-modern-play --log-dir logs/experiments/ppo-modern-play
+```
+
+### Independent learner phases and trump-only training
+
+**Recipe 4.** Requires a version-2 joint checkpoint with trained neural bid/play and
+its original anchor file. Neither bid nor play is updated; trump gets new heads.
+A defending learner contributes zero samples, a declaring learner exactly one.
+The sample target can require many hands; lower the hand cap for bounded short
+checks. Empty capped/final batches skip optimization but still advance progress.
+Every hand executes all seven tricks.
+
+```bash
+python -m examples.train_selfplay_ppo \
+  --init-checkpoint runs/ppo-joint-v1/checkpoints/best.pt \
+  --learner-bid neural-frozen --learner-trump neural-train --learner-trump-source new \
+  --learner-play neural-frozen \
+  --opponent-checkpoint pretrump=runs/ppo-joint-v1/checkpoints/best.pt \
+  --opponent-pool pretrump:0.7,HHH:0.3 \
+  --eval-opponents pretrump,HHH,anchor --selection-opponent pretrump \
+  --total-hands 262144 --rollout-decisions 1024 --max-rollout-hands 4096 \
+  --threads 8 --eval-threads 4 --device auto --seed 42 \
+  --output-dir runs/ppo-trump-v1 --log-dir logs/experiments/ppo-trump-v1
+```
+
+Check both frozen bid/play fields, actual trump sample counts and `trump_*` metrics.
+`pretrump` must route the same bidding/playing with heuristic trump to isolate that
+phase in validation. If its checkpoint already routes neural trump, register a
+composed heuristic-trump opponent instead, as in Recipe 10.
+
+### All three phases against HHH
+
+**Recipe 5.** Requires Recipe 1's original play checkpoint, not a pretrained bid or
+trump policy. Both new phases transfer its trunk with fresh policy/value heads;
+playing starts from the trained whole network. All three modules are optimized.
+
+```bash
+python -m examples.train_selfplay_ppo \
+  --init-play-checkpoint runs/ppo-play-v1/checkpoints/best.pt \
+  --learner-bid neural-train --learner-bid-source new \
+  --learner-trump neural-train --learner-trump-source new \
+  --learner-play neural-train --learner-play-source init \
+  --opponent-pool HHH:1 --eval-opponents HHH,CHH,anchor --selection-opponent HHH \
+  --bid-bc-hands 0 --total-hands 262144 --rollout-decisions 4096 \
+  --ppo-epochs 4 --minibatch-size 512 --learning-rate 0.0001 \
+  --snapshot-every-hands 32768 --snapshot-pool-size 8 \
+  --threads 8 --eval-threads 1 --device auto --seed 42 \
+  --output-dir runs/ppo-allphase-hhh --log-dir logs/experiments/ppo-allphase-hhh
+```
+
+Each hand yields 2 bid + 14 play samples, and 0 or 1 trump sample (16–17 total).
+Inspect all three phase counts/metrics, bid/contract distributions, and validation
+against HHH, CHH and anchor. There are no frozen learner networks in this recipe.
+Snapshots can be published even though HHH remains the sole sampled training
+opponent. Before reusing best.pt as a whole frozen opponent, ensure metadata records
+all three routed phases as trained; merely declaring a phase neural is insufficient.
+
+### Stage B: joint training with historical opponents
+
+**Recipe 6.** Requires Recipe 5's best.pt and its immutable original anchor.
+This is a **new stage**, because the opponent distribution changes. It copies the
+three phase networks and uses fresh Adam/RNG/counters; it starts with an empty
+historical roster. It does not resume Recipe 5's optimizer or import its snapshots.
+
+```bash
+python -m examples.train_selfplay_ppo \
+  --init-checkpoint runs/ppo-allphase-hhh/checkpoints/best.pt \
+  --learner-bid neural-train --learner-trump neural-train --learner-play neural-train \
+  --opponent-pool HHH:0.2,anchor:0.2,self-snapshots:0.6 \
+  --eval-opponents HHH,CHH,anchor --selection-opponent HHH \
   --snapshot-every-hands 32768 --snapshot-pool-size 8 \
   --total-hands 524288 --rollout-decisions 4096 \
   --ppo-epochs 4 --minibatch-size 512 --learning-rate 0.0001 \
   --threads 8 --eval-threads 1 --device auto --seed 42 \
-  --output-dir runs/ppo-joint-v1
+  --output-dir runs/ppo-allphase-selfplay --log-dir logs/experiments/ppo-allphase-selfplay
 ```
+
+Before publication, the self-snapshots portion also selects anchor (80% effective
+anchor probability in this example). Thereafter it selects uniformly from active
+frozen stage snapshots. HHH and anchor retain their fixed weights/rules, offering
+stable diversity and forgetting comparisons; this is not a guarantee against
+forgetting. Repeated checkpoints need not get monotonically stronger.
+For the earlier **bid/play-only** Stage B workflow, initialize from Recipe 2 and
+set bid/play neural-train, trump heuristic, and a new output directory such as
+`runs/ppo-joint-v1`. Those explicit states keep the legacy named workflow usable.
 
 ### Resume and multi-opponent validation
 
+**Recipe 7.** Requires latest.pt and all recorded source/opponent/roster files.
+Use the same output directory to append progress, or a new one to retain only
+continuation progress locally. Total hands is the cumulative target, not an increment.
+
 ```bash
 python -m examples.train_selfplay_ppo \
-  --resume runs/ppo-joint-v1/checkpoints/latest.pt \
+  --resume runs/ppo-allphase-selfplay/checkpoints/latest.pt \
   --total-hands 1048576 --threads 4 --eval-threads 1 \
-  --output-dir runs/ppo-joint-v1
+  --output-dir runs/ppo-allphase-selfplay --log-dir logs/experiments/ppo-allphase-selfplay
 
 python -m examples.evaluate_selfplay_ppo \
   --checkpoint runs/ppo-bidding-v1/checkpoints/best.pt \
@@ -392,93 +744,62 @@ python -m examples.evaluate_selfplay_ppo \
   --threads 4 --output runs/ppo-bidding-v1/heldout.json
 ```
 
-Add `--opponent-checkpoint archive=runs/ppo-joint-v1/snapshots/policy-000032768.pt`
-and include `archive` in `--opponents` to evaluate an archived policy.
+Changing the cumulative budget or rollout worker request is supported. Evaluation
+workers and output/log locations are runtime choices. Changing phase states/sources,
+architecture, optimizer settings, canonical opponent distribution, evaluation
+procedure or selection criterion requires a new stage; changing CPU/CUDA optimizer
+device type is not exact resume. Modern resume restores omitted stored settings;
+legacy train_ppo requires you to repeat saved configuration rather than adopting it
+automatically. Best.pt is selected performance, latest.pt is newest saved progress.
+Extending a run that ended with a shortened final rollout resumes that saved state,
+but is not equivalent to having used the longer budget from the beginning.
 
-### Multi-phase arguments
+### Mixed-phase training
 
-| Entry point / flag | Meaning |
-| --- | --- |
-| `examples.train_selfplay_ppo` | Independent phase networks, frozen historical opponents, hand episodes. |
-| `--init-play-checkpoint PATH` | Original play-only pretrained weights; default `runs/ppo-play-v1/checkpoints/best.pt`. |
-| `--init-checkpoint PATH` | New stage from phase weights with fresh optimizer/RNG; exclusive with initialization/resume sources. |
-| `--resume PATH` | Exact update-boundary continuation; omitted options restore saved configuration. |
-| `--learn-phases bid` / `trump` / `play` / comma-separated subset | Legacy enabled neural PPO decisions; default bid. |
-| `--learner-bid`, `--learner-trump`, `--learner-play` | Each accepts `heuristic`, `neural-frozen`, or `neural-train`. At least one must train. |
-| `--learner-PHASE-source SOURCE` | `init` (default), `anchor`, registered checkpoint name, direct path, or `new`. Resolved path/SHA256 saved before training. |
-| `--play-policy frozen\|trainable` | Optional assertion agreeing with learn-phases. |
-| `--trump-policy heuristic\|neural` | Legacy assertion; omitted values follow enabled/inherited neural phases. |
-| `--opponent-pool NAME:WEIGHT,...` | Default `HHH:0.5,anchor:0.5`; canonical ratios; existing variants, anchor, self-snapshots, registered checkpoints. |
-| `--opponent-checkpoint NAME=PATH` | Repeatable frozen checkpoint registration. |
-| `--opponent-composition NAME=JSON_PATH` | Repeatable frozen phase composition; registered name works in training pools and validation. |
-| `--rollout-decisions N` | Enabled decision target, default 1024; complete hands, variable-trump bounded waves. |
-| `--max-rollout-hands N` | Trump-only collection safeguard, default 4096; return a smaller or empty batch at this limit or the total-hand budget. |
-| `--bid-bc-hands N` | Default 0; optional four-epoch HHH masked imitation initialization. |
-| `--snapshot-every-hands N` / `--snapshot-pool-size N` | Default 32768 / 8; publish at update boundaries; bound active roster. |
-| `--eval-opponents HHH,CHH,anchor` | Separate paired reports on the same fixed validation schedule. |
-| `--selection-opponent anchor` | Select best.pt by this opponent's mean signed marks. |
-| `--forgetting-hands N` | Default 8; fixed anchor-play observation dataset for KL diagnostics. |
-| `--anchor-checkpoint PATH` | Original play anchor; inferred from source checkpoint when omitted. |
-| `--threads N` / `--eval-threads N` | Simulation and validation worker requests, default 1 each. |
-| `--output-dir PATH` / `--log-dir PATH` | Checkpoints/progress in runs; readable logs/CSV in dedicated logs directory. |
-| `examples.evaluate_selfplay_ppo --checkpoint PATH --opponents HHH,CHH,HHR,anchor` | Held-out phase-aware evaluation, optional historical registrations and JSON `--output`. |
-| `examples.multiphase_benchmark --hands 64 --workers 1 4` | Warmed collection/update/inference/load/evaluation measurements for four configurations. |
-
-The usual PPO optimizer, device, budget, evaluation interval, and checkpoint
-interval flags are supported. The new learning rate defaults to 0.0001. The old
-`--rollout-play-steps`, variant-only training opponent flags, and legacy sampling
-scheme flags belong to `train_ppo`, not the new entry point.
-
-### Independent learner phases and trump-only training
-
-When using `--learner-*`, unmentioned existing neural phases default to frozen;
-other unmentioned phases use heuristics. Explicit legacy flags must agree with
-the resolved states. With no new flags, the legacy initialization and RNG path
-is retained. All sources must have the initialization checkpoint's hidden width.
-
-`init` loads the requested trained phase when available. For `neural-train` only,
-a missing phase in `init` receives a copied representation and fresh policy/value
-heads, recorded as `representation` initialization. `new` explicitly requests
-that initialization even when a trained phase exists. The representation comes
-from trained play when available, otherwise the first trained phase in bid/trump/play
-order. Named/direct sources must already supply the requested trained phase.
-`anchor` supplies trained play only; it cannot supply neural bid or trump.
-Heuristic phases reject sources. Frozen phases always require trained sources.
+**Recipe 8.** Bidding-train/play-frozen/trump-heuristic is Recipe 2; trump-train with
+bid/play-frozen is Recipe 4. Here is bid/play training with frozen **neural trump**.
+Requires a checkpoint with all three phases trained, such as Recipe 5's best.pt.
 
 ```bash
-# Freeze joint bidding/play, learn only trump, select best.pt against pretrump
 python -m examples.train_selfplay_ppo \
-  --init-checkpoint runs/ppo-joint-v1/checkpoints/best.pt \
-  --learner-bid neural-frozen --learner-trump neural-train --learner-play neural-frozen \
-  --opponent-checkpoint pretrump=runs/ppo-joint-v1/checkpoints/best.pt \
-  --opponent-pool pretrump:0.7,HHH:0.3 \
-  --eval-opponents pretrump,HHH,anchor --selection-opponent pretrump \
-  --total-hands 262144 --rollout-decisions 1024 --max-rollout-hands 4096 \
-  --threads 8 --eval-threads 4 --output-dir runs/ppo-trump-v1
-
-# Train bidding from an archive, preserve anchor play, use heuristic trump
-python -m examples.train_selfplay_ppo \
-  --init-checkpoint runs/ppo-joint-v1/checkpoints/best.pt \
-  --opponent-checkpoint archive=runs/ppo-joint-v1/snapshots/policy-000032768.pt \
-  --learner-bid neural-train --learner-bid-source archive \
-  --learner-trump heuristic --learner-play neural-frozen --learner-play-source anchor \
-  --output-dir runs/ppo-archived-bid
-
-# Resume restores phase sources, optimizer, RNG and snapshot roster
-python -m examples.train_selfplay_ppo \
-  --resume runs/ppo-trump-v1/checkpoints/latest.pt \
-  --total-hands 524288 --threads 4 --output-dir runs/ppo-trump-v1
+  --init-checkpoint runs/ppo-allphase-hhh/checkpoints/best.pt \
+  --learner-bid neural-train --learner-trump neural-frozen --learner-play neural-train \
+  --opponent-pool HHH:0.5,anchor:0.5 --eval-opponents HHH,anchor --selection-opponent HHH \
+  --total-hands 262144 --rollout-decisions 4096 --threads 4 --eval-threads 1 \
+  --output-dir runs/ppo-fixed-trump --log-dir logs/experiments/ppo-fixed-trump
 ```
 
-Changing a phase source or trainability requires a new stage using
-`--init-checkpoint`, with a new output directory. Resume verifies source SHA256;
-it does not reinitialize the learned networks. Keep source files and historical
-dependencies available. Zero-sample batches advance hand counts and logging,
-skip PPO optimization, and still allow checkpoint saving and validation.
+Only bid/play observations enter PPO (16 per hand); frozen trump influences the
+trajectory but never enters the buffer/optimizer. Inspect its frozen verification
+field. Other nonempty subsets can be spelled with the same three state flags.
+
+### Independent phase checkpoints
+
+**Recipe 9.** Requires the three named compatible checkpoints, a joint initialization
+checkpoint and its anchor. All learner sources must share the initialization width.
+The example freezes bidding/play from different stages while updating trained trump.
+
+```bash
+python -m examples.train_selfplay_ppo \
+  --init-checkpoint runs/ppo-joint-v1/checkpoints/best.pt \
+  --opponent-checkpoint bidding=runs/ppo-bidding-v1/checkpoints/best.pt \
+  --opponent-checkpoint trump_archive=runs/ppo-trump-v1/checkpoints/best.pt \
+  --learner-bid neural-frozen --learner-bid-source bidding \
+  --learner-trump neural-train --learner-trump-source trump_archive \
+  --learner-play neural-frozen --learner-play-source runs/ppo-joint-v1/checkpoints/best.pt \
+  --opponent-pool HHH:1 --eval-opponents HHH,anchor --selection-opponent HHH \
+  --total-hands 100000 --rollout-decisions 1024 --threads 4 --eval-threads 1 \
+  --output-dir runs/ppo-independent-sources --log-dir logs/experiments/ppo-independent-sources
+```
+
+Sources are copied once, not followed as their original experiments train further.
+Do not overwrite files referenced by this experiment. Snapshot files can replace
+the named source paths when their metadata declares the needed trained phase.
 
 ### Register composed training opponents
 
-Create a JSON file such as `runs/pretrump-composition.json`:
+**Recipe 10.** Requires a trained joint bid/play checkpoint and its original anchor.
+Create `runs/pretrump-composition.json` after ensuring `runs/` exists:
 
 ```json
 {
@@ -491,23 +812,79 @@ Create a JSON file such as `runs/pretrump-composition.json`:
 ```bash
 python -m examples.train_selfplay_ppo \
   --init-checkpoint runs/ppo-joint-v1/checkpoints/best.pt \
-  --learner-bid neural-frozen --learner-trump neural-train --learner-play neural-frozen \
+  --learner-bid neural-frozen --learner-trump neural-train --learner-trump-source new \
+  --learner-play neural-frozen \
   --opponent-checkpoint pretrump=runs/ppo-joint-v1/checkpoints/best.pt \
   --opponent-composition joint_heuristic_trump=runs/pretrump-composition.json \
   --opponent-pool joint_heuristic_trump:0.7,HHH:0.3 \
   --eval-opponents joint_heuristic_trump,HHH --selection-opponent joint_heuristic_trump \
-  --output-dir runs/ppo-trump-composed
+  --total-hands 262144 --rollout-decisions 1024 --threads 4 --eval-threads 1 \
+  --output-dir runs/ppo-trump-composed --log-dir logs/experiments/ppo-trump-composed
 ```
 
-Every JSON file specifies `bid`, `trump`, and `play`. A neural phase requires a
-`source`: `init`, `anchor`, a registered checkpoint name, or a checkpoint path.
-Paths are relative to the working directory. Non-neural phases omit `source`;
-they support the existing heuristic/random strategies and conservative bidding.
-Independent source paths can include immutable historical snapshots. Frozen
-opponents use greedy neural inference. `self-snapshots` remains a separate
-pool entry, with the fixed anchor fallback until a trained snapshot exists.
+JSON must have exactly bid/trump/play keys; each value has a strategy and, for
+neural only, a source. Bid strategies are neural/heuristic/random/conservative;
+trump/play are neural/heuristic/random. Sources accept init, anchor, registered
+checkpoint names, or direct paths, including retained snapshots. Paths are relative
+to the working directory, not to the JSON file. `new` is not an opponent source:
+frozen opponents need trained networks. Different phase files and widths are
+allowed for composed **opponent** inference if each is independently compatible;
+learner initialization still requires one shared width.
+
+A learner source initializes an optimizable copy, whereas this JSON configures a
+read-only opponent factory. JSON content and resolved identities are saved in the
+training configuration; exact resume does not require the original JSON file when
+registration flags are omitted, but it does require all referenced checkpoint files.
+
+### Training against an archived checkpoint
+
+**Recipe 11.** Requires Recipe 5's trained all-phase checkpoint and an existing
+immutable archive at `runs/archive/historical.pt` (copy/reference an actual retained
+snapshot there; retain its dependencies for resumption). Unlike self-snapshots,
+this explicitly registered identity never changes its membership or weights.
+
+```bash
+python -m examples.train_selfplay_ppo \
+  --init-checkpoint runs/ppo-allphase-hhh/checkpoints/best.pt \
+  --learner-bid neural-train --learner-trump neural-train --learner-play neural-train \
+  --opponent-checkpoint archived=runs/archive/historical.pt \
+  --opponent-pool HHH:0.3,archived:0.7 \
+  --eval-opponents HHH,archived,anchor --selection-opponent archived \
+  --total-hands 262144 --rollout-decisions 4096 --threads 4 --eval-threads 1 \
+  --output-dir runs/ppo-versus-archive --log-dir logs/experiments/ppo-versus-archive
+```
+
+### Held-out phase ablations
+
+**Recipe 12.** Prerequisites: the trained checkpoints in each comparison, including
+all requested trained neural phases. Use final deal seeds independent of the fixed
+training-validation stream. Keep evaluation results out of optimizer/checkpoint
+selection. See [interpretation](phase_composable_evaluation.md#controlled-training-comparisons).
+
+- Bidding: use [identical joint play with heuristic versus neural bidding](#hold-joint-playing-fixed-change-bidding). Trump is heuristic on both sides.
+- Trump: use the [trump-only checkpoint versus its frozen bid/play source](#held-out-trump-ablation).
+- Playing: use identical neural bid/trump from an all-phase policy, changing only play below.
+
+```bash
+python -m examples.evaluate_agent_vs_agent \
+  --agent-a-checkpoint runs/ppo-allphase-selfplay/checkpoints/best.pt \
+  --agent-a-bid neural --agent-a-trump neural --agent-a-play neural \
+  --agent-b-checkpoint runs/ppo-allphase-selfplay/checkpoints/best.pt \
+  --agent-b-bid neural --agent-b-trump neural --agent-b-play heuristic \
+  --deals 4096 --seed 27182818 --bootstrap-seed 0 --bootstrap-samples 2000 --threads 4 \
+  --output runs/ppo-allphase-selfplay/playing-ablation.json \
+  --log-dir logs/experiments/allphase-playing-ablation
+```
+
+Require shared bidding/trump parameters YES and only play differing. To compare
+two learned play policies, replace B's playing strategy by neural and add its
+play-checkpoint override; keep bid/trump sources unchanged. A complete joint model
+versus HHH comparison measures several interacting phase differences instead.
 
 ### Held-out trump ablation
+
+Requires Recipe 4's trained checkpoint and the exact joint bid/play source used
+there. If different phase sources were chosen, supply those same sources for B.
 
 ```bash
 python -m examples.evaluate_agent_vs_agent \
@@ -515,13 +892,30 @@ python -m examples.evaluate_agent_vs_agent \
   --agent-a-bid neural --agent-a-trump neural --agent-a-play neural \
   --agent-b-checkpoint runs/ppo-joint-v1/checkpoints/best.pt \
   --agent-b-bid neural --agent-b-trump heuristic --agent-b-play neural \
-  --deals 4096 --seed 31415926 --threads 4 \
-  --output runs/ppo-trump-v1/held-out-trump.json
+  --deals 4096 --seed 31415926 --bootstrap-seed 0 --bootstrap-samples 2000 --threads 4 \
+  --output runs/ppo-trump-v1/held-out-trump.json --log-dir logs/experiments/held-out-trump
 ```
 
-Require `Shared bidding parameters: YES`, `Shared playing parameters: YES`, and
-only trump differing. This holds both frozen continuations constant. Use a held-out
-seed rather than the validation schedule that selected the checkpoint.
+Require shared bidding and playing parameters YES and only trump differing.
+
+### Troubleshooting PPO configuration
+
+| Symptom | Cause / action |
+| --- | --- |
+| Initialization file missing | The modern default expects a pre-existing play checkpoint. Complete Recipe 1 or select a valid explicit initialization file. |
+| Unavailable pretrained phase | Version 1 supplies play only; version 2 must mark a neural phase trained. Choose a trained file for frozen policies, or init/new representation transfer for a trainable phase. |
+| Anchor bid/trump rejected | The original anchor is play-only. Use a trained joint/archive source or `new` for trainable bid/trump. |
+| No trainable phase / conflicting flags | A source alone does not enable training. Spell all three learner states and remove inconsistent learn-phases/play-policy/trump-policy assertions. |
+| Architecture mismatch | All learner sources must match the initial hidden width and game/feature/action metadata. Omit hidden-size to infer the initial width; a width override cannot reshape pretrained weights. |
+| Frozen checkpoint identity changed | A recorded file was overwritten or replaced. Restore the exact SHA256 file; use immutable copies. Intentional replacement is a new stage, not exact resume. |
+| Missing historical dependency | Restore the checkpoint at its recorded path, including inactive archives needed by older resumes. A roster bound does not make archive files disposable. |
+| Resume configuration mismatch | Keep phase/source/optimizer/opponent/validation settings unchanged, restore omitted modern settings, and use the same device type. For changed experiments use init-checkpoint and a new directory. |
+| Bidding-only legacy anchor comparison rejected | Old bid-only syntax enforces anchor-identical play. Use explicit modern learner states for frozen joint play, and select the appropriate same-play opponent. |
+| Trump samples remain zero | Opponents are declaring. Inspect bidding and per-phase counts; use the hand cap/total budget to bound work. Empty batches skip updates. Do not invent trump samples or infer learning from printed zero losses. |
+| Frozen play has nonzero anchor KL | Its selected frozen source may be a joint policy different from original anchor. Check frozen verification and actual tensor equality to the selected source. |
+| No PPO optimizer steps | A very tight target-kl can stop all minibatches. Review KL threshold, finite diagnostics and software/backend consistency; empty buffers are already skipped separately. |
+| Output run already exists | Resume latest.pt in that directory, or choose a fresh directory for a new stage. Do not overwrite provenance to bypass the check. |
+| CSV absent after interruption | Read progress.jsonl and the streamed log; CSV export occurs on successful completion. Latest checkpoint, not the final printed hand, controls recoverable state. |
 
 ## Agent-vs-agent phase composition
 
@@ -585,16 +979,58 @@ python -m examples.evaluate_agent_vs_agent \
 
 ### Composition arguments
 
-| Argument | Default / meaning |
-| --- | --- |
-| `--agent-{a,b}-bid` | `heuristic`; neural, heuristic, random or conservative. |
-| `--agent-{a,b}-trump`, `--agent-{a,b}-play` | `heuristic`; neural, heuristic or random. |
-| `--agent-{a,b}-checkpoint PATH` | Default source for that agent's neural phases. |
-| `--agent-{a,b}-{bid,trump,play}-checkpoint PATH` | Override only that phase's neural source. |
-| `--stochastic-neural` | Optional phase-seeded sampling; default greedy inference. |
-| Shared evaluation flags | `--deals 2048 --seed 42 --bootstrap-seed 0 --bootstrap-samples 2000 --threads 1`. |
-| Hand/match flags | `--episode hand` or `--episode match`; `--target-marks 7`. |
-| Outputs | `--output PATH` for JSON; `--log-dir PATH` for readable logs and CSV. |
+This is the complete argument surface of `examples.evaluate_agent_vs_agent`.
+Evaluation is CPU inference; there is no optimizer/device or trainability flag here.
+
+| Argument | Type / accepted values | Default | Meaning |
+| --- | --- | --- | --- |
+| `--agent-a-bid`, `--agent-b-bid` | neural, heuristic, random, conservative | heuristic | Bidding strategy; conservative passes when legal, otherwise minimum bid. |
+| `--agent-a-trump`, `--agent-b-trump` | neural, heuristic, random | heuristic | Independent trump strategy. |
+| `--agent-a-play`, `--agent-b-play` | neural, heuristic, random | heuristic | Independent playing strategy. |
+| `--agent-a-checkpoint`, `--agent-b-checkpoint` | Compatible checkpoint path | Unset | Default neural source for that agent; ignored when no phase needs it. Version 1 supplies play only. |
+| `--agent-a-bid-checkpoint`, `--agent-b-bid-checkpoint` | Trained bid source path | Unset | Overrides only that agent's neural bidding source. |
+| `--agent-a-trump-checkpoint`, `--agent-b-trump-checkpoint` | Trained trump source path | Unset | Overrides only that agent's neural trump source. |
+| `--agent-a-play-checkpoint`, `--agent-b-play-checkpoint` | Trained play source path | Unset | Overrides only that agent's neural playing source. |
+| `--stochastic-neural` | Boolean flag | Off (greedy) | Seeded phase-local sampling, independent between seats/phases; still frozen inference. |
+| `--deals` | Integer > 0 | 2048 | Complete duplicate groups; two games/group. |
+| `--seed` | Integer | 42 | Arena deal/agent seed; choose independent final seeds. |
+| `--bootstrap-seed` | Integer | 0 | Separate resampling seed. |
+| `--bootstrap-samples` | Integer > 0 | 2000 | Paired group bootstrap replicates; intervals unavailable for fewer than two groups. |
+| `--threads` | Integer ≥ 0 | 1 | Up to N simulation workers; 0 auto with CPU/task limits. |
+| `--episode` | hand, match | hand | Paired hands or complete paired match schedules. Match metrics use actual played-hand counts. |
+| `--target-marks` | Integer > 0 | 7 | Match termination target; does not turn hand mode into a match. |
+| `--output` | Path | Unset | Full JSON arena report with composition identities and diagnostics. |
+| `--log-dir` | Directory path | Auto under logs/experiments | Readable log, hand CSV and metric CSV; separate from JSON path. |
+| `-h` / `--help` | Boolean flag | Off | Print accepted flags. |
+
+A neural phase needs its phase override or agent default file; a phase checkpoint
+on a non-neural strategy is rejected. Different neural files are allowed per phase,
+including archived snapshots. Each selected network must satisfy metadata and
+trained-phase checks. Actual network tensors, not just paths/hashes, determine
+shared-parameter assertions. See [composition semantics](phase_composable_evaluation.md).
+
+### Compatibility checkpoint evaluation arguments
+
+Both compatibility commands share `--deals 2048`, `--seed 12345`,
+`--bootstrap-seed 0`, `--bootstrap-samples 2000`, `--threads 1`, optional `--output`,
+optional `--log-dir`, and `--help`, with the same ranges as above. They evaluate
+hands only and do not expose independent phase strategies or stochastic inference.
+
+| Command / additional argument | Accepted values / default | Meaning |
+| --- | --- | --- |
+| evaluate_ppo `--checkpoint` | Required version-1 or version-2 path | Auto-route the model's neural phases; other phases heuristic. |
+| evaluate_ppo `--opponent` | One built-in variant; default HHH if both selectors omitted | Mutually exclusive with opponents. |
+| evaluate_ppo `--opponents` | Unique comma-separated built-in variants | Separate reports; no archive or composition registration. |
+| evaluate_selfplay_ppo `--checkpoint` | Required version-2 path | Rejects version 1; use evaluate_ppo or composable evaluation for play-only files. |
+| evaluate_selfplay_ppo `--anchor-checkpoint` | Original anchor path; inferred from checkpoint config | Override must match original anchor SHA256. |
+| evaluate_selfplay_ppo `--opponents` | Unique registered names; default HHH,CHH,HHR,anchor | Built-ins, anchor and explicitly registered archives. |
+| evaluate_selfplay_ppo `--opponent-checkpoint` | Repeatable NAME=PATH | Registers whole frozen checkpoint opponents. No opponent-composition option here. |
+
+These compatibility learner routes do not add the canonical per-selected-phase
+trained check: use files whose routed neural phases are already trained. For
+explicit availability validation or any independent phase ablation, use
+`evaluate_agent_vs_agent`. Existing single/multi-opponent JSON envelopes remain
+unchanged; reports are never merged into an unlabeled multi-opponent score.
 
 ## Legacy mixed-opponent training recipes
 

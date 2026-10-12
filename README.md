@@ -33,6 +33,12 @@ arguments, resume recipes and output locations.
 
 ## Current capabilities and guides
 
+For a new PPO study, start with the [training workflow finder](docs/command_reference.md#workflow-finder):
+pretrain play, select trainable/frozen phases, train against HHH or frozen historical
+opponents, then run a controlled held-out comparison. The [mechanics guide](docs/multiphase_selfplay.md)
+explains sample counts, rewards, source identities and resume. Use the
+[legacy play-only guide](docs/ppo_training.md) when reproducing version-1 experiments.
+
 | Topic | Authoritative guide |
 | --- | --- |
 | Commands, arguments, JSON/log/CSV paths | [Command reference](docs/command_reference.md) |

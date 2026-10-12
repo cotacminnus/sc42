@@ -10,7 +10,10 @@ No changes are made to rules, actions, observations, or schema-5 records.
 ## Scope and commands
 
 This guide owns the original play-only method and version-1 checkpoint continuity.
-Use [multi-phase PPO](multiphase_selfplay.md) for current learned bidding and historical self-play.
+Use [multi-phase PPO](multiphase_selfplay.md) for new independent bid/trump/play
+experiments, phase freezing and historical neural opponents. Modern play-only
+training is also possible, but has a different checkpoint architecture and sampling
+scheme; matching its phase routes does not reproduce a version-1 experiment.
 Copy-ready commands and all flag defaults are in the [command reference](command_reference.md#24-start-legacy-play-only-ppo-from-scratch-parallel).
 
 Python 3.11+ is supported, subject to available PyTorch wheels for your Python
@@ -28,6 +31,16 @@ Output includes checkpoint SHA256, win rate, signed marks, success/set rates,
 sample size, intervals, and runtime. Small smoke runs do not establish strength.
 Use final test seeds different from the fixed validation schedule used to select
 checkpoints. Repeated checkpoint selection can overfit a validation schedule.
+
+For baseline reproduction retain the exact committed heuristic version, optimizer
+settings, opponent distribution, checkpoint generation and sampling scheme, not
+only the root seed. `auto` with one requested simulation worker selects legacy-v1;
+episode-v1 is explicitly available for worker-count reproducibility. Modern
+multi-phase sampling uses its own multiphase-episode-v1 stream. See
+[Recipe 1](command_reference.md#24-start-legacy-play-only-ppo-from-scratch-parallel)
+and [modern playing-only](command_reference.md#playing-only-with-the-modern-trainer).
+Legacy CLI resume requires repeating nondefault saved settings; unlike modern
+resume, omitted arguments do not generally reconstruct the saved Config.
 
 ## Architecture and masking
 
@@ -254,7 +267,7 @@ and PPO optimization remain the main work. No GPU performance claim is made.
 
 ## Related workflows
 
-- [Multi-phase PPO](multiphase_selfplay.md): independent bidding/play networks and historical opponents.
+- [Multi-phase PPO](multiphase_selfplay.md): independent bid/trump/play networks and historical opponents.
 - [Phase-composable evaluation](phase_composable_evaluation.md): canonical new two-agent experiments.
 - [Arena](arena.md): metric definitions and paired statistical methodology.
 
