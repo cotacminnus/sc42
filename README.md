@@ -48,6 +48,7 @@ explains sample counts, rewards, source identities and resume. Use the
 | Duplicate deals, metrics, bootstrap uncertainty | [Arena methodology](docs/arena.md) |
 | Frozen heuristic and random/conservative variants | [Heuristic V1](docs/simpleheuristic.md), [policy ablations](docs/policy_ablation.md) |
 | Bid-versus-pass replay experiments | [Counterfactual bidding](docs/counterfactual_bidding.md) |
+| Exact open-hand ordinary-contract endgames | [Endgame oracle](docs/endgame_oracle.md) |
 | Observations, public history and training-data validation | [Encoding](docs/encoding.md) |
 | Permanent global actions and reserved contracts | [Action space](docs/action-space.md) |
 | Process workers and evaluation profiling | [Parallel execution](docs/parallel_execution.md), [evaluation performance](docs/evaluation_performance.md) |
@@ -63,6 +64,7 @@ explains sample counts, rewards, source identities and resume. Use the
 | `texas42/engine.py`, `players.py`, `cli.py` | Console runner and object-based player decisions |
 | `texas42/agents/` | Common protocol, built-in agents and Player adapter |
 | `texas42/arena.py`, `parallel.py` | Paired evaluation, metrics and ordered process workers |
+| `texas42/oracle.py` | Separate perfect-information endgame search and exhaustive reference |
 | `texas42/training.py`, `encoding.py`, `actions.py` | Versioned ID-based views, 387 features and legal global actions |
 | `texas42/openspiel.py` | Optional adapter depending on the native engine |
 | `research/ppo/` | Optional training, checkpoints and frozen policy composition |
@@ -138,8 +140,10 @@ marks or deal RNG. Direct adapter callers must reset before requesting decisions
 Native runners own their agents and reset them once after `env.reset()`, preserving
 memory between hands of a match. Construct fresh agents to restart RNG streams.
 
-`PrivilegedAgent.act_privileged(obs, state)` is a separate future oracle interface.
-Ordinary adapters never supply `PrivilegedState` or hidden-hand labels.
+`PrivilegedAgent.act_privileged(obs, state)` remains a separate protocol for future
+privileged runners. The standalone [endgame oracle](docs/endgame_oracle.md) accepts
+a full `HandState` explicitly; ordinary adapters never supply `PrivilegedState`
+or hidden-hand labels.
 
 ## Self-play and data contracts
 

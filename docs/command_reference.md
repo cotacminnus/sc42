@@ -24,6 +24,7 @@ python -m unittest discover -s tests -v
 | Human/AI console game | python -m texas42 | Interactive play; optional JSONL self-play logs |
 | Baseline comparison | python -m examples.policy_ablation_benchmark | HHH, CHH, HHR, etc. in paired duplicate deals |
 | Bid/pass experiment | python -m examples.counterfactual_bidding | Counterfactual voluntary bid intervention |
+| Open-hand endgame analysis | python -m examples.endgame_oracle | Exact ordinary-contract minimax with search budgets |
 | Train legacy play-only PPO | python -m examples.train_ppo | Reproducible baseline; fixed or mixed heuristic variants |
 | Legacy checkpoint evaluation | python -m examples.evaluate_ppo | Held-out, paired checkpoint evaluation |
 | Current PPO training | python -m examples.train_selfplay_ppo | Independent phase networks and historical opponents |
@@ -34,6 +35,40 @@ python -m unittest discover -s tests -v
 | Validation benchmark | python -m examples.validation_benchmark | Evaluation scaling by group and worker count |
 
 ## 2. Copy-ready commands
+
+### Perfect-information endgame oracle
+
+```bash
+python -m examples.endgame_oracle --seed 42 --remaining 3 --max-nodes 100000
+python -m examples.endgame_oracle --seed 7 --remaining 2 --partial-plays 3
+# Prove the position and one action; other actions may remain unresolved
+python -m examples.endgame_oracle --seed 1 --remaining 2 --partial-plays 1 \
+  --output position_value --max-nodes 4
+# Bounded smoke benchmark, consecutive seeds starting at zero
+python -m examples.endgame_oracle --seed 0 --remaining 3 --samples 100 \
+  --max-nodes 100000 --time-seconds 2
+```
+
+No optional dependencies are required. The default HHR policies generate a
+reachable ordinary contract with heuristic bidding/trump and seeded random play.
+The command prints the contract, scores, trump, actor/team, four hands, partial
+trick, legal global IDs/dominoes and exact values or bounds, proven optimal
+actions, completion flags, nodes, cache hits and runtime. With multiple samples it
+prints completion rates and mean/median/max statistics instead. See the
+[oracle guide](endgame_oracle.md) for fixed bidding-team value and proof semantics.
+
+| Argument | Default | Meaning |
+| --- | --- | --- |
+| `--seed` | 42 | Integer deal/policy seed; samples use consecutive seeds. |
+| `--remaining` | 3 | 1–7 dominoes per player at the selected trick boundary. Larger positions are permitted. |
+| `--partial-plays` | 0 | Advance 0–3 additional legal moves after that boundary. |
+| `--policy` | HHR | Existing built-in variant: HHH, HHR, HRR, CHH, CRR, RRR. |
+| `--output` | all_action_values | All legal root action values, or position_value for root outcome plus one proven optimal action. |
+| `--max-nodes` | Unset | Nonnegative per-position search-node budget. |
+| `--time-seconds` | Unset | Nonnegative finite per-position soft deadline, including validation. |
+| `--max-cache-entries` | 100000 | Nonnegative table capacity; zero disables caching. |
+| `--samples` | 1 | Positive position count; more than one selects benchmark summary output. |
+| `-h`, `--help` | Off | Print argument help. |
 
 ### 2.1 Console game, self-play log and engine smoke test
 
