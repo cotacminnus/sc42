@@ -1,4 +1,4 @@
-"""Spawned oracle task boundaries, global resources and unchanged proof rules."""
+"""Spawned oracle trees, per-tree limits and unchanged proof rules."""
 from contextlib import redirect_stdout
 from copy import deepcopy
 from dataclasses import replace
@@ -95,7 +95,7 @@ class ParallelOracleTests(unittest.TestCase):
                     self.exact_equal(solve_points(state), result)
                     self.assertEqual(tuple(r.action_id for r in result.action_values), state.legal_action_ids())
 
-    def test_root_global_node_budget_and_unfinished_proofs(self):
+    def test_root_tree_node_budget_and_unfinished_proofs(self):
         state = generate_endgame(1, 3)
         with patch('texas42.parallel.available_cpus', return_value=2):
             for solver in (solve, solve_points):
@@ -110,13 +110,14 @@ class ParallelOracleTests(unittest.TestCase):
                 position = solver(state, workers=2, output='position_value', limits=SearchLimits(max_nodes=100))
                 self.assert_sound(position, truth)
 
-    def test_deal_global_budget_trump_order_and_input_unchanged(self):
+    def test_deal_tree_budgets_trump_order_and_input_unchanged(self):
         hands = [[PLAY_ACTIONS[i] for i in hand] for hand in generate_schedule(1, 42)[0].hands]
         before = deepcopy(hands)
         with patch('texas42.parallel.available_cpus', return_value=2):
             for nodes in (1, 35, 80, 1000):
                 result = analyze_deal(hands, workers=2, limits=SearchLimits(max_nodes=nodes))
-                self.assertLessEqual(result.nodes, nodes)
+                self.assertLessEqual(result.nodes, 36 * nodes)
+                self.assertGreater(result.nodes, nodes)
                 self.assertEqual(tuple(b.seat for b in result.bidders), tuple(range(4)))
                 self.assertEqual(result.status, 'budget_exceeded')
                 for bidder in result.bidders:
@@ -227,6 +228,48 @@ class ParallelOracleTests(unittest.TestCase):
         with redirect_stdout(io.StringIO()) as out:
             main(['--seed', '1', '--remaining', '3', '--workers', '2', '--max-nodes', '30'])
         self.assertIn('Nodes:', out.getvalue())
+
+    def test_defaults_and_fresh_sequential_tree_deadlines(self):
+        defaults = SearchLimits()
+        self.assertEqual((defaults.time_seconds, defaults.max_nodes), (1800.0, 1_048_576))
+        hands = [[PLAY_ACTIONS[i] for i in hand] for hand in generate_schedule(1, 42)[0].hands]
+        clock = [100.0]
+        visited = []
+        original = oracle._solve_state
+
+        def finish_tree(state, search, **kwargs):
+            result = original(state, search, **kwargs)
+            visited.append((search.deadline, search.nodes, clock[0]))
+            clock[0] += 10  # Simulate time between trees without a brittle sleep.
+            return result
+
+        with patch('texas42.oracle.monotonic', side_effect=lambda: clock[0]):
+            with patch('texas42.oracle._solve_state', side_effect=finish_tree):
+                result = analyze_deal(hands, limits=SearchLimits(time_seconds=1, max_nodes=5))
+        self.assertEqual(len(visited), 36)
+        self.assertTrue(all(deadline == start + 1 and nodes == 5 for deadline, nodes, start in visited))
+        self.assertEqual(result.nodes, 36 * 5)
+        self.assertGreater(result.elapsed_seconds, 1)
+
+    def test_deal_worker_starts_its_own_deadline_and_gets_full_node_limit(self):
+        hands = [[PLAY_ACTIONS[i] for i in hand] for hand in generate_schedule(1, 42)[0].hands]
+        state = oracle.HandState(hands, 0, (0, 0), 7)
+        config = _WorkerConfig(state, 'deal', 'final_points', None, 0.0, 1.0, 5)
+        with patch('texas42.oracle.monotonic', return_value=100.0):
+            # The original run deadline would have expired at t=1. Each tree
+            # still receives a fresh second and all five requested nodes.
+            for seat, trump in ((0, 0), (1, None), (3, 'doubles')):
+                _, nodes, _ = oracle._search_task(config, ((seat, trump), 5), {})
+                self.assertEqual(nodes, 5)
+
+        search = _Search(SearchLimits(max_nodes=101, max_cache_entries=5), 0.0, objective='final_points')
+        keys = [(seat, trump) for seat in range(4) for trump in TRUMP_ACTIONS]
+        with patch('texas42.oracle.OrderedPool') as pool:
+            pool.return_value.__enter__.return_value.map.return_value = []
+            _parallel_tasks(state, search, keys, mode='deal', start=0.0, workers=2)
+        jobs = pool.return_value.__enter__.return_value.map.call_args.args[1]
+        self.assertEqual(jobs, [(key, 101) for key in keys])
+        self.assertEqual(pool.call_args.kwargs['initargs'][0].cache_entries, 2)
 
 
 if __name__ == '__main__':

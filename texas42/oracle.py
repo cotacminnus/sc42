@@ -25,8 +25,10 @@ from .state import HandState
 
 @dataclass(frozen=True, slots=True)
 class SearchLimits:
-    time_seconds: float | None = None
-    max_nodes: int | None = None
+    """Time/nodes per position or bidder/trump tree; cache cap per oracle call."""
+
+    time_seconds: float | None = 1800.0
+    max_nodes: int | None = 1_048_576
     max_cache_entries: int = 100_000
 
     def __post_init__(self):
@@ -436,7 +438,7 @@ def solve(full_state: HandState, *, output: Literal['position_value', 'all_actio
     Budgets count entered nodes (including root, terminal and cache-hit nodes).
     Time includes input copying/validation and is checked between search nodes.
     workers=1 preserves sequential execution; more workers split root children
-    into independent spawned searches under the same whole-call limits.
+    into independent spawned searches under the same position limits.
     """
     start = monotonic()
     if output not in ('position_value', 'all_action_values'):
@@ -556,12 +558,11 @@ def analyze_deal(hands: Sequence[Sequence[Domino]], *, ruleset_id: str = RULESET
     """Analyze all four candidate bidders, nine trumps, and their legal leads.
 
     Hands contain the complete double-six set in absolute-seat order. Validation
-    occurs once through EpisodeState.deal. One budget and bounded cache span the
-    entire analysis. Scheduling is seat, canonical trump, then global action ID;
-    early combinations may consume the whole budget. Unvisited choices retain
-    [0, 42]. API limits default to unlimited time/nodes; bound full-hand calls.
-    workers>1 runs independent combinations with process-local caches and
-    disjoint node allocations; the limits still apply to the whole analysis.
+    occurs once through EpisodeState.deal. Each bidder/trump tree receives fresh
+    node and time limits. Scheduling is seat, canonical trump, then action ID.
+    Budgets are shared by the legal leads within a tree, not by the 36 trees.
+    Cache capacity remains bounded across the analysis. Workers use independent
+    tree deadlines and process-local caches. Reported statistics are totals.
     """
     start = monotonic()
     session = EpisodeState('hand', 7, 0, ruleset_id)
@@ -573,7 +574,7 @@ def analyze_deal(hands: Sequence[Sequence[Domino]], *, ruleset_id: str = RULESET
     deal = session.hand
     search = _Search(limits if limits is not None else SearchLimits(), start, objective='final_points')
     count = min(AUTO_WORKER_CAP, resolve_workers(workers, 4 * len(TRUMP_ACTIONS)))
-    if count > 1 and _budget_available(search):
+    if count > 1 and search.limits.max_nodes != 0 and search.limits.time_seconds != 0:
         keys = [(seat, trump) for seat in range(4) for trump in TRUMP_ACTIONS]
         results = _parallel_tasks(deal, search, keys, mode='deal', start=start, workers=count)
         bidders = []
@@ -593,13 +594,18 @@ def analyze_deal(hands: Sequence[Sequence[Domino]], *, ruleset_id: str = RULESET
         trumps = []
         incumbent = 0
         for trump in TRUMP_ACTIONS:
+            tree_start = monotonic()
+            tree_search = _Search(search.limits, tree_start, objective='final_points')
+            tree_search.cache = search.cache
             state = _play_start(deal, seat, trump)
-            result = _solve_state(state, search, output='all_action_values', start=start,
+            result = _solve_state(state, tree_search, output='all_action_values', start=tree_start,
                                   minimum=incumbent)
             trumps.append(TrumpAnalysis(result.lower, result.upper, trump,
                                         result.optimal_action, result.optimal_actions,
                                         result.action_values, result.all_action_values_complete))
             incumbent = max(incumbent, result.lower)
+            search.nodes += tree_search.nodes
+            search.cache_hits += tree_search.cache_hits
         bidders.append(_bidder_analysis(seat, trumps))
     return DealAnalysis(tuple(bidders), search.nodes, search.cache_hits, monotonic() - start)
 
@@ -636,7 +642,8 @@ def _search_task(config: _WorkerConfig, task: tuple, cache: dict) -> tuple:
     """Only the task boundary is parallel; minimax itself is unchanged."""
     key, allocation = task
     limits = SearchLimits(config.time_seconds, allocation, config.cache_entries)
-    search = _Search(limits, config.start, objective=config.objective,
+    tree_start = monotonic() if config.mode == 'deal' else config.start
+    search = _Search(limits, tree_start, objective=config.objective,
                      reference_team=config.reference_team)
     search.cache = cache
     if config.mode == 'deal':
@@ -644,7 +651,7 @@ def _search_task(config: _WorkerConfig, task: tuple, cache: dict) -> tuple:
         state = _play_start(config.state, seat, trump)
         # Independent combinations do not depend on earlier trumps finishing.
         # Zero is a valid incumbent; _solve_state still orders all leads by ID.
-        result = _solve_state(state, search, output='all_action_values', start=config.start, minimum=0)
+        result = _solve_state(state, search, output='all_action_values', start=tree_start, minimum=0)
     else:
         bounds = search.search(_child(config.state, key))
         result = ActionValue(bounds.lower, bounds.upper, key, search.nodes > 0)
@@ -660,12 +667,13 @@ def _oracle_worker(task: tuple) -> tuple:
 
 def _parallel_tasks(state: HandState, search: _Search, keys: Sequence, *, mode: str,
                     start: float, workers: int) -> list[tuple]:
-    """Reserve disjoint node allocations in ordered waves, reclaiming unused work.
+    """Run deal trees with fresh limits, or share one root tree's branch budget.
 
-    At most workers allocations are in flight. Sum(actual nodes) cannot exceed
-    the original budget. A completed task is not restarted if its allocation was
-    exhausted. Worker-local caches survive tasks and total capacity is bounded
-    by the original cache limit. All deadlines use the parent's original start.
+    Root branches reserve disjoint allocations in waves of at most workers;
+    their node total stays within the position budget. An allocation-exhausted
+    branch is not restarted. Deal tasks instead each get the full node limit
+    and start their own deadline when the worker begins the task. Worker-local
+    caches survive tasks, bounded in total by the original cache limit.
     """
     config = _WorkerConfig(state, mode, search.objective, search.reference_team,
                            start, search.limits.time_seconds,
@@ -674,6 +682,8 @@ def _parallel_tasks(state: HandState, search: _Search, keys: Sequence, *, mode: 
                  search.limits.max_nodes - search.nodes)
     results = []
     with OrderedPool(workers, initializer=_initialize_oracle, initargs=(config,)) as pool:
+        if mode == 'deal':
+            return pool.map(_oracle_worker, [(key, search.limits.max_nodes) for key in keys])
         for offset in range(0, len(keys), workers):
             wave = keys[offset:offset + workers]
             expired = search.deadline is not None and monotonic() >= search.deadline

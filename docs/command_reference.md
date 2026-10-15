@@ -49,10 +49,10 @@ python -m examples.endgame_oracle --seed 0 --remaining 3 --samples 100 \
   --max-nodes 100000 --time-seconds 2
 # Final-point endgames (the binary contract cutoff does not apply)
 python -m examples.endgame_oracle --objective final_points --seed 1 --remaining 2
-# Complete deal: ONE whole-analysis budget spans all four bidders and nine trumps
+# Complete deal: each bidder/trump tree gets its own time and node limits
 python -m examples.endgame_oracle --mode deal --seed 42 \
   --max-nodes 10000 --time-seconds 1
-# Spawn multiple independent bidder/trump searches under ONE global budget
+# Spawn multiple independent bidder/trump trees, each with the full allowance
 python -m examples.endgame_oracle --mode deal --seed 42 --workers 4 \
   --max-nodes 200000 --time-seconds 10
 # Optional independent root-action workers (startup often dominates tiny endgames)
@@ -65,7 +65,8 @@ python -m examples.endgame_oracle --objective final_points --seed 0 \
 
 For the documented parallel smoke measurements, repeat the seed-42 six-domino
 recipe with `--remaining 2`, `3`, `4`, `6` and `--workers 1`, `2`, `4`, `8`.
-Repeat the 200,000-node deal recipe at those four worker counts. See
+The deal recipe now allows 200,000 nodes per bidder/trump tree. Historical
+whole-analysis deal measurements used a different budget scope. See
 [measured scaling and startup costs](endgame_oracle.md#parallelization-smoke-benchmark);
 small endgames are usually faster with one worker.
 
@@ -86,14 +87,15 @@ values, proven lead IDs and complete optimal lead sets, bidder contract bounds,
 proven trump/lead choices, completeness flags and aggregate statistics. All hands
 are visible. This is an open-hand benchmark, not a hidden-information bid
 recommendation; 42 points establishes a one-mark contract without optimizing
-mark stake. Unvisited choices stay unresolved. Early combinations can consume
-the whole budget in sequential execution. Parallel execution reserves bounded
-allocations in canonical batches and reclaims unused nodes for later tasks;
-the whole-analysis budget is never multiplied by the number of workers. Caches
+mark stake. Each bidder/trump tree receives a fresh 1,800-second/1,048,576-node
+budget by default, in both sequential and parallel runs. Legal lead branches
+share their parent tree's allowance. Later trees still run after earlier ones
+exhaust their limits, and the whole run may exceed a single tree's time/node cap. Caches
 are private and their aggregate entry count stays within `--max-cache-entries`.
 The CLI prints requested/resolved workers, eligible independent task count,
-aggregate nodes/cache hits, runtime and exact/unresolved results. Parallel startup
-is included in the one soft deadline. See [parallel details](endgame_oracle.md#parallel-execution)
+aggregate nodes/cache hits, runtime and exact/unresolved results. A deal tree's
+clock starts when its worker begins that task, excluding queueing and startup.
+An endgame position's clock covers the full position call. See [parallel details](endgame_oracle.md#parallel-execution)
 and [deal proof semantics](endgame_oracle.md#complete-deal-bidding-benchmark).
 
 | Argument | Default | Meaning |
@@ -106,8 +108,8 @@ and [deal proof semantics](endgame_oracle.md#complete-deal-bidding-benchmark).
 | `--partial-plays` | 0 | Endgame only: advance 0–3 additional legal moves after that boundary. |
 | `--policy` | HHR | Endgame only: existing variant HHH, HHR, HRR, CHH, CRR, RRR. |
 | `--output` | all_action_values | Endgame only: all legal root action values, or position_value for root outcome plus one proven optimal action. |
-| `--max-nodes` | Unset (endgame); 100000 (deal) | Nonnegative search-node budget: per endgame position, or whole deal analysis. |
-| `--time-seconds` | Unset (endgame); 5 (deal) | Nonnegative finite soft deadline, including validation: per endgame position, or whole deal analysis. |
+| `--max-nodes` | 1048576 | Nonnegative node budget per endgame position or bidder/trump tree; lead branches share it. |
+| `--time-seconds` | 1800 | Nonnegative finite seconds per endgame position or bidder/trump tree; no whole-oracle deadline. |
 | `--max-cache-entries` | 100000 | Nonnegative aggregate table capacity; parallel workers each get floor(capacity/workers). Zero disables caching. |
 | `--samples` | 1 | Positive endgame position count; >1 selects benchmark summary. Deal mode requires 1. |
 | `-h`, `--help` | Off | Print argument help. |

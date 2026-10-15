@@ -92,6 +92,7 @@ def print_deal(hands, result: DealAnalysis) -> None:
 
 
 def main(argv: list[str] | None = None) -> None:
+    defaults = SearchLimits()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--seed', type=int,
                         help='Deal/policy seed; random when omitted, printed for reproduction')
@@ -104,9 +105,11 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument('--partial-plays', type=int, choices=range(4), default=0)
     parser.add_argument('--policy', choices=tuple(VARIANTS), default='HHR')
     parser.add_argument('--output', choices=('position_value', 'all_action_values'), default='all_action_values')
-    parser.add_argument('--max-nodes', type=int)
-    parser.add_argument('--time-seconds', type=float)
-    parser.add_argument('--max-cache-entries', type=int, default=100_000)
+    parser.add_argument('--max-nodes', type=int, default=defaults.max_nodes,
+                        help='Node limit per tree (default: 1048576)')
+    parser.add_argument('--time-seconds', type=float, default=defaults.time_seconds,
+                        help='Seconds per tree (default: 1800)')
+    parser.add_argument('--max-cache-entries', type=int, default=defaults.max_cache_entries)
     parser.add_argument('--samples', type=int, default=1,
                         help='Consecutive seeds; >1 prints a bounded benchmark summary')
     args = parser.parse_args(argv)
@@ -115,11 +118,6 @@ def main(argv: list[str] | None = None) -> None:
     if args.mode == 'deal':
         if args.samples != 1:
             parser.error('deal mode analyzes one complete deal; --samples must be 1')
-        # These are WHOLE-analysis defaults, never per bidder/trump/action.
-        if args.max_nodes is None:
-            args.max_nodes = 100_000
-        if args.time_seconds is None:
-            args.time_seconds = 5.0
     try:
         resolve_workers(args.workers)
         limits = SearchLimits(args.time_seconds, args.max_nodes, args.max_cache_entries)
@@ -127,11 +125,12 @@ def main(argv: list[str] | None = None) -> None:
         parser.error(str(error))
     seed = args.seed if args.seed is not None else randbits(64)
     print(f'Seed: {seed}')
+    print(f'Per-tree limits: nodes={limits.max_nodes}, seconds={limits.time_seconds}; '
+          f'aggregate cache entries={limits.max_cache_entries}')
     if args.mode == 'deal':
         deal = generate_schedule(1, seed, shaker=seed % 4)[0]
         hands = [[PLAY_ACTIONS[i] for i in hand] for hand in deal.hands]
-        print(f'Whole-analysis limits: nodes={limits.max_nodes}, seconds={limits.time_seconds}, '
-              f'cache entries={limits.max_cache_entries}; early combinations may consume the whole budget')
+        print('Each bidder/trump combination receives a fresh tree budget; lead branches share it.')
         count = min(AUTO_WORKER_CAP, resolve_workers(args.workers, 36))
         print(f'Requested oracle workers: {args.workers}; resolved oracle workers: {count}; '
               'independent search tasks: 36')
