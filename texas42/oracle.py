@@ -1,7 +1,8 @@
 """Exact open-hand analysis of ordinary contracts; never a policy input.
 
-All values use the bidding partnership's perspective, including at defending
-nodes. Only the engine generates moves, advances tricks, and scores the hand.
+Contract-success values use the bidding partnership's perspective. The point
+objective has an explicit reference team, defaulting to the bidders. Only the
+engine generates moves, advances tricks, and scores the hand.
 """
 from __future__ import annotations
 
@@ -10,13 +11,14 @@ from dataclasses import dataclass
 from enum import StrEnum
 import math
 from time import monotonic
-from typing import Literal
+from typing import Literal, Sequence
 
-from .actions import ACTION_REGISTRY
+from .actions import ACTION_REGISTRY, TRUMP_ACTIONS
 from .arena import contract_decided
-from .models import ContractKind, Domino
+from .episodes import EpisodeState
+from .models import Bid, Contract, ContractKind, Domino, Trump
 from .phases import Phase
-from .rulesets import validate_ruleset
+from .rulesets import RULESET_ID, validate_ruleset
 from .state import HandState
 
 
@@ -56,9 +58,13 @@ class ValueBounds:
 @dataclass(frozen=True, slots=True)
 class ActionValue(ValueBounds):
     action_id: int = 0
-    # False with [-1, +1] means unknown, not a heuristic evaluation. A score
+    # False with the full outcome range means unknown, not an estimate. A score
     # proof at the root can establish an action without visiting its child.
     searched: bool = False
+
+    @property
+    def status(self) -> Literal['exact', 'unresolved']:
+        return 'exact' if self.exact else 'unresolved'
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,6 +82,92 @@ class OracleResult(ValueBounds):
     elapsed_seconds: float = 0.0
 
 
+@dataclass(frozen=True, slots=True)
+class TrumpAnalysis(ValueBounds):
+    lower: int = 0
+    upper: int = 42
+    trump: Trump = None
+    optimal_action: int | None = None
+    optimal_actions: tuple[int, ...] | None = None
+    action_values: tuple[ActionValue, ...] = ()
+    all_action_values_complete: bool = False
+
+    @property
+    def status(self) -> Literal['exact', 'unresolved']:
+        return 'exact' if self.exact and self.optimal_actions is not None else 'unresolved'
+
+
+@dataclass(frozen=True, slots=True)
+class TrumpLead:
+    trump: Trump
+    action_id: int
+
+
+def _makeable_bid(points: int) -> Bid | None:
+    if points < 30:
+        return None
+    return Bid(marks=1) if points == 42 else Bid(points=points)
+
+
+@dataclass(frozen=True, slots=True)
+class BidderAnalysis(ValueBounds):
+    lower: int = 0
+    upper: int = 42
+    seat: int = 0
+    optimal_choice: TrumpLead | None = None
+    optimal_choices: tuple[TrumpLead, ...] | None = None
+    trumps: tuple[TrumpAnalysis, ...] = ()
+
+    @property
+    def team(self) -> int:
+        return self.seat % 2
+
+    @property
+    def contract_exact(self) -> bool:
+        return _makeable_bid(self.lower) == _makeable_bid(self.upper)
+
+    @property
+    def maximum_contract(self) -> Bid | None:
+        # contract_exact disambiguates unknown from proven no makeable bid.
+        return _makeable_bid(self.lower) if self.contract_exact else None
+
+    @property
+    def proven_contract(self) -> Bid | None:
+        return _makeable_bid(self.lower)
+
+    @property
+    def possible_contract(self) -> Bid | None:
+        return _makeable_bid(self.upper)
+
+    @property
+    def all_trump_values_complete(self) -> bool:
+        return all(t.exact for t in self.trumps)
+
+    @property
+    def all_action_values_complete(self) -> bool:
+        return all(t.all_action_values_complete for t in self.trumps)
+
+    @property
+    def status(self) -> Literal['exact', 'unresolved']:
+        return 'exact' if self.exact and self.optimal_choices is not None else 'unresolved'
+
+
+@dataclass(frozen=True, slots=True)
+class DealAnalysis:
+    bidders: tuple[BidderAnalysis, ...]
+    nodes: int
+    cache_hits: int
+    elapsed_seconds: float
+
+    @property
+    def status(self) -> Literal['exact', 'budget_exceeded']:
+        return 'exact' if all(b.status == 'exact' for b in self.bidders) else 'budget_exceeded'
+
+    @property
+    def all_alternative_values_complete(self) -> bool:
+        return all(b.all_action_values_complete for b in self.bidders)
+
+
 class _Flag(StrEnum):
     EXACT = 'exact'
     LOWER_BOUND = 'lower_bound'
@@ -86,25 +178,28 @@ class _Flag(StrEnum):
 class _Entry:
     value: int
     flag: _Flag
+    domain: ValueBounds = ValueBounds()
 
     @property
     def bounds(self) -> ValueBounds:
         if self.flag == _Flag.EXACT:
             return ValueBounds(self.value, self.value)
         if self.flag == _Flag.LOWER_BOUND:
-            return ValueBounds(self.value, 1)
-        return ValueBounds(-1, self.value)
+            return ValueBounds(self.value, self.domain.upper)
+        return ValueBounds(self.domain.lower, self.value)
 
 
-def _state_key(state: HandState) -> tuple:
+def _state_key(state: HandState, objective: str = 'contract_success',
+               reference_team: int | None = None) -> tuple:
     """Readable, immutable, absolute-seat key for this hand-only objective.
 
     Completed trick *count* affects engine termination. Their contents/order
     cannot affect future legality or scoring once points have been awarded.
     Auction history, shaker and match marks likewise cannot affect this objective.
     """
-    return ('ordinary_contract_success_v1', state.ruleset_id,
-            state.contract.bidder % 2, state.phase, state.contract, state.bidder,
+    return (f'ordinary_{objective}_v1', state.ruleset_id,
+            state.contract.bidder % 2 if reference_team is None else reference_team,
+            state.phase, state.contract, state.bidder,
             state.trump, state.seat,
             tuple(tuple(sorted(d.id for d in hand)) for hand in state.hands),
             tuple((seat, d.id) for seat, d in state.trick),
@@ -147,7 +242,7 @@ def _prepare_state(state: HandState) -> HandState:
     return snapshot
 
 
-def _child(state: HandState, action: int) -> HandState:
+def _copy_state(state: HandState) -> HandState:
     # Play transitions mutate only these containers. Dominoes, contracts and
     # completed trick tuples are immutable; no deepcopy is needed per search node.
     child = copy(state)
@@ -155,21 +250,30 @@ def _child(state: HandState, action: int) -> HandState:
     child.trick = list(state.trick)
     child.completed = list(state.completed)
     child.points = list(state.points)
+    return child
+
+
+def _child(state: HandState, action: int) -> HandState:
+    child = _copy_state(state)
     child.apply(action)
     return child
 
 
-def exhaustive_minimax(full_state: HandState) -> int:
+def exhaustive_minimax(full_state: HandState, *, objective: Literal['contract_success',
+                       'final_points'] = 'contract_success', reference_team: int | None = None) -> int:
     """Unpruned, uncached terminal-only reference, intended for tiny positions.
 
     This intentionally does not use contract threshold cutoffs or alpha-beta.
     There is no search budget; use solve() for larger positions.
     """
     state = _prepare_state(full_state)
-    team = state.contract.bidder % 2
+    search = _Search(SearchLimits(), monotonic(), objective=objective, reference_team=reference_team)
+    team = search.team(state)
 
     def visit(node):
         if node.result is not None:
+            if objective == 'final_points':
+                return node.result.team_points[team]
             return 1 if node.result.scoring_team == team else -1
         values = [visit(_child(node, action)) for action in node.legal_action_ids()]
         return (max if node.seat % 2 == team else min)(values)
@@ -187,16 +291,54 @@ def _decided_value(state: HandState) -> int | None:
     return None
 
 
-def _combine(values: list[ValueBounds], *, maximizing: bool, complete: bool) -> ValueBounds:
+def _combine(values: list[ValueBounds], *, maximizing: bool, complete: bool,
+             unknown: ValueBounds = ValueBounds()) -> ValueBounds:
     # An unsearched child has the full outcome range, never an estimated value.
     if not complete:
-        values = [*values, ValueBounds()]
+        values = [*values, unknown]
     select = max if maximizing else min
     return ValueBounds(select(v.lower for v in values), select(v.upper for v in values))
 
 
+def _choice_proof(values: Sequence[ValueBounds], *, maximizing: bool = True
+                  ) -> tuple[ValueBounds, int | None, tuple[int, ...] | None]:
+    """Prove choices from bounds, including strict dominance of unresolved ones.
+
+    A single surviving interval can be a proven optimum without an exact value.
+    Touching intervals do not establish a tie unless each choice is proven.
+    """
+    bounds = _combine(list(values), maximizing=maximizing, complete=True)
+    proven = []
+    excluded = []
+    for index, value in enumerate(values):
+        others = [v for i, v in enumerate(values) if i != index]
+        if maximizing:
+            optimal = all(value.lower >= v.upper for v in others)
+            suboptimal = value.upper < bounds.lower
+        else:
+            optimal = all(value.upper <= v.lower for v in others)
+            suboptimal = value.lower > bounds.upper
+        if optimal:
+            proven.append(index)
+        if suboptimal:
+            excluded.append(index)
+    complete = len(proven) + len(excluded) == len(values)
+    return bounds, next(iter(proven), None), tuple(proven) if complete else None
+
+
 class _Search:
-    def __init__(self, limits: SearchLimits, start: float):
+    def __init__(self, limits: SearchLimits, start: float, *,
+                 objective: Literal['contract_success', 'final_points'] = 'contract_success',
+                 reference_team: int | None = None):
+        if objective not in ('contract_success', 'final_points'):
+            raise ValueError('Unknown oracle objective')
+        if reference_team is not None and (type(reference_team) is not int or reference_team not in (0, 1)):
+            raise ValueError('reference_team must be 0 or 1')
+        if objective == 'contract_success' and reference_team is not None:
+            raise ValueError('Contract success always uses the bidding team')
+        self.objective = objective
+        self.reference_team = reference_team
+        self.domain = ValueBounds(0, 42) if objective == 'final_points' else ValueBounds()
         self.limits = limits
         self.deadline = None if limits.time_seconds is None else start + limits.time_seconds
         self.nodes = 0
@@ -204,6 +346,22 @@ class _Search:
         self.exhausted = False
         # Insertion-ordered dict, FIFO eviction. Survival is never required for correctness.
         self.cache: dict[tuple, _Entry] = {}
+
+    def team(self, state: HandState) -> int:
+        return state.contract.bidder % 2 if self.reference_team is None else self.reference_team
+
+    def initial_bounds(self, state: HandState) -> ValueBounds:
+        if self.objective == 'final_points':
+            team = self.team(state)
+            return ValueBounds(state.points[team], 42 - state.points[1 - team])
+        return self.domain
+
+    def decided_bounds(self, state: HandState) -> ValueBounds | None:
+        if self.objective == 'final_points':
+            bounds = self.initial_bounds(state)
+            return bounds if bounds.exact else None
+        value = _decided_value(state)
+        return ValueBounds(value, value) if value is not None else None
 
     def enter(self) -> bool:
         if ((self.limits.max_nodes is not None and self.nodes >= self.limits.max_nodes)
@@ -218,39 +376,43 @@ class _Search:
             return
         # Classify against the caller's original window, before TT tightening.
         if bounds.exact:
-            entry = _Entry(bounds.lower, _Flag.EXACT)
+            entry = _Entry(bounds.lower, _Flag.EXACT, self.domain)
         elif bounds.lower >= beta:
-            entry = _Entry(bounds.lower, _Flag.LOWER_BOUND)
+            entry = _Entry(bounds.lower, _Flag.LOWER_BOUND, self.domain)
         elif bounds.upper <= alpha:
-            entry = _Entry(bounds.upper, _Flag.UPPER_BOUND)
+            entry = _Entry(bounds.upper, _Flag.UPPER_BOUND, self.domain)
         else:
             return
         if key not in self.cache and len(self.cache) >= self.limits.max_cache_entries:
             del self.cache[next(iter(self.cache))]
         self.cache[key] = entry
 
-    def search(self, state: HandState, alpha: int = -2, beta: int = 2) -> ValueBounds:
+    def search(self, state: HandState, alpha: int | None = None, beta: int | None = None) -> ValueBounds:
+        prior = self.initial_bounds(state)
         if not self.enter():
-            return ValueBounds()
-        decided = _decided_value(state)
+            return prior
+        alpha = self.domain.lower - 1 if alpha is None else alpha
+        beta = self.domain.upper + 1 if beta is None else beta
+        decided = self.decided_bounds(state)
         if decided is not None:
-            return ValueBounds(decided, decided)
+            return decided
         original_alpha, original_beta = alpha, beta
-        key = _state_key(state)
-        prior = ValueBounds()
+        key = _state_key(state, self.objective, self.reference_team)
         entry = self.cache.get(key)
         if entry is not None:
             self.cache_hits += 1
-            prior = entry.bounds
+            cached = entry.bounds
+            prior = ValueBounds(max(prior.lower, cached.lower), min(prior.upper, cached.upper))
             alpha, beta = max(alpha, prior.lower), min(beta, prior.upper)
             if prior.exact or alpha >= beta:
                 return prior
-        maximizing = state.seat % 2 == state.contract.bidder % 2
+        maximizing = state.seat % 2 == self.team(state)
         actions = state.legal_action_ids()  # Stable global-ID ordering only.
         values = []
         for action in actions:
             values.append(self.search(_child(state, action), alpha, beta))
-            bounds = _combine(values, maximizing=maximizing, complete=len(values) == len(actions))
+            bounds = _combine(values, maximizing=maximizing, complete=len(values) == len(actions),
+                              unknown=prior)
             bounds = ValueBounds(max(bounds.lower, prior.lower), min(bounds.upper, prior.upper))
             if maximizing:
                 alpha = max(alpha, bounds.lower)
@@ -278,20 +440,49 @@ def solve(full_state: HandState, *, output: Literal['position_value', 'all_actio
         raise ValueError('output must be position_value or all_action_values')
     state = _prepare_state(full_state)
     search = _Search(limits if limits is not None else SearchLimits(), start)
+    return _solve_state(state, search, output=output, start=start)
+
+
+def solve_points(full_state: HandState, *, output: Literal['position_value', 'all_action_values'] =
+                 'all_action_values', limits: SearchLimits | None = None,
+                 reference_team: int | None = None) -> OracleResult:
+    """Maximum guaranteed final points for a fixed trump, using the shared search.
+
+    The reference defaults to the bidding partnership. Unlike solve(), making
+    the contract does not end this objective. Values/bounds range from 0 to 42.
+    """
+    start = monotonic()
+    if output not in ('position_value', 'all_action_values'):
+        raise ValueError('output must be position_value or all_action_values')
+    state = _prepare_state(full_state)
+    search = _Search(limits if limits is not None else SearchLimits(), start,
+                     objective='final_points', reference_team=reference_team)
+    return _solve_state(state, search, output=output, start=start)
+
+
+def _solve_state(state: HandState, search: _Search, *, output: str, start: float,
+                  minimum: int | None = None) -> OracleResult:
+    """Analyze root actions of a trusted state with caller-owned search resources.
+
+    minimum is a known incumbent for a MAX choice in deal analysis. Searching
+    at alpha=minimum-1 preserves ties while permitting strictly inferior bounds.
+    Ordinary all-action APIs retain full windows for every root child.
+    """
     actions = state.legal_action_ids()
-    rows = [ActionValue(action_id=action) for action in actions]
-    bounds = ValueBounds()
+    initial = search.initial_bounds(state)
+    rows = [ActionValue(initial.lower, initial.upper, action) for action in actions]
+    bounds = initial
     if search.enter():
-        decided = _decided_value(state)
+        decided = search.decided_bounds(state)
         if decided is not None:
-            bounds = ValueBounds(decided, decided)
-            rows = [ActionValue(decided, decided, action) for action in actions]
+            bounds = decided
+            rows = [ActionValue(decided.lower, decided.upper, action) for action in actions]
         else:
-            maximizing = state.seat % 2 == state.contract.bidder % 2
+            maximizing = state.seat % 2 == search.team(state)
             for index, action in enumerate(actions):
                 before = search.nodes
-                # Full window for EACH root child, sharing only the table.
-                child_bounds = search.search(_child(state, action))
+                alpha = None if minimum is None else max(minimum, bounds.lower) - 1
+                child_bounds = search.search(_child(state, action), alpha=alpha)
                 rows[index] = ActionValue(child_bounds.lower, child_bounds.upper,
                                           action, search.nodes > before)
                 bounds = _combine(list(rows), maximizing=maximizing, complete=True)
@@ -301,6 +492,10 @@ def solve(full_state: HandState, *, output: Literal['position_value', 'all_actio
     optimal = next((row.action_id for row in rows if row.exact and row.value == bounds.value), None)
     optimal_actions = (tuple(row.action_id for row in rows if row.value == bounds.value)
                        if bounds.exact and complete else None)
+    if search.objective == 'final_points' and rows:
+        _, choice, choices = _choice_proof(rows, maximizing=state.seat % 2 == search.team(state))
+        optimal = rows[choice].action_id if choice is not None else None
+        optimal_actions = tuple(rows[i].action_id for i in choices) if choices is not None else None
     fulfilled = bounds.exact and (not actions or optimal is not None)
     if output == 'all_action_values':
         fulfilled &= complete
@@ -310,3 +505,65 @@ def solve(full_state: HandState, *, output: Literal['position_value', 'all_actio
                         action_values=tuple(rows), all_action_values_complete=complete,
                         nodes=search.nodes, cache_hits=search.cache_hits,
                         elapsed_seconds=monotonic() - start)
+
+
+def _play_start(deal: HandState, bidder: int, trump: Trump) -> HandState:
+    """Fresh play start from a boundary-validated deal; no history reconstruction.
+
+    The normal 30-point placeholder drives engine transitions, never point
+    utility. Ordinary play legality depends on hand/lead/trump, not bid/stake.
+    """
+    state = _copy_state(deal)
+    state.contract = Contract(ContractKind.NORMAL, bidder, Bid(points=30))
+    state.bidder = state.seat = bidder
+    state.phase = Phase.TRUMP
+    state.apply(ACTION_REGISTRY.encode(Phase.TRUMP, trump))
+    return state
+
+
+def _bidder_analysis(seat: int, trumps: Sequence[TrumpAnalysis]) -> BidderAnalysis:
+    # Flattening both MAX levels preserves every trump/lead tie. No requirement
+    # to solve a strictly dominated alternative merely to prove the optimum.
+    values = [action for trump in trumps for action in trump.action_values]
+    pairs = [TrumpLead(trump.trump, action.action_id)
+             for trump in trumps for action in trump.action_values]
+    bounds, choice, choices = _choice_proof(values)
+    return BidderAnalysis(bounds.lower, bounds.upper, seat,
+                          pairs[choice] if choice is not None else None,
+                          tuple(pairs[i] for i in choices) if choices is not None else None,
+                          tuple(trumps))
+
+
+def analyze_deal(hands: Sequence[Sequence[Domino]], *, ruleset_id: str = RULESET_ID,
+                 limits: SearchLimits | None = None) -> DealAnalysis:
+    """Analyze all four candidate bidders, nine trumps, and their legal leads.
+
+    Hands contain the complete double-six set in absolute-seat order. Validation
+    occurs once through EpisodeState.deal. One budget and bounded cache span the
+    entire analysis. Scheduling is seat, canonical trump, then global action ID;
+    early combinations may consume the whole budget. Unvisited choices retain
+    [0, 42]. API limits default to unlimited time/nodes; bound full-hand calls.
+    """
+    start = monotonic()
+    session = EpisodeState('hand', 7, 0, ruleset_id)
+    try:
+        detached = [list(hand) for hand in hands]
+    except TypeError as error:
+        raise ValueError('A deal requires four hands of seven unique dominoes') from error
+    session.deal(detached)
+    deal = session.hand
+    search = _Search(limits if limits is not None else SearchLimits(), start, objective='final_points')
+    bidders = []
+    for seat in range(4):
+        trumps = []
+        incumbent = 0
+        for trump in TRUMP_ACTIONS:
+            state = _play_start(deal, seat, trump)
+            result = _solve_state(state, search, output='all_action_values', start=start,
+                                  minimum=incumbent)
+            trumps.append(TrumpAnalysis(result.lower, result.upper, trump,
+                                        result.optimal_action, result.optimal_actions,
+                                        result.action_values, result.all_action_values_complete))
+            incumbent = max(incumbent, result.lower)
+        bidders.append(_bidder_analysis(seat, trumps))
+    return DealAnalysis(tuple(bidders), search.nodes, search.cache_hits, monotonic() - start)

@@ -2,13 +2,14 @@
 from __future__ import annotations
 
 import argparse
+from secrets import randbits
 from statistics import mean, median
 
 from texas42.actions import PLAY_ACTIONS
 from texas42.agents import VARIANTS, variant_factory
 from texas42.arena import generate_schedule
 from texas42.models import trump_name
-from texas42.oracle import OracleResult, SearchLimits, solve
+from texas42.oracle import DealAnalysis, OracleResult, SearchLimits, analyze_deal, solve, solve_points
 from texas42.phases import Phase
 from texas42.players import format_hand
 from texas42.selfplay import observation_from_view
@@ -38,7 +39,7 @@ def generate_endgame(seed: int, remaining: int, *, policy: str = 'HHR',
     return state
 
 
-def print_position(state: HandState, result: OracleResult) -> None:
+def print_position(state: HandState, result: OracleResult, *, objective: str = 'contract_success') -> None:
     contract = state.contract
     print(f'Contract: {contract.bid}, bidder seat {contract.bidder}, bidding team {contract.bidder % 2}')
     print(f'Trump: {trump_name(state.trump)}; scores: {state.points}')
@@ -46,7 +47,10 @@ def print_position(state: HandState, result: OracleResult) -> None:
     for seat, hand in enumerate(state.hands):
         print(f'Seat {seat}: {format_hand(hand)}')
     print('Partial trick:', ' '.join(f'{seat}:{domino}' for seat, domino in state.trick) or '(empty)')
-    print('Values: +1 bidding team can force success; -1 defenders can force failure')
+    if objective == 'final_points':
+        print('Values: guaranteed final points for the bidding team (0–42); all hands visible')
+    else:
+        print('Values: +1 bidding team can force success; -1 defenders can force failure')
     for row in result.action_values:
         value = f'{row.value:+d} exact' if row.exact else f'[{row.lower:+d}, {row.upper:+d}] unresolved'
         print(f'  {row.action_id:2d} {PLAY_ACTIONS[row.action_id]}: {value}; searched={row.searched}')
@@ -56,9 +60,43 @@ def print_position(state: HandState, result: OracleResult) -> None:
     print(f'Nodes: {result.nodes}; cache hits: {result.cache_hits}; runtime: {result.elapsed_seconds:.6f}s')
 
 
+def print_deal(hands, result: DealAnalysis) -> None:
+    print('Open-hand bidding benchmark: all hands visible; not a hidden-information bid recommendation.')
+    print('42 points establishes a one-mark contract; mark stake is not optimized.')
+    for seat, hand in enumerate(hands):
+        print(f'Seat {seat}: {format_hand(hand)}')
+    for bidder in result.bidders:
+        print(f'\nBidder seat {bidder.seat}, team {bidder.team} (bidder leads)')
+        print('Trump | Points/bounds | Proven lead ID | Complete optimal lead IDs | Proof | All values exact')
+        for trump in bidder.trumps:
+            points = str(trump.value) if trump.exact else f'[{trump.lower}, {trump.upper}]'
+            print(f'{trump_name(trump.trump)} | {points} | {trump.optimal_action} | '
+                  f'{trump.optimal_actions} | {trump.status} | {trump.all_action_values_complete}')
+        contract = str(bidder.maximum_contract) if bidder.maximum_contract is not None else 'none'
+        if not bidder.contract_exact:
+            contract = 'unresolved'
+        print(f'Best points: {bidder.value}, bounds=[{bidder.lower}, {bidder.upper}]; '
+              f'maximum makeable contract: {contract}; contract exact: {bidder.contract_exact}')
+        print(f'Proven makeable contract: {bidder.proven_contract}; '
+              f'highest still possible: {bidder.possible_contract}')
+        choice = bidder.optimal_choice
+        proven = f'{trump_name(choice.trump)} / {PLAY_ACTIONS[choice.action_id]} ({choice.action_id})' if choice else None
+        choices = ('; '.join(f'{trump_name(c.trump)} / {PLAY_ACTIONS[c.action_id]} ({c.action_id})'
+                            for c in bidder.optimal_choices) if bidder.optimal_choices is not None else None)
+        print(f'Proven optimal trump/lead: {proven}; complete optimal pairs: {choices}')
+        print(f'Bidder proof: {bidder.status}; all trump values exact: {bidder.all_trump_values_complete}; '
+              f'all action values exact: {bidder.all_action_values_complete}')
+    print(f'\nStatus: {result.status}; all alternative values complete: {result.all_alternative_values_complete}')
+    print(f'Nodes: {result.nodes}; cache hits: {result.cache_hits}; runtime: {result.elapsed_seconds:.6f}s')
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--seed', type=int, default=42)
+    parser.add_argument('--seed', type=int,
+                        help='Deal/policy seed; random when omitted, printed for reproduction')
+    parser.add_argument('--mode', choices=('endgame', 'deal'), default='endgame')
+    parser.add_argument('--objective', choices=('contract_success', 'final_points'), default='contract_success',
+                        help='Endgame objective; deal mode always uses final points')
     parser.add_argument('--remaining', type=int, choices=range(1, 8), default=3)
     parser.add_argument('--partial-plays', type=int, choices=range(4), default=0)
     parser.add_argument('--policy', choices=tuple(VARIANTS), default='HHR')
@@ -71,22 +109,41 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
     if args.samples < 1:
         parser.error('--samples must be positive')
+    if args.mode == 'deal':
+        if args.samples != 1:
+            parser.error('deal mode analyzes one complete deal; --samples must be 1')
+        # These are WHOLE-analysis defaults, never per bidder/trump/action.
+        if args.max_nodes is None:
+            args.max_nodes = 100_000
+        if args.time_seconds is None:
+            args.time_seconds = 5.0
     try:
         limits = SearchLimits(args.time_seconds, args.max_nodes, args.max_cache_entries)
     except ValueError as error:
         parser.error(str(error))
+    seed = args.seed if args.seed is not None else randbits(64)
+    print(f'Seed: {seed}')
+    if args.mode == 'deal':
+        deal = generate_schedule(1, seed, shaker=seed % 4)[0]
+        hands = [[PLAY_ACTIONS[i] for i in hand] for hand in deal.hands]
+        print(f'Whole-analysis limits: nodes={limits.max_nodes}, seconds={limits.time_seconds}, '
+              f'cache entries={limits.max_cache_entries}; early combinations may consume the whole budget')
+        print_deal(hands, analyze_deal(hands, limits=limits))
+        return
     results = []
     undecided = 0
     for index in range(args.samples):
-        state = generate_endgame(args.seed + index, args.remaining,
+        state = generate_endgame(seed + index, args.remaining,
                                  policy=args.policy, partial_plays=args.partial_plays)
         team = state.contract.bidder % 2
         target = state.contract.bid.target_points
-        undecided += state.points[team] < target and state.points[1 - team] <= 42 - target
-        result = solve(state, output=args.output, limits=limits)
+        undecided += (sum(state.points) < 42 if args.objective == 'final_points' else
+                      state.points[team] < target and state.points[1 - team] <= 42 - target)
+        solver = solve_points if args.objective == 'final_points' else solve
+        result = solver(state, output=args.output, limits=limits)
         results.append(result)
         if args.samples == 1:
-            print_position(state, result)
+            print_position(state, result, objective=args.objective)
     if args.samples > 1:
         exact = sum(result.status == 'exact' for result in results)
         print(f'{args.samples} positions; {undecided} initially undecided; requested output: {args.output}')

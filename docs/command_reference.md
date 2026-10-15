@@ -24,7 +24,7 @@ python -m unittest discover -s tests -v
 | Human/AI console game | python -m texas42 | Interactive play; optional JSONL self-play logs |
 | Baseline comparison | python -m examples.policy_ablation_benchmark | HHH, CHH, HHR, etc. in paired duplicate deals |
 | Bid/pass experiment | python -m examples.counterfactual_bidding | Counterfactual voluntary bid intervention |
-| Open-hand endgame analysis | python -m examples.endgame_oracle | Exact ordinary-contract minimax with search budgets |
+| Open-hand oracle | python -m examples.endgame_oracle | Contract/point endgames and bounded complete-deal bidding benchmarks |
 | Train legacy play-only PPO | python -m examples.train_ppo | Reproducible baseline; fixed or mixed heuristic variants |
 | Legacy checkpoint evaluation | python -m examples.evaluate_ppo | Held-out, paired checkpoint evaluation |
 | Current PPO training | python -m examples.train_selfplay_ppo | Independent phase networks and historical opponents |
@@ -47,27 +47,49 @@ python -m examples.endgame_oracle --seed 1 --remaining 2 --partial-plays 1 \
 # Bounded smoke benchmark, consecutive seeds starting at zero
 python -m examples.endgame_oracle --seed 0 --remaining 3 --samples 100 \
   --max-nodes 100000 --time-seconds 2
+# Final-point endgames (the binary contract cutoff does not apply)
+python -m examples.endgame_oracle --objective final_points --seed 1 --remaining 2
+# Complete deal: ONE whole-analysis budget spans all four bidders and nine trumps
+python -m examples.endgame_oracle --mode deal --seed 42 \
+  --max-nodes 10000 --time-seconds 1
+# Small-endgame point benchmark; per-position limits
+python -m examples.endgame_oracle --objective final_points --seed 0 \
+  --remaining 3 --samples 100 --max-nodes 100000 --time-seconds 2
 ```
 
 No optional dependencies are required. The default HHR policies generate a
 reachable ordinary contract with heuristic bidding/trump and seeded random play.
+Omitting `--seed` chooses a fresh random seed. Every run prints its resolved seed;
+pass that value with `--seed` to reproduce the positions. Multiple samples use
+consecutive seeds starting at the resolved seed.
 The command prints the contract, scores, trump, actor/team, four hands, partial
 trick, legal global IDs/dominoes and exact values or bounds, proven optimal
 actions, completion flags, nodes, cache hits and runtime. With multiple samples it
 prints completion rates and mean/median/max statistics instead. See the
 [oracle guide](endgame_oracle.md) for fixed bidding-team value and proof semantics.
 
+`--mode deal` uses the seeded arena deal directly, with no preliminary policy
+play. It prints a trump table for every candidate bidder, point bounds or exact
+values, proven lead IDs and complete optimal lead sets, bidder contract bounds,
+proven trump/lead choices, completeness flags and aggregate statistics. All hands
+are visible. This is an open-hand benchmark, not a hidden-information bid
+recommendation; 42 points establishes a one-mark contract without optimizing
+mark stake. Unvisited choices stay unresolved. Early combinations can consume
+the whole budget. See [deal proof semantics](endgame_oracle.md#complete-deal-bidding-benchmark).
+
 | Argument | Default | Meaning |
 | --- | --- | --- |
-| `--seed` | 42 | Integer deal/policy seed; samples use consecutive seeds. |
-| `--remaining` | 3 | 1–7 dominoes per player at the selected trick boundary. Larger positions are permitted. |
-| `--partial-plays` | 0 | Advance 0–3 additional legal moves after that boundary. |
-| `--policy` | HHR | Existing built-in variant: HHH, HHR, HRR, CHH, CRR, RRR. |
-| `--output` | all_action_values | All legal root action values, or position_value for root outcome plus one proven optimal action. |
-| `--max-nodes` | Unset | Nonnegative per-position search-node budget. |
-| `--time-seconds` | Unset | Nonnegative finite per-position soft deadline, including validation. |
+| `--seed` | Random | Integer deal/policy seed, printed for reproduction; samples use consecutive seeds. |
+| `--mode` | endgame | endgame or deal; deal analyzes all 36 bidder/trump combinations. |
+| `--objective` | contract_success | Endgame: contract_success or final_points. Deal mode always uses final points. |
+| `--remaining` | 3 | Endgame only: 1–7 dominoes per player at the selected trick boundary. |
+| `--partial-plays` | 0 | Endgame only: advance 0–3 additional legal moves after that boundary. |
+| `--policy` | HHR | Endgame only: existing variant HHH, HHR, HRR, CHH, CRR, RRR. |
+| `--output` | all_action_values | Endgame only: all legal root action values, or position_value for root outcome plus one proven optimal action. |
+| `--max-nodes` | Unset (endgame); 100000 (deal) | Nonnegative search-node budget: per endgame position, or whole deal analysis. |
+| `--time-seconds` | Unset (endgame); 5 (deal) | Nonnegative finite soft deadline, including validation: per endgame position, or whole deal analysis. |
 | `--max-cache-entries` | 100000 | Nonnegative table capacity; zero disables caching. |
-| `--samples` | 1 | Positive position count; more than one selects benchmark summary output. |
+| `--samples` | 1 | Positive endgame position count; >1 selects benchmark summary. Deal mode requires 1. |
 | `-h`, `--help` | Off | Print argument help. |
 
 ### 2.1 Console game, self-play log and engine smoke test

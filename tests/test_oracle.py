@@ -5,6 +5,7 @@ from dataclasses import replace
 import io
 from time import monotonic
 import unittest
+from unittest.mock import patch
 
 from examples.endgame_oracle import generate_endgame, main
 from texas42.models import Bid, Contract, ContractKind
@@ -260,9 +261,33 @@ class OracleTests(unittest.TestCase):
                      'exact', 'Proven optimal action:', 'Status:', 'Nodes:', 'cache hits:', 'runtime:'):
             self.assertIn(text, out.getvalue())
         with redirect_stdout(io.StringIO()) as out:
-            main(['--remaining', '4', '--samples', '2', '--max-nodes', '10', '--max-cache-entries', '0'])
+            main(['--seed', '0', '--remaining', '4', '--samples', '2', '--max-nodes', '10',
+                  '--max-cache-entries', '0'])
         self.assertIn('Exact completion:', out.getvalue())
         self.assertIn('median=', out.getvalue())
+
+    def test_example_random_default_seed_and_explicit_reproduction(self):
+        options = ['--remaining', '2', '--max-nodes', '1000']
+        with patch('examples.endgame_oracle.randbits', side_effect=(7, 18)) as random_seed:
+            for seed in (7, 18):
+                with redirect_stdout(io.StringIO()) as automatic:
+                    main(options)
+                with redirect_stdout(io.StringIO()) as explicit:
+                    main(['--seed', str(seed), *options])
+                self.assertEqual(automatic.getvalue().splitlines()[0], f'Seed: {seed}')
+                # Runtime is the only output that varies when replaying a seed.
+                self.assertEqual(automatic.getvalue().splitlines()[:-1],
+                                 explicit.getvalue().splitlines()[:-1])
+            self.assertEqual(random_seed.call_count, 2)
+        with patch('examples.endgame_oracle.randbits', return_value=0) as random_seed:
+            with patch('examples.endgame_oracle.generate_endgame', wraps=generate_endgame) as generate:
+                with redirect_stdout(io.StringIO()) as out:
+                    main(['--remaining', '2', '--samples', '2', '--max-nodes', '10'])
+                self.assertEqual([call.args[0] for call in generate.call_args_list], [0, 1])
+                self.assertEqual(out.getvalue().splitlines()[0], 'Seed: 0')
+            with redirect_stdout(io.StringIO()):
+                main(['--seed', '0', *options])
+            random_seed.assert_called_once_with(64)
 
 
 if __name__ == '__main__':
