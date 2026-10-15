@@ -32,6 +32,29 @@ class BidPreference(Protocol):
     def would_pass_if_allowed(self, obs: Observation) -> bool | None: ...
 
 
+@runtime_checkable
+class ActionProbabilities(Protocol):
+    """Optional pure query: the distribution `act(obs)` would sample from.
+
+    Returns {global action ID: probability} over a subset of
+    obs.legal_action_ids, summing to 1. Omitted IDs have probability 0.
+
+    Purpose: belief modelling (texas42.belief) asks "how likely was seat j to
+    make the move it made, if the hidden deal were W?". That is the likelihood
+    term P(action | j's view in W) of Bayes' rule, as in Policy-Based Inference
+    (Rebstock et al. 2019, https://arxiv.org/abs/1905.10911) and Loki's poker
+    weight tables. It is also the per-step probability of a simulated rollout.
+
+    Contract, like BidPreference: must not change memory, consume RNG, or call
+    a stateful act. Deterministic policies return a single action with
+    probability 1.0; callers soften these (see belief.policy_likelihood).
+    Implemented by RandomAgent, ConservativeRandomAgent, HeuristicAgent and
+    HybridAgent. Learned policies can return their masked softmax.
+    """
+
+    def action_probabilities(self, obs: Observation) -> dict[int, float]: ...
+
+
 @dataclass(frozen=True, slots=True)
 class PrivilegedState:
     """Remaining hands in absolute-seat order, using permanent domino IDs.

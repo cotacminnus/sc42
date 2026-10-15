@@ -55,6 +55,15 @@ class HybridAgent:
             raise ValueError('Unknown decision phase')
         return self._delegates[obs.phase].act(obs)
 
+    def action_probabilities(self, obs: Observation) -> dict[int, float]:
+        """Pure ActionProbabilities query, answered by the acting phase's delegate."""
+        if obs.phase not in self._delegates:
+            raise ValueError('Unknown decision phase')
+        query = getattr(self._delegates[obs.phase], 'action_probabilities', None)
+        if query is None:
+            raise TypeError('Phase delegate does not provide action probabilities')
+        return query(obs)
+
     def would_pass_if_allowed(self, obs: Observation) -> bool | None:
         """Delegate the optional diagnostic without sampling a random policy."""
         if obs.phase != Phase.BID:

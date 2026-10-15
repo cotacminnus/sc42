@@ -22,7 +22,7 @@ Step numbers match the team's live planning document.
 | 4 | Common agent interface | Done | `agents/`: protocols, RandomAgent, AgentPlayer |
 | 5 | Baseline agents | V1 baselines done | HeuristicAgent, RandomAgent, ConservativeRandomAgent, HybridAgent; [phase ablations](policy_ablation.md) |
 | 6 | Self-play training | Play-only and multi-phase historical PPO implemented | [legacy baseline](ppo_training.md), [current training](multiphase_selfplay.md) |
-| 7 | Hidden-information reasoning | Not started | planned `texas42/belief.py` |
+| 7 | Hidden-information reasoning | Belief toolkit implemented: exact counting, sampling, policy likelihoods, rollouts, PIMC action values | [belief modelling](belief.md); PIMC agent and arena study next |
 | 8 | Partnership behavior | Not started | uses the arena (step 11) |
 | 9 | Bidding | Neural bid-only/joint PPO and counterfactual tools implemented; strength to evaluate | [multi-phase PPO](multiphase_selfplay.md), [counterfactuals](counterfactual_bidding.md) |
 | 10 | Special contracts (Nello) | IDs reserved | `actions.py` IDs 55–57 |
@@ -135,6 +135,24 @@ Compare, at equal training budget:
 Measure belief log-loss on true deals, arena score per training step, and
 oracle regret. The encoder's `voids` slice is a hand-crafted inference feature;
 zero it to ablate.
+
+Implemented in `texas42/belief.py` ([belief modelling](belief.md)):
+
+- Hard constraints (hand sizes, revealed voids) and **exact** world counts and
+  per-domino marginals via a small DP. Exact uniform sampling, and full
+  enumeration for small belief sets. Every world is replayed through the engine.
+- Optional policy-likelihood weighting (Bayes over observed actions), using the
+  new pure `ActionProbabilities` agent query, with ε-softening and an
+  effective-sample-size diagnostic.
+- Rollouts from index-chosen decision branches until a trick, phase or hand ends.
+- Paired PIMC estimates of expected points per legal action, with a leaf hook
+  for a future perfect-information oracle (kept separate from this module).
+
+Observed so far: deterministic Heuristic likelihoods collapse the effective
+sample size to about 1 by trick 3–4, so policy-weighted beliefs need softer
+models or resampling. Next: a PIMC `Agent` wrapper and duplicate-arena
+comparisons against HHH; uniform vs policy belief log-loss on logged deals
+(`TrainingCollector(include_initial_deal=True)`); then learned beliefs (B/C).
 
 ### 8. Partnership behavior
 

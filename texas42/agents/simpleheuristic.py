@@ -42,6 +42,15 @@ class HeuristicAgent:
 
         return action
 
+    def action_probabilities(self, obs) -> dict[int, float]:
+        """Pure ActionProbabilities query: this policy is deterministic, so one-hot.
+
+        act() reads only obs and the assigned seat (no RNG, no memory), so
+        calling it here is side-effect free. Belief weighting must soften this
+        one-hot distribution; see texas42.belief.policy_likelihood.
+        """
+        return {self.act(obs): 1.0}
+
     # ---------- Helpers ----------
 
     def _hand(self, obs):

@@ -26,3 +26,12 @@ class RandomAgent:
         if not obs.legal_action_ids:
             raise ValueError('Observation has no legal actions')
         return self._rng.choice(obs.legal_action_ids)
+
+    def action_probabilities(self, obs: Observation) -> dict[int, float]:
+        """Pure ActionProbabilities query: uniform over legal IDs, no RNG draw."""
+        if self._seat != obs.seat:
+            raise RuntimeError('Reset this agent for the acting seat before use')
+        if not obs.legal_action_ids:
+            raise ValueError('Observation has no legal actions')
+        share = 1.0 / len(obs.legal_action_ids)
+        return {action_id: share for action_id in obs.legal_action_ids}
