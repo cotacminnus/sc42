@@ -7,19 +7,22 @@ engine generates moves, advances tricks, and scores the hand.
 from __future__ import annotations
 
 from copy import copy, deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
+import atexit
 import math
+from multiprocessing.shared_memory import SharedMemory
 from time import monotonic
 from typing import Callable, Literal, Sequence
 
-from .actions import ACTION_REGISTRY, TRUMP_ACTIONS
+from .actions import ACTION_REGISTRY, PLAY_ACTIONS, TRUMP_ACTIONS
 from .arena import contract_decided
 from .episodes import EpisodeState
 from .models import Bid, Contract, ContractKind, Domino, Trump
 from .parallel import AUTO_WORKER_CAP, OrderedPool, resolve_workers
 from .phases import Phase
 from .rulesets import RULESET_ID, validate_ruleset
+from .rules import is_trump, led_suit, suit_rank, trick_winner
 from .state import HandState
 
 
@@ -70,6 +73,28 @@ class ActionValue(ValueBounds):
         return 'exact' if self.exact else 'unresolved'
 
 
+MoveOrdering = Literal['none', 'heuristic', 'tt', 'combined']
+
+
+def _validate_ordering(ordering: str) -> None:
+    if ordering not in ('none', 'heuristic', 'tt', 'combined'):
+        raise ValueError('move_ordering must be none, heuristic, tt, or combined')
+
+
+@dataclass(frozen=True, slots=True)
+class SearchStatistics:
+    alpha_beta_cutoffs: int = 0
+    tt_cutoffs: int = 0
+    score_bound_cutoffs: int = 0
+    ordering_calls: int = 0
+
+    def __add__(self, other: SearchStatistics) -> SearchStatistics:
+        return SearchStatistics(self.alpha_beta_cutoffs + other.alpha_beta_cutoffs,
+                                self.tt_cutoffs + other.tt_cutoffs,
+                                self.score_bound_cutoffs + other.score_bound_cutoffs,
+                                self.ordering_calls + other.ordering_calls)
+
+
 @dataclass(frozen=True, slots=True)
 class OracleResult(ValueBounds):
     status: Literal['exact', 'budget_exceeded'] = 'budget_exceeded'
@@ -83,6 +108,7 @@ class OracleResult(ValueBounds):
     nodes: int = 0
     cache_hits: int = 0
     elapsed_seconds: float = 0.0
+    statistics: SearchStatistics = field(default=SearchStatistics(), compare=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -161,6 +187,15 @@ class DealAnalysis:
     nodes: int
     cache_hits: int
     elapsed_seconds: float
+    output: Literal['all_action_values', 'maximum_contract'] = 'all_action_values'
+    statistics: SearchStatistics = field(default=SearchStatistics(), compare=False)
+    task_status_counts: tuple[tuple[str, int], ...] = ()
+
+    @property
+    def requested_output_complete(self) -> bool:
+        if self.output == 'maximum_contract':
+            return all(b.contract_exact for b in self.bidders)
+        return self.all_alternative_values_complete
 
     @property
     def status(self) -> Literal['exact', 'budget_exceeded']:
@@ -182,6 +217,7 @@ class _Entry:
     value: int
     flag: _Flag
     domain: ValueBounds = ValueBounds()
+    preferred_action: int | None = None
 
     @property
     def bounds(self) -> ValueBounds:
@@ -329,10 +365,30 @@ def _choice_proof(values: Sequence[ValueBounds], *, maximizing: bool = True
     return bounds, next(iter(proven), None), tuple(proven) if complete else None
 
 
+def _move_priority(state: HandState, action: int) -> tuple:
+    """Ordering only: favor this actor's team, never estimate a search leaf.
+
+    Partial winners are provisional. Feeding counters to a winning partnership
+    and shedding cheap losers are hints, not claims that a trick is secured.
+    All suit, trump and winner comparisons are delegated to the rule functions.
+    """
+    domino = PLAY_ACTIONS[action]
+    rank = suit_rank(domino, led_suit(domino, state.trump))
+    strength = rank[0] * 8 + rank[1]
+    trump = is_trump(domino, state.trump)
+    if not state.trick:
+        return (strength, int(trump), -domino.count_value)
+    winner = trick_winner([*state.trick, (state.seat, domino)], state.trump)
+    stake = 1 + sum(d.count_value for _, d in state.trick) + domino.count_value
+    own = winner % 2 == state.seat % 2
+    return (stake if own else -stake, -int(trump), -strength)
+
+
 class _Search:
     def __init__(self, limits: SearchLimits, start: float, *,
                  objective: Literal['contract_success', 'final_points'] = 'contract_success',
-                 reference_team: int | None = None):
+                 reference_team: int | None = None, move_ordering: MoveOrdering = 'none',
+                 stop_check: Callable[[], bool] | None = None):
         if objective not in ('contract_success', 'final_points'):
             raise ValueError('Unknown oracle objective')
         if reference_team is not None and (type(reference_team) is not int or reference_team not in (0, 1)):
@@ -340,6 +396,8 @@ class _Search:
         if objective == 'contract_success' and reference_team is not None:
             raise ValueError('Contract success always uses the bidding team')
         self.objective = objective
+        _validate_ordering(move_ordering)
+        self.move_ordering = move_ordering
         self.reference_team = reference_team
         self.domain = ValueBounds(0, 42) if objective == 'final_points' else ValueBounds()
         self.limits = limits
@@ -347,8 +405,30 @@ class _Search:
         self.nodes = 0
         self.cache_hits = 0
         self.exhausted = False
+        self.cancelled = False
+        self.stop_check = stop_check
+        self.alpha_beta_cutoffs = 0
+        self.tt_cutoffs = 0
+        self.score_bound_cutoffs = 0
+        self.ordering_calls = 0
         # Insertion-ordered dict, FIFO eviction. Survival is never required for correctness.
         self.cache: dict[tuple, _Entry] = {}
+
+    @property
+    def statistics(self) -> SearchStatistics:
+        return SearchStatistics(self.alpha_beta_cutoffs, self.tt_cutoffs,
+                                self.score_bound_cutoffs, self.ordering_calls)
+
+    def ordered_actions(self, state: HandState, preferred: int | None = None) -> tuple[int, ...]:
+        actions = state.legal_action_ids()
+        if len(actions) < 2 or self.move_ordering == 'none':
+            return actions
+        self.ordering_calls += 1
+        if self.move_ordering in ('heuristic', 'combined'):
+            actions = tuple(sorted(actions, key=lambda a: (*(-v for v in _move_priority(state, a)), a)))
+        if self.move_ordering in ('tt', 'combined') and preferred in actions:
+            actions = (preferred, *(a for a in actions if a != preferred))
+        return actions
 
     def team(self, state: HandState) -> int:
         return state.contract.bidder % 2 if self.reference_team is None else self.reference_team
@@ -371,19 +451,25 @@ class _Search:
                 or (self.deadline is not None and monotonic() >= self.deadline)):
             self.exhausted = True
             return False
+        # Shared proof flags are monotone, coordinator-owned ordering hints for
+        # cancellation only. Stale reads can waste work, never establish proofs.
+        if self.stop_check is not None and self.nodes % 128 == 0 and self.stop_check():
+            self.exhausted = self.cancelled = True
+            return False
         self.nodes += 1
         return True
 
-    def store(self, key: tuple, bounds: ValueBounds, alpha: int, beta: int) -> None:
+    def store(self, key: tuple, bounds: ValueBounds, alpha: int, beta: int,
+              preferred_action: int | None = None) -> None:
         if self.exhausted or not self.limits.max_cache_entries:
             return
         # Classify against the caller's original window, before TT tightening.
         if bounds.exact:
-            entry = _Entry(bounds.lower, _Flag.EXACT, self.domain)
+            entry = _Entry(bounds.lower, _Flag.EXACT, self.domain, preferred_action)
         elif bounds.lower >= beta:
-            entry = _Entry(bounds.lower, _Flag.LOWER_BOUND, self.domain)
+            entry = _Entry(bounds.lower, _Flag.LOWER_BOUND, self.domain, preferred_action)
         elif bounds.upper <= alpha:
-            entry = _Entry(bounds.upper, _Flag.UPPER_BOUND, self.domain)
+            entry = _Entry(bounds.upper, _Flag.UPPER_BOUND, self.domain, preferred_action)
         else:
             return
         if key not in self.cache and len(self.cache) >= self.limits.max_cache_entries:
@@ -398,6 +484,7 @@ class _Search:
         beta = self.domain.upper + 1 if beta is None else beta
         decided = self.decided_bounds(state)
         if decided is not None:
+            self.score_bound_cutoffs += 1
             return decided
         original_alpha, original_beta = alpha, beta
         key = _state_key(state, self.objective, self.reference_team)
@@ -408,12 +495,19 @@ class _Search:
             prior = ValueBounds(max(prior.lower, cached.lower), min(prior.upper, cached.upper))
             alpha, beta = max(alpha, prior.lower), min(beta, prior.upper)
             if prior.exact or alpha >= beta:
+                self.tt_cutoffs += 1
                 return prior
         maximizing = state.seat % 2 == self.team(state)
-        actions = state.legal_action_ids()  # Stable global-ID ordering only.
+        actions = self.ordered_actions(state, entry.preferred_action if entry is not None else None)
         values = []
+        preferred = None
+        best = None
         for action in actions:
-            values.append(self.search(_child(state, action), alpha, beta))
+            value = self.search(_child(state, action), alpha, beta)
+            values.append(value)
+            candidate = value.lower if maximizing else value.upper
+            if best is None or (candidate > best if maximizing else candidate < best):
+                best, preferred = candidate, action
             bounds = _combine(values, maximizing=maximizing, complete=len(values) == len(actions),
                               unknown=prior)
             bounds = ValueBounds(max(bounds.lower, prior.lower), min(bounds.upper, prior.upper))
@@ -423,13 +517,35 @@ class _Search:
                 beta = min(beta, bounds.upper)
             # The utility domain itself can prove an extreme before all moves.
             if bounds.exact or alpha >= beta or self.exhausted:
+                if len(values) < len(actions):
+                    if bounds.exact:
+                        self.score_bound_cutoffs += 1
+                    elif alpha >= beta:
+                        self.alpha_beta_cutoffs += 1
                 break
-        self.store(key, bounds, original_alpha, original_beta)
+        self.store(key, bounds, original_alpha, original_beta, preferred)
         return bounds
 
 
+def _contract_search(state: HandState, search: _Search) -> ValueBounds:
+    """Refine integer point bounds only until their ordinary bid classes agree.
+
+    First ask whether 42 is forceable; subsequent unit-width integer windows
+    bisect the remaining bid range. Every query uses the same node counter,
+    deadline and TT. Below 30, exact point utility is deliberately unnecessary.
+    A fail-high/low is retained as a bound, never as an exact score.
+    """
+    bounds = search.initial_bounds(state)
+    while _makeable_bid(bounds.lower) != _makeable_bid(bounds.upper) and not search.exhausted:
+        threshold = 42 if bounds.upper == 42 else max(30, (bounds.lower + bounds.upper + 1) // 2)
+        proof = search.search(state, alpha=threshold - 1, beta=threshold)
+        bounds = ValueBounds(max(bounds.lower, proof.lower), min(bounds.upper, proof.upper))
+    return bounds
+
+
 def solve(full_state: HandState, *, output: Literal['position_value', 'all_action_values'] =
-          'all_action_values', limits: SearchLimits | None = None, workers: int = 1) -> OracleResult:
+          'all_action_values', limits: SearchLimits | None = None, workers: int = 1,
+          move_ordering: MoveOrdering = 'none') -> OracleResult:
     """Solve a legal full state without mutating it or changing policy inputs.
 
     status refers to the requested output: position_value can finish with some
@@ -439,12 +555,13 @@ def solve(full_state: HandState, *, output: Literal['position_value', 'all_actio
     Time includes input copying/validation and is checked between search nodes.
     workers=1 preserves sequential execution; more workers split root children
     into independent spawned searches under the same position limits.
+    move_ordering changes traversal only; reported root rows remain canonical.
     """
     start = monotonic()
     if output not in ('position_value', 'all_action_values'):
         raise ValueError('output must be position_value or all_action_values')
     state = _prepare_state(full_state)
-    search = _Search(limits if limits is not None else SearchLimits(), start)
+    search = _Search(limits if limits is not None else SearchLimits(), start, move_ordering=move_ordering)
     count = min(AUTO_WORKER_CAP, resolve_workers(workers, len(state.legal_action_ids())))
     if count > 1 and _budget_available(search):
         return _parallel_root(state, search, output=output, start=start, workers=count)
@@ -453,7 +570,8 @@ def solve(full_state: HandState, *, output: Literal['position_value', 'all_actio
 
 def solve_points(full_state: HandState, *, output: Literal['position_value', 'all_action_values'] =
                  'all_action_values', limits: SearchLimits | None = None,
-                 reference_team: int | None = None, workers: int = 1) -> OracleResult:
+                 reference_team: int | None = None, workers: int = 1,
+                 move_ordering: MoveOrdering = 'none') -> OracleResult:
     """Maximum guaranteed final points for a fixed trump, using the shared search.
 
     The reference defaults to the bidding partnership. Unlike solve(), making
@@ -465,7 +583,7 @@ def solve_points(full_state: HandState, *, output: Literal['position_value', 'al
         raise ValueError('output must be position_value or all_action_values')
     state = _prepare_state(full_state)
     search = _Search(limits if limits is not None else SearchLimits(), start,
-                     objective='final_points', reference_team=reference_team)
+                     objective='final_points', reference_team=reference_team, move_ordering=move_ordering)
     count = min(AUTO_WORKER_CAP, resolve_workers(workers, len(state.legal_action_ids())))
     if count > 1 and _budget_available(search):
         return _parallel_root(state, search, output=output, start=start, workers=count)
@@ -487,6 +605,7 @@ def _solve_state(state: HandState, search: _Search, *, output: str, start: float
     if search.enter():
         decided = search.decided_bounds(state)
         if decided is not None:
+            search.score_bound_cutoffs += 1
             bounds = decided
             rows = [ActionValue(decided.lower, decided.upper, action) for action in actions]
         else:
@@ -523,7 +642,7 @@ def _root_result(state: HandState, search: _Search, rows: list[ActionValue], bou
                         optimal_action=optimal, optimal_actions=optimal_actions,
                         action_values=tuple(rows), all_action_values_complete=complete,
                         nodes=search.nodes, cache_hits=search.cache_hits,
-                        elapsed_seconds=monotonic() - start)
+                        elapsed_seconds=monotonic() - start, statistics=search.statistics)
 
 
 def _play_start(deal: HandState, bidder: int, trump: Trump) -> HandState:
@@ -565,11 +684,14 @@ class DealProgress:
     bidder: int
     trump: Trump
     action_id: int
-    status: Literal['exact', 'node_limit', 'time_limit', 'not_started', 'cancelled']
+    status: Literal['exact', 'contract_proven', 'node_limit', 'time_limit', 'not_started',
+                    'cancelled', 'skipped_proven', 'cancelled_proven', 'cancelled_deadline']
     nodes: int
     cache_hits: int
     elapsed_seconds: float
     global_elapsed_seconds: float
+    bidder_contract_proven: bool = False
+    maximum_contract: Bid | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -580,19 +702,29 @@ class _LeadResult:
     elapsed_seconds: float = 0.0
     status: str = 'not_started'
     exhausted: bool = False
+    statistics: SearchStatistics = SearchStatistics()
 
 
 def analyze_deal(hands: Sequence[Sequence[Domino]], *, ruleset_id: str = RULESET_ID,
                  limits: SearchLimits | None = None, workers: int = 1,
-                 progress: Callable[[DealProgress], None] | None = None) -> DealAnalysis:
+                 progress: Callable[[DealProgress], None] | None = None,
+                 move_ordering: MoveOrdering = 'none',
+                 output: Literal['all_action_values', 'maximum_contract'] = 'all_action_values',
+                 proof_cancellation: bool = True) -> DealAnalysis:
     """Analyze 252 independent opening-lead continuations, silently by default.
 
     Each lead receives max_nodes; time_seconds is one global cooperative limit,
     including validation, startup and shutdown. The continuation root counts as
     one node. Worker-local caches share the aggregate max_cache_entries cap.
     Progress runs in the coordinator as tasks settle; final ordering is canonical.
+    maximum_contract uses threshold proofs and optional bidder-level stopping;
+    requested_output_complete distinguishes that goal from legacy exact status.
     """
     start = monotonic()
+    if output not in ('all_action_values', 'maximum_contract'):
+        raise ValueError('output must be all_action_values or maximum_contract')
+    if type(proof_cancellation) is not bool:
+        raise ValueError('proof_cancellation must be a boolean')
     session = EpisodeState('hand', 7, 0, ruleset_id)
     try:
         detached = [list(hand) for hand in hands]
@@ -600,37 +732,94 @@ def analyze_deal(hands: Sequence[Sequence[Domino]], *, ruleset_id: str = RULESET
         raise ValueError('A deal requires four hands of seven unique dominoes') from error
     session.deal(detached)
     deal = session.hand
-    search = _Search(limits if limits is not None else SearchLimits(), start, objective='final_points')
+    search = _Search(limits if limits is not None else SearchLimits(), start, objective='final_points',
+                     move_ordering=move_ordering)
     keys = [(seat, trump, action) for seat in range(4) for trump in TRUMP_ACTIONS
             for action in _play_start(deal, seat, trump).legal_action_ids()]
     count = min(AUTO_WORKER_CAP, resolve_workers(workers, len(keys)))
     config = _WorkerConfig(deal, 'deal', 'final_points', None, start,
-                           search.limits.time_seconds, search.limits.max_cache_entries // count)
+                           search.limits.time_seconds, search.limits.max_cache_entries // count,
+                           move_ordering, output)
     tasks = [(key, search.limits.max_nodes) for key in keys]
     results = {}
+    statistics = SearchStatistics()
+    status_counts = {}
+    rows = [ActionValue(0, 42, action) for _, _, action in keys]
+    proven = [False] * 4
+    stop_memory = None
+
+    order = list(range(len(keys)))
+    if output == 'maximum_contract':
+        # Deterministic, bidder-interleaved priority. Concentrated trumps and
+        # strong leads are scheduling hints only; every legal choice remains.
+        priorities = []
+        for seat in range(4):
+            ranked = []
+            for trump in TRUMP_ACTIONS:
+                state = _play_start(deal, seat, trump)
+                concentration = sum(is_trump(d, trump) for d in deal.hands[seat])
+                for action in state.legal_action_ids():
+                    index = keys.index((seat, trump, action))
+                    ranked.append(((-concentration, *(-v for v in _move_priority(state, action)), index), index))
+            priorities.append([index for _, index in sorted(ranked)])
+        order = [ranked[i] for i in range(63) for ranked in priorities]
+    tasks = [tasks[i] for i in order]
+
+    def skip(index):
+        return ('skipped_proven' if output == 'maximum_contract' and proof_cancellation
+                and proven[keys[order[index]][0]] else None)
 
     def settle(index, result, status):
+        nonlocal statistics
         seat, trump, action = keys[index]
         if result is None:
+            if status in ('not_started', 'cancelled'):
+                status = 'cancelled_deadline'
             result = _LeadResult(ActionValue(0, 42, action), status=status)
+        elif result.status == 'not_started':
+            result = replace(result, status='cancelled_deadline')
         results[index] = result.action
+        rows[index] = result.action
         search.nodes += result.nodes
         search.cache_hits += result.cache_hits
+        statistics += result.statistics
+        status_counts[result.status] = status_counts.get(result.status, 0) + 1
+        bidder_rows = rows[seat * 63:(seat + 1) * 63]
+        lower, upper = max(a.lower for a in bidder_rows), max(a.upper for a in bidder_rows)
+        newly_proven = not proven[seat] and _makeable_bid(lower) == _makeable_bid(upper)
+        if newly_proven:
+            proven[seat] = True
+            if stop_memory is not None:
+                stop_memory.buf[seat] = 1
         if progress is not None:
             progress(DealProgress(len(results), len(keys), seat, trump, action, result.status,
                                   result.nodes, result.cache_hits, result.elapsed_seconds,
-                                  monotonic() - start))
+                                  monotonic() - start, newly_proven,
+                                  _makeable_bid(lower) if proven[seat] else None))
 
     if count > 1 and _budget_available(search):
-        with OrderedPool(count, initializer=_initialize_oracle, initargs=(config,)) as pool:
-            for index, result, status in pool.iter_completed(_oracle_worker, tasks, deadline=search.deadline):
-                settle(index, result, status)
+        try:
+            if output == 'maximum_contract' and proof_cancellation:
+                stop_memory = SharedMemory(create=True, size=4)
+                stop_memory.buf[:] = bytes(4)
+                config = replace(config, stop_name=stop_memory.name)
+            with OrderedPool(count, initializer=_initialize_oracle, initargs=(config,)) as pool:
+                scheduling = {'skip': skip} if output == 'maximum_contract' and proof_cancellation else {}
+                for index, result, status in pool.iter_completed(_oracle_worker, tasks,
+                                                                deadline=search.deadline, **scheduling):
+                    settle(order[index], result, status)
+        finally:
+            if stop_memory is not None:
+                stop_memory.close()
+                stop_memory.unlink()
     else:
         for index, task in enumerate(tasks):
             if search.deadline is not None and monotonic() >= search.deadline:
-                settle(index, None, 'not_started')
+                settle(order[index], None, 'not_started')
+            elif skip(index) is not None:
+                settle(order[index], None, 'skipped_proven')
             else:
-                settle(index, _search_task(config, task, search.cache), 'completed')
+                settle(order[index], _search_task(config, task, search.cache), 'completed')
     bidders = []
     offset = 0
     for seat in range(4):
@@ -644,7 +833,8 @@ def analyze_deal(hands: Sequence[Sequence[Domino]], *, ruleset_id: str = RULESET
                                         tuple(rows[i].action_id for i in choices) if choices is not None else None,
                                         rows, all(row.exact for row in rows)))
         bidders.append(_bidder_analysis(seat, trumps))
-    return DealAnalysis(tuple(bidders), search.nodes, search.cache_hits, monotonic() - start)
+    return DealAnalysis(tuple(bidders), search.nodes, search.cache_hits, monotonic() - start,
+                        output=output, statistics=statistics, task_status_counts=tuple(sorted(status_counts.items())))
 
 
 def _budget_available(search: _Search) -> bool:
@@ -663,26 +853,34 @@ class _WorkerConfig:
     start: float
     time_seconds: float | None
     cache_entries: int
+    move_ordering: MoveOrdering = 'none'
+    output: Literal['all_action_values', 'maximum_contract'] = 'all_action_values'
+    stop_name: str | None = None
 
 
 _WORKER_CONFIG: _WorkerConfig | None = None
 _WORKER_CACHE: dict[tuple, _Entry] = {}
+_WORKER_STOP: SharedMemory | None = None
 
 
 def _initialize_oracle(config: _WorkerConfig) -> None:
-    global _WORKER_CONFIG, _WORKER_CACHE
+    global _WORKER_CONFIG, _WORKER_CACHE, _WORKER_STOP
     _WORKER_CONFIG = config
     _WORKER_CACHE = {}
+    _WORKER_STOP = SharedMemory(name=config.stop_name) if config.stop_name is not None else None
+    if _WORKER_STOP is not None:
+        atexit.register(_WORKER_STOP.close)
 
 
-def _search_task(config: _WorkerConfig, task: tuple, cache: dict) -> tuple | _LeadResult:
-    """Only the task boundary is parallel; minimax itself is unchanged."""
+def _search_task(config: _WorkerConfig, task: tuple, cache: dict, *, stop_flags=None) -> tuple | _LeadResult:
+    """Workers reuse the shared alpha-beta implementation and engine transitions."""
     key, allocation = task
     task_start = monotonic()
     limits = SearchLimits(config.time_seconds, allocation, config.cache_entries)
     reference_team = key[0] % 2 if config.mode == 'deal' else config.reference_team
     search = _Search(limits, config.start, objective=config.objective,
-                     reference_team=reference_team)
+                     reference_team=reference_team, move_ordering=config.move_ordering,
+                     stop_check=(lambda: bool(stop_flags[key[0]])) if stop_flags is not None else None)
     search.cache = cache
     if config.mode == 'deal':
         seat, trump, action = key
@@ -690,19 +888,33 @@ def _search_task(config: _WorkerConfig, task: tuple, cache: dict) -> tuple | _Le
         # not construct or enter its game tree after that absolute deadline.
         if search.deadline is not None and task_start >= search.deadline:
             return _LeadResult(ActionValue(0, 42, action), status='not_started')
+        if stop_flags is not None and stop_flags[seat]:
+            return _LeadResult(ActionValue(0, 42, action), status='skipped_proven')
         state = _child(_play_start(config.state, seat, trump), action)
-        bounds = search.search(state)
+        bounds = (_contract_search(state, search) if config.output == 'maximum_contract'
+                  else search.search(state))
         row = ActionValue(bounds.lower, bounds.upper, action, search.nodes > 0)
-        status = ('exact' if bounds.exact else 'node_limit'
-                  if allocation is not None and search.nodes >= allocation else 'time_limit')
+        if bounds.exact:
+            status = 'exact'
+        elif config.output == 'maximum_contract' and _makeable_bid(bounds.lower) == _makeable_bid(bounds.upper):
+            status = 'contract_proven'
+        elif search.cancelled:
+            status = 'cancelled_proven' if search.nodes else 'skipped_proven'
+        elif allocation is not None and search.nodes >= allocation:
+            status = 'node_limit'
+        else:
+            status = 'time_limit'
         return _LeadResult(row, search.nodes, search.cache_hits, monotonic() - task_start,
-                           status, search.exhausted)
+                           status, search.exhausted, search.statistics)
     bounds = search.search(_child(config.state, key))
-    return ActionValue(bounds.lower, bounds.upper, key, search.nodes > 0), search.nodes, search.cache_hits
+    return (ActionValue(bounds.lower, bounds.upper, key, search.nodes > 0), search.nodes,
+            search.cache_hits, search.statistics)
 
 
 def _oracle_worker(task: tuple) -> tuple | _LeadResult:
     try:
+        if _WORKER_STOP is not None:
+            return _search_task(_WORKER_CONFIG, task, _WORKER_CACHE, stop_flags=_WORKER_STOP.buf)
         return _search_task(_WORKER_CONFIG, task, _WORKER_CACHE)
     except Exception as error:
         raise RuntimeError(f'Oracle {_WORKER_CONFIG.mode} task {task[0]!r} failed: {error}') from error
@@ -717,7 +929,7 @@ def _parallel_tasks(state: HandState, search: _Search, keys: Sequence, *, mode: 
     """
     config = _WorkerConfig(state, mode, search.objective, search.reference_team,
                            start, search.limits.time_seconds,
-                           search.limits.max_cache_entries // workers)
+                           search.limits.max_cache_entries // workers, search.move_ordering)
     remaining = (None if search.limits.max_nodes is None else
                  search.limits.max_nodes - search.nodes)
     results = []
@@ -735,7 +947,11 @@ def _parallel_tasks(state: HandState, search: _Search, keys: Sequence, *, mode: 
                 # same zero-budget logic, including any awarded-point bounds.
                 result = (next(completed) if allocation != 0 else
                           _search_task(config, (key, 0), {}))
-                results.append(result)
+                search.alpha_beta_cutoffs += result[3].alpha_beta_cutoffs
+                search.tt_cutoffs += result[3].tt_cutoffs
+                search.score_bound_cutoffs += result[3].score_bound_cutoffs
+                search.ordering_calls += result[3].ordering_calls
+                results.append(result[:3])
                 if remaining is not None:
                     remaining -= result[1]
     return results
@@ -750,6 +966,7 @@ def _parallel_root(state: HandState, search: _Search, *, output: str, start: flo
     if search.enter():
         decided = search.decided_bounds(state)
         if decided is not None:
+            search.score_bound_cutoffs += 1
             bounds = decided
             rows = [ActionValue(decided.lower, decided.upper, action) for action in actions]
         elif _budget_available(search):

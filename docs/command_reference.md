@@ -51,6 +51,13 @@ python -m examples.endgame_oracle --seed 0 --remaining 3 --samples 100 \
 python -m examples.endgame_oracle --objective final_points --seed 1 --remaining 2
 # Default complete deal: 252 trees, 1048576 nodes/lead, 1800 seconds total
 python -m examples.endgame_oracle --mode deal --seed 42 --workers 8
+# Maximum-contract proof search with ordering and cancellation
+python -m examples.endgame_oracle --mode deal --seed 42 --workers 4 \
+  --output maximum_contract --move-ordering combined --max-nodes 2000 --time-seconds 10
+# Threshold-search ablation: classify every lead, without bidder cancellation
+python -m examples.endgame_oracle --mode deal --seed 42 --workers 4 \
+  --output maximum_contract --move-ordering combined --no-proof-cancellation \
+  --max-nodes 2000 --time-seconds 10
 # Smaller bounded smoke run: nodes per opening lead, one global time limit
 python -m examples.endgame_oracle --mode deal --seed 42 \
   --max-nodes 10000 --time-seconds 1
@@ -98,15 +105,28 @@ cap (at most 264,241,152 with defaults). Worker-local caches together stay withi
 `--max-cache-entries`.
 
 The CLI flushes a live `[completed/252]` line as each task settles, with bidder,
-trump, opening domino, `exact`/`node_limit`/`time_limit`/`not_started`/`cancelled`,
+trump, opening domino, `exact`/`contract_proven`/`node_limit`/`time_limit`/
+`skipped_proven`/`cancelled_proven`/`cancelled_deadline`,
 actual nodes, task runtime and global elapsed time. Explicitly skipped tasks
 count as settled without implying they were searched. Progress can arrive out
 of order; the final tables retain canonical seat/trump/action-ID order. The
 header reports requested/resolved workers and limits. Search statistics and
-proof summaries follow progress. Time limits are cooperative; a transition or
+proof summaries follow progress, together with search-cutoff counters, settled
+task counts, and requested-output completeness. Time limits are cooperative; a transition or
 process shutdown can cause a small overrun. Endgame mode retains its existing
 per-position node/time semantics. See [parallel details](endgame_oracle.md#parallel-execution)
 and [deal proof semantics](endgame_oracle.md#complete-deal-bidding-benchmark).
+
+`--output maximum_contract` uses exact point-threshold proofs and stops a bidder's
+unnecessary alternatives once its maximum bid classification is established.
+`--output all_action_values` retains exhaustive alternative analysis subject to
+budgets and never skips work after a bid proof. These are different completion
+obligations: the new `Requested output complete` line distinguishes them from
+the legacy status requiring exact points and the complete optimal-pair set.
+Proven bid classes, exact point values and identified ties are reported separately.
+`--move-ordering combined` can help larger positions, but remains opt-in because
+some workloads slow down. See [proof and ordering semantics](endgame_oracle.md#maximum-contract-proof-mode)
+and the [optimization ablations](endgame_oracle.md#ordering-and-proof-search-ablations).
 
 | Argument | Default | Meaning |
 | --- | --- | --- |
@@ -117,7 +137,9 @@ and [deal proof semantics](endgame_oracle.md#complete-deal-bidding-benchmark).
 | `--remaining` | 3 | Endgame only: 1–7 dominoes per player at the selected trick boundary. |
 | `--partial-plays` | 0 | Endgame only: advance 0–3 additional legal moves after that boundary. |
 | `--policy` | HHR | Endgame only: existing variant HHH, HHR, HRR, CHH, CRR, RRR. |
-| `--output` | all_action_values | Endgame only: all legal root action values, or position_value for root outcome plus one proven optimal action. |
+| `--output` | all_action_values | Endgame: all_action_values or position_value. Deal: all_action_values (exact point-analysis request) or maximum_contract (bid-classification proof request). |
+| `--move-ordering` | none | none, heuristic, tt, or combined. Only traversal changes; reported IDs remain canonical. |
+| `--no-proof-cancellation` | Off | Deal maximum_contract ablation: classify every lead without stopping other tasks after a bidder proof. Ignored for exhaustive/endgame requests. |
 | `--max-nodes` | 1048576 | Nonnegative nodes per opening-lead continuation in deal mode; per whole endgame position otherwise. |
 | `--time-seconds` | 1800 | Nonnegative finite seconds for the entire deal analysis, or one endgame position. |
 | `--max-cache-entries` | 100000 | Nonnegative aggregate table capacity; parallel workers each get floor(capacity/workers). Zero disables caching. |

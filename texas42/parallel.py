@@ -166,13 +166,16 @@ class OrderedPool:
             self.executor.shutdown(wait=True, cancel_futures=True)
             self.executor = None
 
-    def iter_completed(self, function, tasks, *, deadline=None):
+    def iter_completed(self, function, tasks, *, deadline=None, skip=None):
         """Yield (index, value, status) as bounded tasks settle.
 
         Status is completed, cancelled, or not_started; the latter two have no
         value. At most workers futures are in flight. An absolute monotonic
         deadline stops submission and cancels queued work. Running functions
         must cooperate with that deadline; they are collected before shutdown.
+        Optional skip(index) returns a settlement status for unnecessary work.
+        Completed futures are always collected; queued futures are cancelled
+        when possible. Running functions must implement cooperative stopping.
         """
         iterator = iter(enumerate(tasks))
         pending = {}
@@ -191,6 +194,12 @@ class OrderedPool:
                     for index, _ in iterator:
                         yield index, None, 'not_started'
                 else:
+                    if skip is not None:
+                        for future, index in list(pending.items()):
+                            reason = None if future.done() else skip(index)
+                            if reason is not None and future.cancel():
+                                del pending[future]
+                                yield index, None, reason
                     while not submitted_all and len(pending) < self.workers:
                         if deadline is not None and monotonic() >= deadline:
                             break
@@ -199,6 +208,10 @@ class OrderedPool:
                         except StopIteration:
                             submitted_all = True
                             break
+                        reason = skip(index) if skip is not None else None
+                        if reason is not None:
+                            yield index, None, reason
+                            continue
                         if self.executor is None:
                             yield index, function(task), 'completed'
                             break

@@ -200,7 +200,7 @@ class ParallelOracleTests(unittest.TestCase):
         expired = replace(config, start=monotonic() - 10, time_seconds=1)
         with OrderedPool(2, initializer=_initialize_oracle, initargs=(expired,)) as pool:
             results = pool.map(_oracle_worker, tasks)
-        self.assertTrue(all(nodes == 0 for _, nodes, _ in results))
+        self.assertTrue(all(nodes == 0 for _, nodes, _, _ in results))
         with OrderedPool(2, initializer=_initialize_oracle, initargs=(config,)) as pool:
             with self.assertRaisesRegex(RuntimeError, 'Oracle root task 99 failed'):
                 pool.map(_oracle_worker, [(99, 50), *tasks])
@@ -223,7 +223,7 @@ class ParallelOracleTests(unittest.TestCase):
                 # Exercise coordinator reservations with cheap completed tasks,
                 # leaving most of every allocation available for the next wave.
                 seen.append([allocation for _, allocation in tasks])
-                return [(oracle.ActionValue(1, 1, key, True), 1, 0) for key, _ in tasks]
+                return [(oracle.ActionValue(1, 1, key, True), 1, 0, oracle.SearchStatistics()) for key, _ in tasks]
 
         with patch('texas42.oracle.OrderedPool', InlinePool):
             results = _parallel_tasks(state, search, list(range(6)), mode='root', start=monotonic(), workers=2)
@@ -282,7 +282,7 @@ class ParallelOracleTests(unittest.TestCase):
                                       progress=events.append)
         self.assertEqual(worker.call_count, 1)
         self.assertEqual(result.nodes, 5)
-        self.assertEqual([e.status for e in events], ['node_limit'] + ['not_started'] * 251)
+        self.assertEqual([e.status for e in events], ['node_limit'] + ['cancelled_deadline'] * 251)
         self.assertTrue(all(not a.searched and (a.lower, a.upper) == (0, 42)
                             for b in result.bidders[1:] for t in b.trumps for a in t.action_values))
 
@@ -304,7 +304,7 @@ class ParallelOracleTests(unittest.TestCase):
             for team in (0, 1):
                 config = _WorkerConfig(state, 'root', 'final_points', team, monotonic(), None, 100)
                 for action in state.legal_action_ids():
-                    actual, _, _ = oracle._search_task(config, (action, None), {})
+                    actual, _, _, _ = oracle._search_task(config, (action, None), {})
                     truth = oracle.exhaustive_minimax(oracle._child(state, action),
                                                      objective='final_points', reference_team=team)
                     self.assertEqual(actual.value, truth)
@@ -359,7 +359,7 @@ class ParallelOracleTests(unittest.TestCase):
                                           progress=events.append)
         self.assertEqual(result.nodes, 0)
         self.assertEqual(len(events), 252)
-        self.assertTrue(all(e.status == 'not_started' for e in events))
+        self.assertTrue(all(e.status == 'cancelled_deadline' for e in events))
         self.assertEqual(result.elapsed_seconds, 2)
 
     def test_completion_scheduler_refills_before_slow_first_task_and_propagates_errors(self):

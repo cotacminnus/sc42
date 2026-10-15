@@ -96,6 +96,9 @@ def print_progress(event: DealProgress) -> None:
           f'Trump {trump_name(event.trump)} | Lead {PLAY_ACTIONS[event.action_id]} | '
           f'{event.status} | nodes={event.nodes} | {event.elapsed_seconds:.3f}s | '
           f'total={event.global_elapsed_seconds:.3f}s', flush=True)
+    if event.bidder_contract_proven:
+        contract = str(event.maximum_contract) if event.maximum_contract is not None else 'no makeable contract'
+        print(f'Bidder {event.bidder}: maximum contract proven ({contract})', flush=True)
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -111,7 +114,12 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument('--remaining', type=int, choices=range(1, 8), default=3)
     parser.add_argument('--partial-plays', type=int, choices=range(4), default=0)
     parser.add_argument('--policy', choices=tuple(VARIANTS), default='HHR')
-    parser.add_argument('--output', choices=('position_value', 'all_action_values'), default='all_action_values')
+    parser.add_argument('--output', choices=('position_value', 'all_action_values', 'maximum_contract'),
+                        default='all_action_values', help='Deal: all_action_values or maximum_contract; endgame: '
+                        'all_action_values or position_value')
+    parser.add_argument('--move-ordering', choices=('none', 'heuristic', 'tt', 'combined'), default='none')
+    parser.add_argument('--no-proof-cancellation', action='store_false', dest='proof_cancellation',
+                        help='Deal maximum_contract ablation: classify every lead without bidder cancellation')
     parser.add_argument('--max-nodes', type=int, default=defaults.max_nodes,
                         help='Nodes per opening lead in deal mode, per position otherwise (default: 1048576)')
     parser.add_argument('--time-seconds', type=float, default=defaults.time_seconds,
@@ -125,6 +133,8 @@ def main(argv: list[str] | None = None) -> None:
     if args.mode == 'deal':
         if args.samples != 1:
             parser.error('deal mode analyzes one complete deal; --samples must be 1')
+    elif args.output == 'maximum_contract':
+        parser.error('maximum_contract output requires --mode deal')
     try:
         resolve_workers(args.workers)
         limits = SearchLimits(args.time_seconds, args.max_nodes, args.max_cache_entries)
@@ -136,13 +146,23 @@ def main(argv: list[str] | None = None) -> None:
         deal = generate_schedule(1, seed, shaker=seed % 4)[0]
         hands = [[PLAY_ACTIONS[i] for i in hand] for hand in deal.hands]
         count = min(AUTO_WORKER_CAP, resolve_workers(args.workers, 252))
-        print('Starting oracle analysis\nSearch trees: 252')
+        output = 'maximum_contract' if args.output == 'maximum_contract' else 'all_action_values'
+        print(f'Starting oracle analysis: {output}\nSearch trees: 252')
+        print(f'Move ordering: {args.move_ordering}; proof cancellation: '
+              f'{output == "maximum_contract" and args.proof_cancellation}')
         print(f'Workers: {count}\nMaximum nodes per tree: {limits.max_nodes}\n'
               f'Maximum total time: {limits.time_seconds} seconds\n'
               f'Aggregate cache entries: {limits.max_cache_entries}', flush=True)
         print(f'Requested oracle workers: {args.workers}; resolved oracle workers: {count}; '
               'independent search tasks: 252', flush=True)
-        print_deal(hands, analyze_deal(hands, limits=limits, workers=args.workers, progress=print_progress))
+        result = analyze_deal(hands, limits=limits, workers=args.workers, progress=print_progress,
+                              move_ordering=args.move_ordering, output=output,
+                              proof_cancellation=args.proof_cancellation)
+        print_deal(hands, result)
+        print(f'Requested output complete: {result.requested_output_complete}; '
+              f'maximum contracts proven: {sum(b.contract_exact for b in result.bidders)}/4')
+        print('Settled tasks:', ', '.join(f'{status}={count}' for status, count in result.task_status_counts))
+        print(f'Search statistics: {result.statistics}')
         return
     print(f'Per-position limits: nodes={limits.max_nodes}, seconds={limits.time_seconds}; '
           f'aggregate cache entries={limits.max_cache_entries}')
@@ -163,9 +183,11 @@ def main(argv: list[str] | None = None) -> None:
         if args.samples == 1:
             print(f'Requested oracle workers: {args.workers}; resolved oracle workers: {count}; '
                   f'independent search tasks: {tasks}')
-        result = solver(state, output=args.output, limits=limits, workers=args.workers)
+        result = solver(state, output=args.output, limits=limits, workers=args.workers,
+                        move_ordering=args.move_ordering)
         results.append(result)
         if args.samples == 1:
+            print(f'Search statistics: {result.statistics}')
             print_position(state, result, objective=args.objective)
     if args.samples > 1:
         counts = [min(AUTO_WORKER_CAP, resolve_workers(args.workers, n)) for n in task_counts]
@@ -175,6 +197,7 @@ def main(argv: list[str] | None = None) -> None:
         print(f'{args.samples} positions; {undecided} initially undecided; requested output: {args.output}')
         print(f'Exact completion: {exact}/{args.samples} ({exact / args.samples:.1%})')
         print(f'All action values complete: {sum(r.all_action_values_complete for r in results)}/{args.samples}')
+        print('Search statistics:', sum((r.statistics for r in results), start=type(results[0].statistics)()))
         for label, values in (
                 ('Nodes', [r.nodes for r in results]),
                 ('Cache hits', [r.cache_hits for r in results]),
