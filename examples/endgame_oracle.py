@@ -10,6 +10,7 @@ from texas42.agents import VARIANTS, variant_factory
 from texas42.arena import generate_schedule
 from texas42.models import trump_name
 from texas42.oracle import DealAnalysis, OracleResult, SearchLimits, analyze_deal, solve, solve_points
+from texas42.parallel import AUTO_WORKER_CAP, resolve_workers
 from texas42.phases import Phase
 from texas42.players import format_hand
 from texas42.selfplay import observation_from_view
@@ -95,6 +96,8 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument('--seed', type=int,
                         help='Deal/policy seed; random when omitted, printed for reproduction')
     parser.add_argument('--mode', choices=('endgame', 'deal'), default='endgame')
+    parser.add_argument('--workers', type=int, default=1,
+                        help='Spawn workers: 1 sequential, 0 auto; at most eight and available CPUs')
     parser.add_argument('--objective', choices=('contract_success', 'final_points'), default='contract_success',
                         help='Endgame objective; deal mode always uses final points')
     parser.add_argument('--remaining', type=int, choices=range(1, 8), default=3)
@@ -118,6 +121,7 @@ def main(argv: list[str] | None = None) -> None:
         if args.time_seconds is None:
             args.time_seconds = 5.0
     try:
+        resolve_workers(args.workers)
         limits = SearchLimits(args.time_seconds, args.max_nodes, args.max_cache_entries)
     except ValueError as error:
         parser.error(str(error))
@@ -128,9 +132,13 @@ def main(argv: list[str] | None = None) -> None:
         hands = [[PLAY_ACTIONS[i] for i in hand] for hand in deal.hands]
         print(f'Whole-analysis limits: nodes={limits.max_nodes}, seconds={limits.time_seconds}, '
               f'cache entries={limits.max_cache_entries}; early combinations may consume the whole budget')
-        print_deal(hands, analyze_deal(hands, limits=limits))
+        count = min(AUTO_WORKER_CAP, resolve_workers(args.workers, 36))
+        print(f'Requested oracle workers: {args.workers}; resolved oracle workers: {count}; '
+              'independent search tasks: 36')
+        print_deal(hands, analyze_deal(hands, limits=limits, workers=args.workers))
         return
     results = []
+    task_counts = []
     undecided = 0
     for index in range(args.samples):
         state = generate_endgame(seed + index, args.remaining,
@@ -140,11 +148,20 @@ def main(argv: list[str] | None = None) -> None:
         undecided += (sum(state.points) < 42 if args.objective == 'final_points' else
                       state.points[team] < target and state.points[1 - team] <= 42 - target)
         solver = solve_points if args.objective == 'final_points' else solve
-        result = solver(state, output=args.output, limits=limits)
+        tasks = len(state.legal_action_ids())
+        task_counts.append(tasks)
+        count = min(AUTO_WORKER_CAP, resolve_workers(args.workers, tasks))
+        if args.samples == 1:
+            print(f'Requested oracle workers: {args.workers}; resolved oracle workers: {count}; '
+                  f'independent search tasks: {tasks}')
+        result = solver(state, output=args.output, limits=limits, workers=args.workers)
         results.append(result)
         if args.samples == 1:
             print_position(state, result, objective=args.objective)
     if args.samples > 1:
+        counts = [min(AUTO_WORKER_CAP, resolve_workers(args.workers, n)) for n in task_counts]
+        print(f'Requested oracle workers: {args.workers}; resolved oracle workers: '
+              f'{min(counts)}–{max(counts)}; independent search tasks: {sum(task_counts)}')
         exact = sum(result.status == 'exact' for result in results)
         print(f'{args.samples} positions; {undecided} initially undecided; requested output: {args.output}')
         print(f'Exact completion: {exact}/{args.samples} ({exact / args.samples:.1%})')

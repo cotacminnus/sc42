@@ -52,10 +52,22 @@ python -m examples.endgame_oracle --objective final_points --seed 1 --remaining 
 # Complete deal: ONE whole-analysis budget spans all four bidders and nine trumps
 python -m examples.endgame_oracle --mode deal --seed 42 \
   --max-nodes 10000 --time-seconds 1
+# Spawn multiple independent bidder/trump searches under ONE global budget
+python -m examples.endgame_oracle --mode deal --seed 42 --workers 4 \
+  --max-nodes 200000 --time-seconds 10
+# Optional independent root-action workers (startup often dominates tiny endgames)
+python -m examples.endgame_oracle --objective final_points --seed 42 \
+  --remaining 6 --workers 4 --max-nodes 1000000 --time-seconds 20
 # Small-endgame point benchmark; per-position limits
 python -m examples.endgame_oracle --objective final_points --seed 0 \
   --remaining 3 --samples 100 --max-nodes 100000 --time-seconds 2
 ```
+
+For the documented parallel smoke measurements, repeat the seed-42 six-domino
+recipe with `--remaining 2`, `3`, `4`, `6` and `--workers 1`, `2`, `4`, `8`.
+Repeat the 200,000-node deal recipe at those four worker counts. See
+[measured scaling and startup costs](endgame_oracle.md#parallelization-smoke-benchmark);
+small endgames are usually faster with one worker.
 
 No optional dependencies are required. The default HHR policies generate a
 reachable ordinary contract with heuristic bidding/trump and seeded random play.
@@ -75,12 +87,20 @@ proven trump/lead choices, completeness flags and aggregate statistics. All hand
 are visible. This is an open-hand benchmark, not a hidden-information bid
 recommendation; 42 points establishes a one-mark contract without optimizing
 mark stake. Unvisited choices stay unresolved. Early combinations can consume
-the whole budget. See [deal proof semantics](endgame_oracle.md#complete-deal-bidding-benchmark).
+the whole budget in sequential execution. Parallel execution reserves bounded
+allocations in canonical batches and reclaims unused nodes for later tasks;
+the whole-analysis budget is never multiplied by the number of workers. Caches
+are private and their aggregate entry count stays within `--max-cache-entries`.
+The CLI prints requested/resolved workers, eligible independent task count,
+aggregate nodes/cache hits, runtime and exact/unresolved results. Parallel startup
+is included in the one soft deadline. See [parallel details](endgame_oracle.md#parallel-execution)
+and [deal proof semantics](endgame_oracle.md#complete-deal-bidding-benchmark).
 
 | Argument | Default | Meaning |
 | --- | --- | --- |
 | `--seed` | Random | Integer deal/policy seed, printed for reproduction; samples use consecutive seeds. |
 | `--mode` | endgame | endgame or deal; deal analyzes all 36 bidder/trump combinations. |
+| `--workers` | 1 | 1 sequential; 0 auto; N requests up to N spawned CPU processes, limited by available CPUs, tasks and a maximum of 8. |
 | `--objective` | contract_success | Endgame: contract_success or final_points. Deal mode always uses final points. |
 | `--remaining` | 3 | Endgame only: 1–7 dominoes per player at the selected trick boundary. |
 | `--partial-plays` | 0 | Endgame only: advance 0–3 additional legal moves after that boundary. |
@@ -88,7 +108,7 @@ the whole budget. See [deal proof semantics](endgame_oracle.md#complete-deal-bid
 | `--output` | all_action_values | Endgame only: all legal root action values, or position_value for root outcome plus one proven optimal action. |
 | `--max-nodes` | Unset (endgame); 100000 (deal) | Nonnegative search-node budget: per endgame position, or whole deal analysis. |
 | `--time-seconds` | Unset (endgame); 5 (deal) | Nonnegative finite soft deadline, including validation: per endgame position, or whole deal analysis. |
-| `--max-cache-entries` | 100000 | Nonnegative table capacity; zero disables caching. |
+| `--max-cache-entries` | 100000 | Nonnegative aggregate table capacity; parallel workers each get floor(capacity/workers). Zero disables caching. |
 | `--samples` | 1 | Positive endgame position count; >1 selects benchmark summary. Deal mode requires 1. |
 | `-h`, `--help` | Off | Print argument help. |
 

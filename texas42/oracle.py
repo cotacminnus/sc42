@@ -17,6 +17,7 @@ from .actions import ACTION_REGISTRY, TRUMP_ACTIONS
 from .arena import contract_decided
 from .episodes import EpisodeState
 from .models import Bid, Contract, ContractKind, Domino, Trump
+from .parallel import AUTO_WORKER_CAP, OrderedPool, resolve_workers
 from .phases import Phase
 from .rulesets import RULESET_ID, validate_ruleset
 from .state import HandState
@@ -426,7 +427,7 @@ class _Search:
 
 
 def solve(full_state: HandState, *, output: Literal['position_value', 'all_action_values'] =
-          'all_action_values', limits: SearchLimits | None = None) -> OracleResult:
+          'all_action_values', limits: SearchLimits | None = None, workers: int = 1) -> OracleResult:
     """Solve a legal full state without mutating it or changing policy inputs.
 
     status refers to the requested output: position_value can finish with some
@@ -434,22 +435,28 @@ def solve(full_state: HandState, *, output: Literal['position_value', 'all_actio
     actions retain [-1, +1]; optimal_actions is supplied only when complete.
     Budgets count entered nodes (including root, terminal and cache-hit nodes).
     Time includes input copying/validation and is checked between search nodes.
+    workers=1 preserves sequential execution; more workers split root children
+    into independent spawned searches under the same whole-call limits.
     """
     start = monotonic()
     if output not in ('position_value', 'all_action_values'):
         raise ValueError('output must be position_value or all_action_values')
     state = _prepare_state(full_state)
     search = _Search(limits if limits is not None else SearchLimits(), start)
+    count = min(AUTO_WORKER_CAP, resolve_workers(workers, len(state.legal_action_ids())))
+    if count > 1 and _budget_available(search):
+        return _parallel_root(state, search, output=output, start=start, workers=count)
     return _solve_state(state, search, output=output, start=start)
 
 
 def solve_points(full_state: HandState, *, output: Literal['position_value', 'all_action_values'] =
                  'all_action_values', limits: SearchLimits | None = None,
-                 reference_team: int | None = None) -> OracleResult:
+                 reference_team: int | None = None, workers: int = 1) -> OracleResult:
     """Maximum guaranteed final points for a fixed trump, using the shared search.
 
     The reference defaults to the bidding partnership. Unlike solve(), making
     the contract does not end this objective. Values/bounds range from 0 to 42.
+    workers selects the same optional root-action parallelism as solve().
     """
     start = monotonic()
     if output not in ('position_value', 'all_action_values'):
@@ -457,6 +464,9 @@ def solve_points(full_state: HandState, *, output: Literal['position_value', 'al
     state = _prepare_state(full_state)
     search = _Search(limits if limits is not None else SearchLimits(), start,
                      objective='final_points', reference_team=reference_team)
+    count = min(AUTO_WORKER_CAP, resolve_workers(workers, len(state.legal_action_ids())))
+    if count > 1 and _budget_available(search):
+        return _parallel_root(state, search, output=output, start=start, workers=count)
     return _solve_state(state, search, output=output, start=start)
 
 
@@ -488,6 +498,13 @@ def _solve_state(state: HandState, search: _Search, *, output: str, start: float
                 bounds = _combine(list(rows), maximizing=maximizing, complete=True)
                 if search.exhausted or (output == 'position_value' and bounds.exact):
                     break
+    return _root_result(state, search, rows, bounds, output=output, start=start)
+
+
+def _root_result(state: HandState, search: _Search, rows: list[ActionValue], bounds: ValueBounds,
+                 *, output: str, start: float) -> OracleResult:
+    """Existing proof/aggregation rules shared by sequential and parallel roots."""
+    actions = state.legal_action_ids()
     complete = all(row.exact for row in rows)
     optimal = next((row.action_id for row in rows if row.exact and row.value == bounds.value), None)
     optimal_actions = (tuple(row.action_id for row in rows if row.value == bounds.value)
@@ -535,7 +552,7 @@ def _bidder_analysis(seat: int, trumps: Sequence[TrumpAnalysis]) -> BidderAnalys
 
 
 def analyze_deal(hands: Sequence[Sequence[Domino]], *, ruleset_id: str = RULESET_ID,
-                 limits: SearchLimits | None = None) -> DealAnalysis:
+                 limits: SearchLimits | None = None, workers: int = 1) -> DealAnalysis:
     """Analyze all four candidate bidders, nine trumps, and their legal leads.
 
     Hands contain the complete double-six set in absolute-seat order. Validation
@@ -543,6 +560,8 @@ def analyze_deal(hands: Sequence[Sequence[Domino]], *, ruleset_id: str = RULESET
     entire analysis. Scheduling is seat, canonical trump, then global action ID;
     early combinations may consume the whole budget. Unvisited choices retain
     [0, 42]. API limits default to unlimited time/nodes; bound full-hand calls.
+    workers>1 runs independent combinations with process-local caches and
+    disjoint node allocations; the limits still apply to the whole analysis.
     """
     start = monotonic()
     session = EpisodeState('hand', 7, 0, ruleset_id)
@@ -553,6 +572,22 @@ def analyze_deal(hands: Sequence[Sequence[Domino]], *, ruleset_id: str = RULESET
     session.deal(detached)
     deal = session.hand
     search = _Search(limits if limits is not None else SearchLimits(), start, objective='final_points')
+    count = min(AUTO_WORKER_CAP, resolve_workers(workers, 4 * len(TRUMP_ACTIONS)))
+    if count > 1 and _budget_available(search):
+        keys = [(seat, trump) for seat in range(4) for trump in TRUMP_ACTIONS]
+        results = _parallel_tasks(deal, search, keys, mode='deal', start=start, workers=count)
+        bidders = []
+        for seat in range(4):
+            trumps = []
+            for trump, (result, nodes, hits) in zip(TRUMP_ACTIONS,
+                                                   results[seat * len(TRUMP_ACTIONS):(seat+1) * len(TRUMP_ACTIONS)]):
+                trumps.append(TrumpAnalysis(result.lower, result.upper, trump,
+                                            result.optimal_action, result.optimal_actions,
+                                            result.action_values, result.all_action_values_complete))
+                search.nodes += nodes
+                search.cache_hits += hits
+            bidders.append(_bidder_analysis(seat, trumps))
+        return DealAnalysis(tuple(bidders), search.nodes, search.cache_hits, monotonic() - start)
     bidders = []
     for seat in range(4):
         trumps = []
@@ -567,3 +602,112 @@ def analyze_deal(hands: Sequence[Sequence[Domino]], *, ruleset_id: str = RULESET
             incumbent = max(incumbent, result.lower)
         bidders.append(_bidder_analysis(seat, trumps))
     return DealAnalysis(tuple(bidders), search.nodes, search.cache_hits, monotonic() - start)
+
+
+def _budget_available(search: _Search) -> bool:
+    return ((search.limits.max_nodes is None or search.nodes < search.limits.max_nodes)
+            and (search.deadline is None or monotonic() < search.deadline))
+
+
+@dataclass(frozen=True, slots=True)
+class _WorkerConfig:
+    # Sent once per process, never once per node or action. Each spawned process
+    # owns its deserialized state and cache; ordinary policies receive neither.
+    state: HandState
+    mode: Literal['root', 'deal']
+    objective: Literal['contract_success', 'final_points']
+    reference_team: int | None
+    start: float
+    time_seconds: float | None
+    cache_entries: int
+
+
+_WORKER_CONFIG: _WorkerConfig | None = None
+_WORKER_CACHE: dict[tuple, _Entry] = {}
+
+
+def _initialize_oracle(config: _WorkerConfig) -> None:
+    global _WORKER_CONFIG, _WORKER_CACHE
+    _WORKER_CONFIG = config
+    _WORKER_CACHE = {}
+
+
+def _search_task(config: _WorkerConfig, task: tuple, cache: dict) -> tuple:
+    """Only the task boundary is parallel; minimax itself is unchanged."""
+    key, allocation = task
+    limits = SearchLimits(config.time_seconds, allocation, config.cache_entries)
+    search = _Search(limits, config.start, objective=config.objective,
+                     reference_team=config.reference_team)
+    search.cache = cache
+    if config.mode == 'deal':
+        seat, trump = key
+        state = _play_start(config.state, seat, trump)
+        # Independent combinations do not depend on earlier trumps finishing.
+        # Zero is a valid incumbent; _solve_state still orders all leads by ID.
+        result = _solve_state(state, search, output='all_action_values', start=config.start, minimum=0)
+    else:
+        bounds = search.search(_child(config.state, key))
+        result = ActionValue(bounds.lower, bounds.upper, key, search.nodes > 0)
+    return result, search.nodes, search.cache_hits
+
+
+def _oracle_worker(task: tuple) -> tuple:
+    try:
+        return _search_task(_WORKER_CONFIG, task, _WORKER_CACHE)
+    except Exception as error:
+        raise RuntimeError(f'Oracle {_WORKER_CONFIG.mode} task {task[0]!r} failed: {error}') from error
+
+
+def _parallel_tasks(state: HandState, search: _Search, keys: Sequence, *, mode: str,
+                    start: float, workers: int) -> list[tuple]:
+    """Reserve disjoint node allocations in ordered waves, reclaiming unused work.
+
+    At most workers allocations are in flight. Sum(actual nodes) cannot exceed
+    the original budget. A completed task is not restarted if its allocation was
+    exhausted. Worker-local caches survive tasks and total capacity is bounded
+    by the original cache limit. All deadlines use the parent's original start.
+    """
+    config = _WorkerConfig(state, mode, search.objective, search.reference_team,
+                           start, search.limits.time_seconds,
+                           search.limits.max_cache_entries // workers)
+    remaining = (None if search.limits.max_nodes is None else
+                 search.limits.max_nodes - search.nodes)
+    results = []
+    with OrderedPool(workers, initializer=_initialize_oracle, initargs=(config,)) as pool:
+        for offset in range(0, len(keys), workers):
+            wave = keys[offset:offset + workers]
+            expired = search.deadline is not None and monotonic() >= search.deadline
+            share, extra = divmod(remaining, len(keys) - offset) if remaining is not None else (None, 0)
+            allocations = [0 if expired else (None if share is None else share + (i < extra))
+                           for i in range(len(wave))]
+            jobs = [(key, allocation) for key, allocation in zip(wave, allocations) if allocation != 0]
+            completed = iter(pool.map(_oracle_worker, jobs)) if jobs else iter(())
+            for key, allocation in zip(wave, allocations):
+                # No process is needed to represent an unvisited task. Use the
+                # same zero-budget logic, including any awarded-point bounds.
+                result = (next(completed) if allocation != 0 else
+                          _search_task(config, (key, 0), {}))
+                results.append(result)
+                if remaining is not None:
+                    remaining -= result[1]
+    return results
+
+
+def _parallel_root(state: HandState, search: _Search, *, output: str, start: float,
+                   workers: int) -> OracleResult:
+    actions = state.legal_action_ids()
+    initial = search.initial_bounds(state)
+    bounds = initial
+    rows = [ActionValue(initial.lower, initial.upper, action) for action in actions]
+    if search.enter():
+        decided = search.decided_bounds(state)
+        if decided is not None:
+            bounds = decided
+            rows = [ActionValue(decided.lower, decided.upper, action) for action in actions]
+        elif _budget_available(search):
+            results = _parallel_tasks(state, search, actions, mode='root', start=start, workers=workers)
+            rows = [row for row, _, _ in results]
+            search.nodes += sum(nodes for _, nodes, _ in results)
+            search.cache_hits += sum(hits for _, _, hits in results)
+            bounds = _combine(rows, maximizing=state.seat % 2 == search.team(state), complete=True)
+    return _root_result(state, search, rows, bounds, output=output, start=start)

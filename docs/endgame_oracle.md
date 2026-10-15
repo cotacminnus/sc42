@@ -7,7 +7,7 @@ legal action IDs, trick resolution and final scoring remain authoritative.
 
 ## Inputs and supported rules
 
-Call `solve(full_state, *, output="all_action_values", limits=SearchLimits(...))`
+Call `solve(full_state, *, output="all_action_values", limits=SearchLimits(...), workers=1)`
 with a complete legal `texas42.state.HandState` in the play phase. Bidding and
 trump must already be fixed. The state must retain its completed trick history,
 partial trick, scores, and four remaining hands in absolute seat order. The
@@ -52,10 +52,10 @@ negated merely because a move was made.
 | `principal_variation` | Currently always `None`; this implementation does not assemble or claim proof of a continuation. |
 | `nodes`, `cache_hits`, `elapsed_seconds` | Entered search nodes, table hits, and monotonic elapsed time including copying/validation. |
 
-`output="position_value"` stops when it proves the root outcome and one optimal
+With one worker, `output="position_value"` stops when it proves the root outcome and one optimal
 action. Other actions can remain unresolved even with `status="exact"`.
 `output="all_action_values"` searches every root child with a full window while
-sharing the cache. A budget can then leave `status="budget_exceeded"` alongside
+sharing the cache in sequential execution. A budget can then leave `status="budget_exceeded"` alongside
 an exact root value and a proven optimal action. For example, one proven `+1`
 action at a MAX root establishes the root outcome while another action still
 has bounds `[-1, +1]`. The complete optimal set remains `None`.
@@ -104,7 +104,7 @@ a heuristic estimate, and no unknown action is recommended as proven optimal.
 ## Final-point objective
 
 `solve_points(full_state, *, output="all_action_values", limits=None,
-reference_team=None)` uses the same state validation, root-action analysis,
+reference_team=None, workers=1)` uses the same state validation, root-action analysis,
 alpha–beta, engine transitions, budgets and bounded cache as `solve`. It returns
 the same `OracleResult` shape, with integer final points in `0–42`. The reference
 team defaults to the bidding partnership; explicitly select team `0` or `1` to
@@ -133,7 +133,7 @@ and should only be used on tiny endgames.
 
 ## Complete-deal bidding benchmark
 
-`analyze_deal(hands, *, ruleset_id=RULESET_ID, limits=None) -> DealAnalysis`
+`analyze_deal(hands, *, ruleset_id=RULESET_ID, limits=None, workers=1) -> DealAnalysis`
 accepts four complete seven-domino hands of `Domino` values in absolute-seat
 order. The native `EpisodeState.deal` validates the complete double-six set once,
 including uniqueness, without mutating the input. Internally constructed states
@@ -201,7 +201,7 @@ unresolved; a one-mark contract is still possible.
 
 ### Scheduling and whole-analysis budgets
 
-One `SearchLimits` and one bounded cache span **all 36** bidder/trump combinations.
+With `workers=1`, one `SearchLimits` and one bounded cache span **all 36** bidder/trump combinations.
 Limits never reset between combinations or first plays. Time includes initial
 validation and result assembly, with soft checks on search-node entry. Scheduling
 is deterministic: seat order, canonical trump order, then global play-action ID.
@@ -221,6 +221,94 @@ the endgame API. Full-hand analysis can be expensive: callers should pass limits
 The CLI's deal mode always defaults to an explicitly printed **100,000 nodes
 and five seconds for the whole deal**, with configurable limits. This is not a
 promise of completion. Endgame CLI budget defaults retain their existing behavior.
+
+## Parallel execution
+
+All three APIs accept the optional `workers` argument, defaulting to `1`.
+`workers=1` retains the existing sequential traversal, cache sharing, incumbent
+windows, node budgets, result structures, and proof semantics. Parallelization
+does not repair or redesign the underlying minimax algorithm, rules or objectives.
+
+`workers=0` selects automatically; positive values request up to that many CPU
+processes. Resolution uses the repository's `resolve_workers` affinity, physical
+core and cgroup limits, with an additional maximum of eight oracle workers and
+the number of independent tasks. `OrderedPool` supplies reusable **spawned**
+processes, ordered results, failure propagation and shutdown. There is no thread
+pool, recursive spawning, or new process-pool abstraction. One pool is reused for
+the tasks in a single API call; separate API calls create separate pools.
+
+### Tasks, state and caches
+
+- Complete-deal analysis has 36 tasks, one per candidate bidder and canonical
+  trump. A process receives the validated deal once, then reconstructs an
+  independent play-start state for each assigned combination. Each task runs the
+  existing `_solve_state` and `_Search`, including ordinary global-ID lead order.
+  Because earlier trumps need not finish first, their incumbent bounds are not
+  dependencies; each combination starts with the valid zero-point incumbent.
+- `solve` and `solve_points` split at legal root-action children. The coordinator
+  counts the root once, and each child uses the existing alpha–beta search with
+  a full window. Actor/reference-team semantics remain unchanged. Parallel
+  `position_value` may analyze all root actions instead of stopping after the
+  first proof. Existing aggregation decides what is exact or optimal.
+
+Only the input state is serialized once per worker, followed by small task
+identifiers and node allocations. No search tree or mutable state is shared.
+Already-decided roots, forced single-action roots, and zero budgets avoid starting
+a process pool. Sequential execution is usually preferable for small endgames.
+
+Each process retains a private transposition table across its assigned tasks.
+`max_cache_entries` remains an **aggregate entry limit**: each process gets
+`floor(max_cache_entries / resolved_workers)` entries. Any remainder is unused;
+zero disables caching. Thus all worker tables together stay within the caller's
+entry cap. This is an entry-count limit, not a byte limit on Python process RSS.
+Process/import/serialization overhead is additional. There is no synchronized
+shared table, so cross-worker cache reuse and earlier-trump pruning are lost;
+aggregate node counts can increase relative to sequential execution.
+
+### Whole-analysis node and time limits
+
+The coordinator dispatches canonical batches of at most the resolved worker
+count. Before each batch it divides the remaining global nodes over all pending
+tasks, giving any integer remainder to the earlier tasks. The sum of active
+reservations never exceeds the remaining budget. Once the ordered batch returns,
+only actual searched nodes are charged; unused reservations become available to
+later batches. An allocation-exhausted task returns its existing sound bounds
+and is not restarted. A task allocated zero is represented locally through the
+existing zero-budget logic without spawning work. The root's coordinator node
+is deducted before distributing root-child budgets.
+
+Consequently aggregate searched nodes cannot exceed `max_nodes`, including across
+all 36 deal combinations. This policy may leave budget unused when a previously
+interrupted task would need more work, and batch waits can leave fast workers
+idle. These are scheduling limits, not heuristic evaluations. Requested-output
+completion and alternative-value exactness retain their existing definitions.
+
+All processes use the parent's original monotonic start time and one deadline.
+Validation, serialization, imports, spawn, coordination and shutdown are included
+in reported wall time; workers do **not** receive fresh per-task time allowances.
+Workers check the common deadline on search-node entry, and no new nonzero batch
+is dispatched after it expires. This is cooperative, not a hard process kill:
+startup, one transition, queue draining and shutdown may overrun very short
+deadlines. Worker errors identify the task and propagate as exceptions; the pool
+cancels queued work, waits for running tasks and shuts down rather than returning
+a successful partial report. Supply finite limits for expensive full-deal calls.
+
+### Reproducibility and platforms
+
+Exact values and complete optimal-action/choice sets must agree between sequential
+and parallel executions. Canonical result ordering is independent of task finish
+order. With restrictive budgets, worker counts, private-cache assignment and time
+spent starting processes can change bounds, node counts and completion rates;
+identical unfinished reports across worker counts or repeated parallel runs are
+not promised. `workers=1` preserves the prior deterministic node-budget behavior.
+
+Spawn works on Windows, Linux and WSL2. Script callers must use a
+`if __name__ == "__main__":` guard. Run the example as a module from an importable
+checkout; interactive stdin/notebook entry points may not be importable by spawn.
+Nested process pools are rejected by the existing worker infrastructure. No
+PyTorch, NumPy, OpenSpiel or new runtime dependency is required. The CLI reports
+requested/resolved workers and eligible independent tasks; these are capacity
+figures, and an already-proven root may dispatch no work.
 
 ## Running and validation
 
@@ -254,6 +342,13 @@ contract cutoffs not applying to points, strict-dominance/tie proofs, contract
 classification, one-time deal validation, every candidate leader and trump,
 whole-analysis budgets, input immutability, and bounded CLI execution. Synthetic
 aggregation fixtures avoid expensive full-deal exhaustive searches.
+
+The pre-parallelization baseline passed all 237 repository tests. Parallel tests
+add spawn execution, both actors/reference teams, all trumps, exact ties and
+ordering, global budgets (including zero), input immutability, cache caps/reuse,
+worker errors/shutdown, and the unchanged one-worker path. Exact complete-deal
+aggregation uses synthetic worker fixtures; real full-deal integration is tested
+with bounded searches, not an unbounded 36-tree exhaustive run.
 
 ## Bounded smoke benchmarks
 
@@ -311,6 +406,67 @@ Regression verification passed 237 repository tests, including 19 existing oracl
 tests and 16 new point/deal tests. In addition, 1440 seeded comparisons against
 the previous binary implementation matched bounds, action results, optimal
 actions, node counts and cache hits (excluding elapsed time).
+
+### Parallelization smoke benchmark
+
+Measured with CPython 3.13.5 on the same i5-12600KF/WSL2 environment, with eight
+available physical CPUs. Each row is one timing observation in a verification
+pass, not an averaged performance estimate. Endgames use seed 42, HHR play,
+no partial trick, the final-point objective and all root action values. Limits
+are one million nodes/20 seconds and 100,000 aggregate cache entries per call.
+The complete deal uses seed 42 with 200,000 nodes/10 seconds and the same cache
+cap. Input generation is excluded; validation, spawn and shutdown are included.
+Repeat the [point/deal command recipes](command_reference.md#perfect-information-endgame-oracle)
+with `--workers 1`, `2`, `4`, `8` and the corresponding remaining hand size.
+
+The workload column is dominoes per player, or `deal` for all 36 combinations.
+Exact completion is 100% or 0% of the single analysis at that setting. Exact
+endgame values, every action value and complete optimal-action sets were checked
+against the one-worker result. Bounded deal results are not claimed equivalent
+in traversal or incomplete bounds.
+
+| Workload | Requested → resolved | Wall s | Speedup | Nodes | Nodes/s | Cache hits | Exact |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 2 | 1 → 1 | 0.0009 | 1.00× | 30 | 33462 | 0 | 100% |
+| 2 | 2 → 2 | 0.0846 | 0.01× | 30 | 354 | 0 | 100% |
+| 2 | 4 → 2 | 0.0834 | 0.01× | 30 | 360 | 0 | 100% |
+| 2 | 8 → 2 | 0.0795 | 0.01× | 30 | 377 | 0 | 100% |
+| 3 | 1 → 1 | 0.0076 | 1.00× | 430 | 56573 | 44 | 100% |
+| 3 | 2 → 2 | 0.0827 | 0.09× | 430 | 5197 | 44 | 100% |
+| 3 | 4 → 3 | 0.0869 | 0.09× | 458 | 5272 | 37 | 100% |
+| 3 | 8 → 3 | 0.1038 | 0.07× | 430 | 4143 | 44 | 100% |
+| 4 | 1 → 1 | 0.0308 | 1.00× | 1578 | 51224 | 165 | 100% |
+| 4 | 2 → 2 | 0.1041 | 0.30× | 1712 | 16440 | 156 | 100% |
+| 4 | 4 → 4 | 0.1013 | 0.30× | 1716 | 16939 | 155 | 100% |
+| 4 | 8 → 4 | 0.0998 | 0.31× | 1716 | 17187 | 155 | 100% |
+| 6 | 1 → 1 | 3.2326 | 1.00× | 158490 | 49029 | 37506 | 100% |
+| 6 | 2 → 2 | 2.4125 | 1.34× | 180331 | 74749 | 39640 | 100% |
+| 6 | 4 → 4 | 1.8108 | 1.79× | 192507 | 106310 | 40171 | 100% |
+| 6 | 8 → 6 | 1.6704 | 1.94× | 219804 | 131586 | 43769 | 100% |
+| deal | 1 → 1 | 4.2837 | 1.00× | 200000 | 46689 | 40102 | 0% |
+| deal | 2 → 2 | 2.2863 | 1.87× | 200000 | 87477 | 28506 | 0% |
+| deal | 4 → 4 | 1.2114 | 3.54× | 200000 | 165105 | 28506 | 0% |
+| deal | 8 → 8 | 0.9609 | 4.46× | 200000 | 208131 | 28506 | 0% |
+
+An empty-task diagnostic that initializes the oracle workers and dispatches
+zero-node jobs measured 0.0824/0.0881/0.1193 seconds for 2/4/8 worker capacities,
+including process startup and shutdown. The public zero-budget APIs skip that
+startup entirely. Overhead dominates 2–4-domino positions: use one worker for
+those workloads. The six-domino search benefits from parallelism despite visiting
+about 39% more nodes at six workers. The bounded deal's 4.46× speedup measures
+throughput, not completion: every configuration returned `budget_exceeded`.
+Canonical batch waits, changed cache locality and reduced incumbent sharing
+limit scaling; more workers do not guarantee improvement.
+
+Cumulative **parent-only** peak RSS rose from roughly 24 MiB to 116 MiB during
+the benchmark. This excludes child processes and is not a combined peak-memory
+measurement; aggregate process RSS was not sampled. Cache-entry caps were tested
+independently. OS scheduling/import timing remains a measurement limitation.
+
+The pre-change full suite passed 237 tests; after parallelization it passed 247.
+An additional 772 one-worker baseline comparisons matched the prior implementation
+including node counts, cache hits and proof outputs, excluding elapsed time.
+No underlying oracle correctness repair was included in this change.
 
 ## Interpretation and limitations
 
