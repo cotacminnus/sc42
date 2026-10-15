@@ -1,5 +1,6 @@
 """Spawned oracle trees, per-tree limits and unchanged proof rules."""
 from contextlib import redirect_stdout
+from concurrent.futures import Future
 from copy import deepcopy
 from dataclasses import replace
 import io
@@ -28,17 +29,15 @@ def spawned_probe(task):
 
 
 def synthetic_combination(task):
-    # Aggregation-only fixture. Real search correctness is covered by root
-    # searches and all nine trumps below; full-deal integration remains bounded.
-    (seat, trump), allocation = task
-    config = oracle._WORKER_CONFIG
+    # Aggregation-only fixture; actual search is verified on small endgames.
+    return synthetic_lead(oracle._WORKER_CONFIG, task)
+
+
+def synthetic_lead(config, task):
+    (seat, trump, action), allocation = task
     ids = sorted(d.id for d in config.state.hands[seat])
-    values = [35 if index < 2 and trump in (0, None) else 29 for index in range(7)]
-    rows = tuple(oracle.ActionValue(v, v, action, True) for action, v in zip(ids, values))
-    best = max(values)
-    optima = tuple(r.action_id for r in rows if r.value == best)
-    result = OracleResult(best, best, 'exact', optima[0], optima, rows, True)
-    return result, 0, 0
+    value = 35 if action in ids[:2] and trump in (0, None) else 29
+    return oracle._LeadResult(oracle.ActionValue(value, value, action, True), status='exact')
 
 
 class ParallelOracleTests(unittest.TestCase):
@@ -115,9 +114,16 @@ class ParallelOracleTests(unittest.TestCase):
         before = deepcopy(hands)
         with patch('texas42.parallel.available_cpus', return_value=2):
             for nodes in (1, 35, 80, 1000):
-                result = analyze_deal(hands, workers=2, limits=SearchLimits(max_nodes=nodes))
-                self.assertLessEqual(result.nodes, 36 * nodes)
+                events = []
+                result = analyze_deal(hands, workers=2, limits=SearchLimits(max_nodes=nodes),
+                                      progress=events.append)
+                self.assertLessEqual(result.nodes, 252 * nodes)
                 self.assertGreater(result.nodes, nodes)
+                self.assertEqual(len(events), 252)
+                self.assertEqual(len({(e.bidder, e.trump, e.action_id) for e in events}), 252)
+                self.assertTrue(all(e.nodes <= nodes for e in events))
+                self.assertEqual(sum(e.nodes for e in events), result.nodes)
+                self.assertEqual(sum(e.cache_hits for e in events), result.cache_hits)
                 self.assertEqual(tuple(b.seat for b in result.bidders), tuple(range(4)))
                 self.assertEqual(result.status, 'budget_exceeded')
                 for bidder in result.bidders:
@@ -134,6 +140,9 @@ class ParallelOracleTests(unittest.TestCase):
         with patch('texas42.parallel.available_cpus', return_value=2):
             with patch('texas42.oracle._oracle_worker', synthetic_combination):
                 result = analyze_deal(hands, workers=2)
+        with patch('texas42.oracle._search_task', side_effect=lambda config, task, cache: synthetic_lead(config, task)):
+            sequential = analyze_deal(hands)
+        self.assertEqual(replace(result, elapsed_seconds=0), replace(sequential, elapsed_seconds=0))
         self.assertEqual(result.status, 'exact')
         self.assertTrue(result.all_alternative_values_complete)
         for bidder in result.bidders:
@@ -173,6 +182,14 @@ class ParallelOracleTests(unittest.TestCase):
         with OrderedPool(2, initializer=_initialize_oracle, initargs=(config,)) as pool:
             first = pool.map(spawned_probe, tasks)
             second = pool.map(spawned_probe, tasks)
+        self.assertIsNone(pool.executor)
+
+        deal = generate_schedule(1, 42)[0]
+        hands = [[PLAY_ACTIONS[i] for i in hand] for hand in deal.hands]
+        deal_config = replace(config, state=oracle.HandState(hands, 0, (0, 0), 7), mode='deal')
+        with OrderedPool(2, initializer=_initialize_oracle, initargs=(deal_config,)) as pool:
+            with self.assertRaisesRegex(RuntimeError, r'Oracle deal task \(0, 0, 99\) failed'):
+                list(pool.iter_completed(_oracle_worker, [((0, 0, 99), 5)]))
         self.assertIsNone(pool.executor)
         self.assertTrue(all(pid != os.getpid() and method == 'spawn'
                             for _, pid, method, _, _ in first + second))
@@ -224,52 +241,228 @@ class ParallelOracleTests(unittest.TestCase):
                 main(['--mode', 'deal', '--seed', '42', '--workers', '99', '--max-nodes', '0'])
         self.assertIn('requested oracle workers: 99', out.getvalue().lower())
         self.assertIn('resolved oracle workers: 8', out.getvalue())
-        self.assertIn('independent search tasks: 36', out.getvalue())
+        self.assertIn('independent search tasks: 252', out.getvalue())
         with redirect_stdout(io.StringIO()) as out:
             main(['--seed', '1', '--remaining', '3', '--workers', '2', '--max-nodes', '30'])
         self.assertIn('Nodes:', out.getvalue())
 
-    def test_defaults_and_fresh_sequential_tree_deadlines(self):
+    def test_defaults_distinct_tasks_fresh_node_allowances_and_global_deadline(self):
         defaults = SearchLimits()
         self.assertEqual((defaults.time_seconds, defaults.max_nodes), (1800.0, 1_048_576))
         hands = [[PLAY_ACTIONS[i] for i in hand] for hand in generate_schedule(1, 42)[0].hands]
+        seen, events = [], []
+        original = oracle._search_task
+
+        def record(config, task, cache):
+            seen.append((config, task))
+            # Verify default allocations without executing million-node trees.
+            return oracle._LeadResult(oracle.ActionValue(0, 42, task[0][2]))
+
+        with patch('texas42.oracle._search_task', side_effect=record):
+            analyze_deal(hands, progress=events.append)
+        self.assertEqual(len(seen), 252)
+        self.assertEqual(len(set(task[0] for _, task in seen)), 252)
+        self.assertTrue(all(task[1] == 1_048_576 for _, task in seen))
+        self.assertEqual(len(set(c.start for c, _ in seen)), 1)
+        for config, ((seat, trump, action), _) in seen:
+            state = oracle._play_start(config.state, seat, trump)
+            self.assertEqual(state.seat, seat)
+            self.assertIn(action, state.legal_action_ids())
+        self.assertEqual([e.completed for e in events], list(range(1, 253)))
+
         clock = [100.0]
-        visited = []
-        original = oracle._solve_state
-
-        def finish_tree(state, search, **kwargs):
-            result = original(state, search, **kwargs)
-            visited.append((search.deadline, search.nodes, clock[0]))
-            clock[0] += 10  # Simulate time between trees without a brittle sleep.
+        events.clear()
+        def finish_tree(config, task, cache):
+            result = original(config, task, cache)
+            clock[0] += 10
             return result
-
         with patch('texas42.oracle.monotonic', side_effect=lambda: clock[0]):
-            with patch('texas42.oracle._solve_state', side_effect=finish_tree):
-                result = analyze_deal(hands, limits=SearchLimits(time_seconds=1, max_nodes=5))
-        self.assertEqual(len(visited), 36)
-        self.assertTrue(all(deadline == start + 1 and nodes == 5 for deadline, nodes, start in visited))
-        self.assertEqual(result.nodes, 36 * 5)
-        self.assertGreater(result.elapsed_seconds, 1)
+            with patch('texas42.oracle._search_task', side_effect=finish_tree) as worker:
+                result = analyze_deal(hands, limits=SearchLimits(time_seconds=1, max_nodes=5),
+                                      progress=events.append)
+        self.assertEqual(worker.call_count, 1)
+        self.assertEqual(result.nodes, 5)
+        self.assertEqual([e.status for e in events], ['node_limit'] + ['not_started'] * 251)
+        self.assertTrue(all(not a.searched and (a.lower, a.upper) == (0, 42)
+                            for b in result.bidders[1:] for t in b.trumps for a in t.action_values))
 
-    def test_deal_worker_starts_its_own_deadline_and_gets_full_node_limit(self):
+    def test_deal_worker_global_deadline_and_continuation_matches_reference(self):
         hands = [[PLAY_ACTIONS[i] for i in hand] for hand in generate_schedule(1, 42)[0].hands]
         state = oracle.HandState(hands, 0, (0, 0), 7)
         config = _WorkerConfig(state, 'deal', 'final_points', None, 0.0, 1.0, 5)
-        with patch('texas42.oracle.monotonic', return_value=100.0):
-            # The original run deadline would have expired at t=1. Each tree
-            # still receives a fresh second and all five requested nodes.
-            for seat, trump in ((0, 0), (1, None), (3, 'doubles')):
-                _, nodes, _ = oracle._search_task(config, ((seat, trump), 5), {})
-                self.assertEqual(nodes, 5)
+        for seat, trump in ((0, 0), (1, None), (3, 'doubles')):
+            action = min(d.id for d in hands[seat])
+            with patch('texas42.oracle.monotonic', return_value=100.0):
+                result = oracle._search_task(config, ((seat, trump, action), 5), {})
+            self.assertEqual((result.nodes, result.status), (0, 'not_started'))
+            self.assertEqual((result.action.lower, result.action.upper), (0, 42))
 
-        search = _Search(SearchLimits(max_nodes=101, max_cache_entries=5), 0.0, objective='final_points')
-        keys = [(seat, trump) for seat in range(4) for trump in TRUMP_ACTIONS]
-        with patch('texas42.oracle.OrderedPool') as pool:
-            pool.return_value.__enter__.return_value.map.return_value = []
-            _parallel_tasks(state, search, keys, mode='deal', start=0.0, workers=2)
-        jobs = pool.return_value.__enter__.return_value.map.call_args.args[1]
-        self.assertEqual(jobs, [(key, 101) for key in keys])
-        self.assertEqual(pool.call_args.kwargs['initargs'][0].cache_entries, 2)
+        # Exercise the exact same continuation call used by deal tasks against
+        # terminal-only exhaustive minimax, both teams and partial tricks.
+        for seed, partial in ((0, 0), (1, 3), (7, 0)):
+            state = generate_endgame(seed, 2, partial_plays=partial)
+            for team in (0, 1):
+                config = _WorkerConfig(state, 'root', 'final_points', team, monotonic(), None, 100)
+                for action in state.legal_action_ids():
+                    actual, _, _ = oracle._search_task(config, (action, None), {})
+                    truth = oracle.exhaustive_minimax(oracle._child(state, action),
+                                                     objective='final_points', reference_team=team)
+                    self.assertEqual(actual.value, truth)
+
+    def test_out_of_order_aggregation_and_partial_proofs(self):
+        hands = [[PLAY_ACTIONS[i] for i in hand] for hand in generate_schedule(1, 42)[0].hands]
+        events, configs = [], []
+        class ReversePool:
+            def __init__(self, workers, *, initializer, initargs):
+                configs.append(initargs[0])
+            def __enter__(self): return self
+            def __exit__(self, *args): pass
+            def iter_completed(self, function, tasks, *, deadline):
+                self_tasks = list(tasks)
+                for i in reversed(range(len(self_tasks))):
+                    key, allocation = self_tasks[i]
+                    seat, trump, action = key
+                    # One exact maximum proves bidder value, unresolved ties
+                    # must still prevent claiming a complete optimal set.
+                    row = (oracle.ActionValue(42, 42, action, True) if i % 63 == 0
+                           else oracle.ActionValue(0, 42, action, True))
+                    yield i, oracle._LeadResult(row, 1, 0, status='exact' if row.exact else 'node_limit'), 'completed'
+        with patch('texas42.parallel.available_cpus', return_value=2):
+            with patch('texas42.oracle.OrderedPool', ReversePool):
+                result = analyze_deal(hands, workers=2, progress=events.append)
+        self.assertEqual(configs[0].cache_entries, 50_000)
+        self.assertEqual(events[0].bidder, 3)
+        self.assertEqual(events[-1].completed, 252)
+        self.assertEqual(result.nodes, 252)
+        for bidder in result.bidders:
+            self.assertEqual(bidder.value, 42)
+            self.assertTrue(bidder.contract_exact)
+            self.assertIsNotNone(bidder.optimal_choice)
+            self.assertIsNone(bidder.optimal_choices)
+            self.assertFalse(bidder.all_action_values_complete)
+            self.assertEqual(tuple(t.trump for t in bidder.trumps), TRUMP_ACTIONS)
+            for t in bidder.trumps:
+                self.assertEqual(tuple(a.action_id for a in t.action_values),
+                                 tuple(sorted(d.id for d in hands[bidder.seat])))
+
+    def test_validation_time_and_zero_deadline_settle_all_without_starting(self):
+        hands = [[PLAY_ACTIONS[i] for i in hand] for hand in generate_schedule(1, 42)[0].hands]
+        clock, events = [100.0], []
+        original = oracle.EpisodeState.deal
+        def validate(session, hands):
+            original(session, hands)
+            clock[0] += 2
+        with patch('texas42.oracle.EpisodeState.deal', validate):
+            with patch('texas42.oracle.monotonic', side_effect=lambda: clock[0]):
+                with patch('texas42.oracle._search_task', side_effect=AssertionError('late task')):
+                    result = analyze_deal(hands, workers=2, limits=SearchLimits(time_seconds=1),
+                                          progress=events.append)
+        self.assertEqual(result.nodes, 0)
+        self.assertEqual(len(events), 252)
+        self.assertTrue(all(e.status == 'not_started' for e in events))
+        self.assertEqual(result.elapsed_seconds, 2)
+
+    def test_completion_scheduler_refills_before_slow_first_task_and_propagates_errors(self):
+        class Executor:
+            def __init__(self):
+                self.futures = []
+                self.closed = False
+            def submit(self, function, task):
+                future = Future()
+                if task != 0:
+                    future.set_result(task)
+                self.futures.append(future)
+                return future
+            def shutdown(self, **kwargs): self.closed = True
+
+        pool = OrderedPool(1)
+        pool.workers = 2
+        executor = pool.executor = Executor()
+        iterator = pool.iter_completed(abs, range(4))
+        self.assertEqual(next(iterator), (1, 1, 'completed'))
+        # The second worker receives new work while index zero is unfinished.
+        self.assertEqual(next(iterator), (2, 2, 'completed'))
+        self.assertFalse(executor.futures[0].done())
+        executor.futures[0].set_result(0)
+        remaining = list(iterator)
+        self.assertEqual({i for i, _, _ in remaining}, {0, 3})
+        pool.close()
+        self.assertTrue(executor.closed)
+
+        pool = OrderedPool(1)
+        executor = pool.executor = Executor()
+        iterator = pool.iter_completed(abs, [0])
+        # Fail a submitted future without starting an actual process.
+        def fail_wait(pending, **kwargs):
+            future = next(iter(pending))
+            future.set_exception(ValueError('broken opening tree'))
+            return {future}, set()
+        with patch('texas42.parallel.wait', side_effect=fail_wait):
+            with self.assertRaisesRegex(RuntimeError, 'task 0 failed: broken opening tree'):
+                list(iterator)
+        self.assertTrue(executor.closed)
+        self.assertIsNone(pool.executor)
+
+    def test_completion_scheduler_deadline_cancels_queue_and_stops_submission(self):
+        clock = [100.0]
+        class Executor:
+            def __init__(self): self.calls = 0
+            def submit(self, function, task):
+                self.calls += 1
+                future = Future()
+                if task == 0:
+                    future.set_result(0)
+                else:
+                    clock[0] += 10
+                return future
+            def shutdown(self, **kwargs): pass
+        pool = OrderedPool(1)
+        pool.workers = 2
+        executor = pool.executor = Executor()
+        with patch('texas42.parallel.monotonic', side_effect=lambda: clock[0]):
+            results = list(pool.iter_completed(abs, range(5), deadline=101.0))
+        pool.close()
+        self.assertEqual(executor.calls, 2)
+        self.assertEqual(dict((i, status) for i, _, status in results),
+                         {0: 'completed', 1: 'cancelled', 2: 'not_started',
+                          3: 'not_started', 4: 'not_started'})
+
+    def test_opening_worker_bounds_and_exact_values_against_small_real_positions(self):
+        for seed in (0, 1, 7):
+            state = generate_endgame(seed, 2)
+            # Reuse the deal worker's entry path on a small legal state; this
+            # fixture substitutes only setup, never engine moves or minimax.
+            config = _WorkerConfig(state, 'deal', 'final_points', None, monotonic(), None, 100)
+            bidder = state.contract.bidder
+            for action in state.legal_action_ids():
+                child = oracle._child(state, action)
+                truth = oracle.exhaustive_minimax(child, objective='final_points', reference_team=bidder % 2)
+                for cap in (0, 1, 3, None):
+                    with patch('texas42.oracle._play_start', return_value=state):
+                        result = oracle._search_task(config, ((bidder, state.trump, action), cap), {})
+                    self.assertLessEqual(result.action.lower, truth)
+                    self.assertGreaterEqual(result.action.upper, truth)
+                    if cap is None:
+                        self.assertEqual(result.action.value, truth)
+                        self.assertEqual(result.status, 'exact')
+                    else:
+                        self.assertLessEqual(result.nodes, cap)
+
+        clock = [100.0]
+        config = replace(config, start=100.0, time_seconds=1)
+        enter = oracle._Search.enter
+        def limited_enter(search):
+            if search.nodes == 2:
+                clock[0] += 10
+            return enter(search)
+        with patch('texas42.oracle.monotonic', side_effect=lambda: clock[0]):
+            with patch('texas42.oracle._Search.enter', limited_enter):
+                with patch('texas42.oracle._play_start', return_value=state):
+                    result = oracle._search_task(config, ((bidder, state.trump, action), None), {})
+        self.assertEqual(result.status, 'time_limit')
+        self.assertTrue(result.exhausted)
+        self.assertLessEqual(result.action.lower, truth)
+        self.assertGreaterEqual(result.action.upper, truth)
 
 
 if __name__ == '__main__':

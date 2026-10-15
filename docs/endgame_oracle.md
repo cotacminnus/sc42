@@ -94,7 +94,9 @@ points are awarded; their count matters for engine termination. Auction history,
 shaker and match marks cannot affect this fixed hand objective.
 
 `SearchLimits(time_seconds=1800.0, max_nodes=1_048_576, max_cache_entries=100_000)`
-defaults to 1,800 seconds (30 minutes) and 1,048,576 nodes **per tree**. Passing
+defaults to 1,800 seconds (30 minutes) and 1,048,576 nodes **per endgame position**.
+Complete deals instead use nodes per opening lead and one shared time budget,
+as described below. Passing
 `limits=None` uses those defaults; explicitly setting either time/node field to
 `None` disables that individual limit. Nonnegative finite time and integer
 node/cache limits are accepted, including zero. Nodes count the root,
@@ -135,7 +137,7 @@ and should only be used on tiny endgames.
 
 ## Complete-deal bidding benchmark
 
-`analyze_deal(hands, *, ruleset_id=RULESET_ID, limits=None, workers=1) -> DealAnalysis`
+`analyze_deal(hands, *, ruleset_id=RULESET_ID, limits=None, workers=1, progress=None) -> DealAnalysis`
 accepts four complete seven-domino hands of `Domino` values in absolute-seat
 order. The native `EpisodeState.deal` validates the complete double-six set once,
 including uniqueness, without mutating the input. Internally constructed states
@@ -201,104 +203,110 @@ exact point total remains unknown: `contract_exact=True`, `maximum_contract=None
 and `value=None`. Bounds `[30, 42]` prove 30 makeable but leave the maximum
 unresolved; a one-mark contract is still possible.
 
-### Scheduling and per-tree budgets
+### Scheduling, node budgets and the global deadline
 
-Each of the **36 bidder/trump combinations** is one tree and receives the full
-time and node allowance. A fresh search context resets its counter, deadline and
-interruption flag; an exhausted earlier tree does not prevent later trees from
-running. Its legal first-play branches share that tree's allowance. The same
-scope applies with one worker or many. Cache capacity remains bounded across
-the analysis, with entries reusable between trees.
+Complete-deal analysis creates **252 logical tasks**: four bidder seats × nine
+canonical trumps × seven legal opening actions. A task is identified by
+`(bidder_seat, trump, opening_action_id)`. It reconstructs an independent
+play-start state, applies the opening through the engine, and calls the existing
+`_Search.search` on that continuation with a full search window. No recursive
+search algorithm, objective, rule, legal action order or proof definition changes.
+The former 36-task scheduler's incumbent sharing between opening leads is no
+longer available at this independent task boundary.
 
-Sequential scheduling is seat order, canonical trump order, then global play
-action ID. The tree clock starts after the one-time deal validation, immediately
-before constructing that tree's play-start state. Nodes count search entries,
-not the trump-setup transition. Cache retention is not required for correctness.
-Returned nodes/cache hits/elapsed time are aggregate run statistics, so they can
-exceed a single tree's limits. With a finite node cap, at most `36 * max_nodes`
-search nodes are permitted across the whole deal. There is no whole-run timeout.
+`SearchLimits()` defaults to **1,048,576 nodes per opening-lead continuation** and
+**1,800 seconds for the entire deal analysis**. These scopes apply with one or
+many workers. Each continuation has its own counter and exhaustion flag; its
+first entered node counts as one. Trump setup and applying the chosen lead do
+not count as search nodes. Node counters include terminal and cache-hit entries,
+just as in endgame search. An earlier exhausted task cannot consume a later
+one's node allowance. With finite `max_nodes`, aggregate nodes cannot exceed
+`252 * max_nodes` (264,241,152 at the default); actual totals are reported.
 
-Each lead is searched with a window that preserves ties with the best proven
-lower bound so far. Integer point utility permits `alpha=incumbent-1`: failing
-low proves a lead strictly inferior, while a lead tying or exceeding the
-incumbent is resolved. The same incumbent spans the bidder's earlier trumps.
-This can leave suboptimal action/trump values bounded rather than exact; no
-symmetry reduction or heuristic leaf evaluation is used.
+One absolute `monotonic()` deadline starts at API entry, before validation and
+process startup, and is passed unchanged to every worker. It covers validation,
+startup, queueing, search, result collection, aggregation and shutdown. The
+coordinator stops submitting at that deadline and cancels queued futures where
+possible. Workers check the same deadline before constructing a continuation
+and on search-node entry. Running tasks return their valid partial bounds;
+never-started/cancelled tasks retain `[0, 42]`, `value=None`, `searched=False`.
+Validation, engine transitions, callbacks, aggregation and process shutdown are
+cooperative operations rather than hard interrupts, so elapsed wall time can
+slightly exceed the configured limit. A deadline never resets per task.
+`None` disables the respective API limit; CLI flags accept nonnegative finite
+values, with zero providing an immediately bounded run.
 
-The API and CLI both default to **1,048,576 nodes and 1,800 seconds per tree**.
-These are upper limits, not a promise of completion. A complete-deal analysis
-can therefore run longer than 1,800 seconds in total. A `solve`/`solve_points`
-endgame position is one tree, including all its legal root-action branches;
-parallelizing those branches does not multiply the position's budget.
+The hierarchy is reconstructed from canonical bidder/trump/action-ID ordering,
+regardless of completion order. Each trump maximizes its seven `ActionValue`
+bounds using the existing `_choice_proof`/`_combine` rules, and
+`_bidder_analysis` preserves the existing maximum-contract and tie semantics.
+An exhausted task can still have exact bounds; exactness follows the bounds,
+not merely its stop reason. No heuristic value or tentative optimum is inserted.
+
+### Live progress
+
+The API remains silent unless `progress=callback` is supplied. The callback
+receives one immutable `DealProgress` per settled logical task, in the coordinator
+process. It includes `completed`, `total` (252), `bidder`, canonical `trump`,
+`action_id`, `status`, actual `nodes`/`cache_hits`, task `elapsed_seconds`
+(excluding queueing), and `global_elapsed_seconds`. It is synchronous; expensive
+callbacks consume the global time budget. Task statuses are:
+
+- `exact`: the lead's point bounds coincide, including after interruption.
+- `node_limit`: unresolved and its node allocation is exhausted (also zero nodes).
+- `time_limit`: started, but unresolved when the shared deadline stops search.
+- `not_started`: not submitted, or the worker observes expiry before tree setup.
+- `cancelled`: submitted work cancelled before execution.
+
+If both limits bind, an unresolved task at its node cap reports `node_limit`.
+Every successful analysis invocation settles all 252 tasks exactly once, including
+explicitly skipped tasks after expiry. Worker exceptions instead propagate; no
+normal completion is fabricated. The CLI installs a callback that flushes a
+`[completed/252]` line immediately with bidder, readable trump/domino, status,
+nodes, task runtime and global elapsed time. Workers never print. The existing
+bidder tables and proof summary follow those progress lines. A final `[252/252]`
+means all tasks are accounted for; inspect statuses to learn which were searched.
 
 ## Parallel execution
 
-All three APIs accept the optional `workers` argument, defaulting to `1`.
-`workers=1` retains sequential traversal, cache sharing, incumbent
-windows, result structures, and proof semantics. Time/node limits now apply per
-tree with every worker count. Parallelization
-does not repair or redesign the underlying minimax algorithm, rules or objectives.
+All three APIs accept `workers=1` (sequential), `workers=0` (automatic), or a
+positive requested CPU-process count. Resolution uses `resolve_workers` affinity,
+physical-core and cgroup limits, capped at eight oracle processes and the number
+of tasks. One persistent `OrderedPool` supplies **spawned** workers for each API
+call; separate calls create separate pools. There are no nested pools or thread
+based search workers. The existing `map` interface remains ordered;
+`iter_completed` adds bounded completion-driven collection for deal tasks.
 
-`workers=0` selects automatically; positive values request up to that many CPU
-processes. Resolution uses the repository's `resolve_workers` affinity, physical
-core and cgroup limits, with an additional maximum of eight oracle workers and
-the number of independent tasks. `OrderedPool` supplies reusable **spawned**
-processes, ordered results, failure propagation and shutdown. There is no thread
-pool, recursive spawning, or new process-pool abstraction. One pool is reused for
-the tasks in a single API call; separate API calls create separate pools.
+At most `workers` deal futures are in flight. When one settles, the coordinator
+reports it and immediately refills the freed slot without waiting for the first
+submitted task. Simultaneously available results are processed by submission
+index. New tasks are submitted in canonical order until expiry, but worker
+assignment and completion order can vary. Only the validated deal/configuration
+is sent once per process; subsequent messages carry compact task IDs and node
+allocations. No mutable hand or search tree is shared. Zero budgets avoid
+process startup. One worker is generally best for tiny endgames.
 
-### Tasks, state and caches
+Each worker retains a local transposition table between assigned tasks.
+`max_cache_entries` remains an **aggregate entry cap**, each process receiving
+`floor(max_cache_entries / resolved_workers)` entries. Remainders are unused;
+zero disables caching. The cap does not bound interpreter/serialization memory
+or bytes per entry. Objective/reference-team namespaces remain explicit in keys.
+Cache eviction cannot change correctness. Process-local tables lose cross-worker
+reuse, and independent full-window leads lose incumbent sharing, so aggregate
+work may increase. Additional futures/IPC also cost time.
 
-- Complete-deal analysis has 36 tasks, one per candidate bidder and canonical
-  trump. A process receives the validated deal once, then reconstructs an
-  independent play-start state for each assigned combination. Each task runs the
-  existing `_solve_state` and `_Search`, including ordinary global-ID lead order.
-  Because earlier trumps need not finish first, their incumbent bounds are not
-  dependencies; each combination starts with the valid zero-point incumbent.
-- `solve` and `solve_points` split at legal root-action children. The coordinator
-  counts the root once, and each child uses the existing alpha–beta search with
-  a full window. Actor/reference-team semantics remain unchanged. Parallel
-  `position_value` may analyze all root actions instead of stopping after the
-  first proof. Existing aggregation decides what is exact or optimal.
+### Endgame compatibility
 
-Only the input state is serialized once per worker, followed by small task
-identifiers and node allocations. No search tree or mutable state is shared.
-Already-decided roots, forced single-action roots, and zero budgets avoid starting
-a process pool. Sequential execution is usually preferable for small endgames.
-
-Each process retains a private transposition table across its assigned tasks.
-`max_cache_entries` remains an **aggregate entry limit**: each process gets
-`floor(max_cache_entries / resolved_workers)` entries. Any remainder is unused;
-zero disables caching. Thus all worker tables together stay within the caller's
-entry cap. This is an entry-count limit, not a byte limit on Python process RSS.
-Process/import/serialization overhead is additional. There is no synchronized
-shared table, so cross-worker cache reuse and earlier-trump pruning are lost;
-aggregate node counts can increase relative to sequential execution.
-
-### Per-tree node and time limits
-
-For deal analysis, every dispatched bidder/trump task receives the full node
-limit and starts a fresh monotonic deadline when the worker begins that task.
-Queueing, process startup, and time spent on previous combinations do not consume
-the next tree's time allowance. There is no node division or shared deadline
-across these 36 trees. The pool reuses its processes and their bounded caches.
-
-Root-action tasks in `solve`/`solve_points` are **branches of one tree**. Their
-coordinator still counts the root once and reserves disjoint node allocations in
-canonical batches of at most the worker count. It divides that position's
-remaining nodes over pending branches and reclaims unused reservations for later
-batches. A branch interrupted at its allocation is not restarted. The sum of
-root plus branch nodes stays within `max_nodes`. This policy can leave some
-budget unused; it does not change proof or heuristic-evaluation semantics.
-
-Endgame branches share the position's original deadline, including validation
-and worker startup. For either mode, workers check the applicable tree deadline
-on search-node entry. Limits are cooperative, not hard process kills; a
-transition or shutdown can overrun a very short deadline. Reported wall time
-always includes the entire call, including validation, spawn, queueing and
-shutdown, even though deal tree deadlines start later. Worker errors identify
-the task and propagate as exceptions, with the existing cancellation/shutdown
-behavior. `max_cache_entries` remains aggregate, rather than a per-tree allowance.
+`solve()` and `solve_points()` retain their existing per-position budgets,
+sequential traversal and optional parallel root-action implementation. Their root
+is counted once. Parallel branches reserve disjoint node allocations in canonical
+waves, reclaiming unused allocations for later waves; sum of root and child
+nodes stays within the position's `max_nodes`. All branches share that position's
+original deadline, including input validation and worker startup. An interrupted
+allocation is not restarted. Existing result dataclasses, exact/proof semantics,
+and the exhaustive reference remain unchanged. No underlying oracle correctness
+repairs are included in this scheduling change. Worker exceptions identify the
+task and propagate through pool cancellation and shutdown.
 
 ### Reproducibility and platforms
 
@@ -307,7 +315,8 @@ and parallel executions. Canonical result ordering is independent of task finish
 order. With restrictive budgets, worker counts, private-cache assignment and time
 spent starting processes can change bounds, node counts and completion rates;
 identical unfinished reports across worker counts or repeated parallel runs are
-not promised. `workers=1` retains deterministic traversal with the new per-tree limits.
+not promised. `workers=1` retains deterministic task/traversal order with per-lead node limits.
+Time-limited runs can still vary with runtime and callback costs.
 
 Spawn works on Windows, Linux and WSL2. Script callers must use a
 `if __name__ == "__main__":` guard. Run the example as a module from an importable
@@ -331,6 +340,8 @@ Focused verification from the repository root:
 
 ```bash
 python -m unittest discover -s tests -p 'test_oracle*.py' -v
+python -m unittest discover -s tests -v
+git diff --check
 ```
 
 Tests compare exhaustive terminal-only minimax with every root action under
@@ -347,22 +358,23 @@ terminal minimax, including partial tricks, no trump and doubles. They cover
 point bounds at deterministic node interruptions, objective/cache separation,
 contract cutoffs not applying to points, strict-dominance/tie proofs, contract
 classification, one-time deal validation, every candidate leader and trump,
-per-tree budgets, input immutability, and bounded CLI execution. Synthetic
+per-lead budgets, input immutability, and bounded CLI execution. Synthetic
 aggregation fixtures avoid expensive full-deal exhaustive searches.
 
-The pre-parallelization baseline passed all 237 repository tests. Parallel tests
-add spawn execution, both actors/reference teams, all trumps, exact ties and
-ordering, position-wide branch budgets (including zero), input immutability, cache caps/reuse,
-worker errors/shutdown, and the unchanged one-worker path. Exact complete-deal
-aggregation uses synthetic worker fixtures; real full-deal integration is tested
-with bounded searches, not an unbounded 36-tree exhaustive run. New per-tree
-regressions verify fresh sequential/worker deadlines and a full node allowance
-for every bidder/trump tree, including after an earlier tree exhausts its budget.
+The baseline for the 252-task change passed all 47 focused oracle tests. New
+regressions cover 252 distinct legal keys and default allocations, a single
+shared deadline including validation, cancelled/unstarted tasks, independent
+node counters, completion-driven refill past a slow first task, reversed-result
+aggregation, progress exactly once per task, and the unchanged endgame path.
+Synthetic workers test full-deal aggregation and ties without exhaustive full-hand
+searches. Real spawned searches exercise bounded full deals; tractable real
+endgames are compared with terminal-only exhaustive minimax. No pre-existing
+search correctness failure was observed or repaired in this task.
 
 ## Bounded smoke benchmarks
 
-The historical deal measurements below predate per-tree limits and used the old
-whole-analysis budgets. They remain historical measurements, not predictions for
+The historical deal measurements below predate the 252-task scheduler and used
+old whole-analysis node budgets. They remain historical measurements, not predictions for
 current deal runs. Endgame position budgets still cover one entire position, so
 those workload definitions are unchanged apart from the new defaults.
 
@@ -432,8 +444,8 @@ The complete deal uses seed 42 with 200,000 nodes/10 seconds and the same cache
 cap. Input generation is excluded; validation, spawn and shutdown are included.
 Repeat the [point command recipes](command_reference.md#perfect-information-endgame-oracle)
 with `--workers 1`, `2`, `4`, `8` and the corresponding remaining hand size.
-The historical deal rows used 200,000 nodes for the whole analysis. Current deal
-commands give that allowance to each tree, so they do not reproduce those rows.
+The historical deal rows used 200,000 nodes for the whole analysis. Current deal commands give that node allowance to each of 252 opening-lead
+trees and share one time limit, so they do not reproduce those rows.
 
 The workload column is dominoes per player, or `deal` for all 36 combinations.
 Exact completion is 100% or 0% of the single analysis at that setting. Exact
@@ -483,6 +495,98 @@ The pre-change full suite passed 237 tests; after parallelization it passed 247.
 An additional 772 one-worker baseline comparisons matched the prior implementation
 including node counts, cache hits and proof outputs, excluding elapsed time.
 No underlying oracle correctness repair was included in this change.
+
+### 252-opening-lead scheduler benchmark
+
+Measured on 2026-10-15 with CPython 3.13.5, Intel Core i5-12600KF,
+eight available physical CPUs, WSL2/Linux 6.6.87.2. The previous 36-task code
+is commit `3e55855`; the new code uses 252 independent continuations. Both
+receive the identical arena deal (seed 42, shaker 2), final-point objective,
+100,000 aggregate cache entries, and an equal **252,000-node maximum aggregate
+allowance**. Specifically, the old scheduler gets 7,000 nodes per bidder/trump;
+the new scheduler gets 1,000 per opening lead. Equal numbers on the CLI would
+instead give the new scheduler seven times the potential nodes, so that is not
+used for this comparison. Old counters also include the 36 trump roots; new
+counters begin after each opening lead. Work distribution and pruning differ.
+
+Both use a nonbinding 20-second allowance: per combination in the old code,
+global in the new code. No measured call reached that time limit. Timing covers
+validation, process startup, scheduling, result collection, aggregation and
+shutdown; input generation and console printing are excluded. The new progress
+callback appends events in memory. Two passes were run; the table reports the
+second pass's actual counts and single timings, not a statistical speedup claim.
+Speedup is relative to that scheduler's one-worker run.
+
+| Tasks | Workers | Wall s | Speedup | Nodes | Nodes/s | Cache hits | Sampled sum RSS MiB |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 36 | 1 | 6.2736 | 1.00× | 252000 | 40169 | 36921 | 123 |
+| 252 | 1 | 6.0332 | 1.00× | 251815 | 41739 | 30797 | 134 |
+| 36 | 2 | 2.9866 | 2.10× | 252000 | 84376 | 36636 | 270 |
+| 252 | 2 | 2.9267 | 2.06× | 251815 | 86042 | 27102 | 268 |
+| 36 | 4 | 1.5059 | 4.17× | 252000 | 167345 | 36636 | 320 |
+| 252 | 4 | 1.5454 | 3.90× | 251823 | 162951 | 25884 | 317 |
+| 36 | 8 | 1.0778 | 5.82× | 252000 | 233814 | 36636 | 417 |
+| 252 | 8 | 1.0125 | 5.96× | 251839 | 248730 | 25439 | 414 |
+
+Every old row established 0/252 exact action values, 0/36 exact trump values,
+and 0/4 exact bidder point values. Every new row established 1/252, 1/36 and 1/4,
+respectively. All rows remain `budget_exceeded`: the one exact bidder value does
+not prove its complete optimal-choice set. These are partial-analysis counts,
+not a claim of full-deal exhaustive correctness or fast full-hand completion.
+The new scheduler reaches 5.96× scaling at eight workers and is about 6% faster
+than the old eight-worker run in this pass. At four workers it is about 3%
+slower; in the first pass, two and four workers were slightly slower. Cache
+assignment, reduced reuse and OS timing affect throughput and bounded results.
+
+For the new scheduler, sum of task wall times divided by worker count × total
+wall time was 99.6% / 88.1% / 83.0% / 72.7% at 1/2/4/8 workers. This is an
+approximate occupied-worker fraction including OS waiting, **not CPU utilization**.
+RSS is a 50-ms sampled sum across the coordinator, children and resource tracker;
+it can miss peaks and double-count shared pages. Retained Python allocator memory
+from earlier calls affects these observations. It is not a physical-memory cap.
+
+A startup/coordination-dominated run used 7 nodes per old task versus 1 per new
+task (both 252 total nodes), eight workers, and the same deal/cache/time settings.
+It took **0.1688 seconds for 36 tasks versus 0.2157 for 252**; all action/trump/bidder
+values remained unresolved and both had zero cache hits. That approximately
+28% slowdown demonstrates the cost of smaller tasks and additional IPC. No
+assumption that more tasks always improve speed is made.
+
+The unchanged endgame path was also measured with HHR-generated seeds 0–4,
+no partial trick, all point-action values, 100,000 nodes/five seconds per
+position, and 100,000 cache entries. Each row totals five API calls; process
+startup is included for each parallel call. Every sample completed exactly.
+
+| Dominoes/player | Workers requested | Total wall s | Nodes | Cache hits | Exact |
+| --- | --- | --- | --- | --- | --- |
+| 2 | 1 | 0.0053 | 199 | 0 | 5/5 |
+| 2 | 4 | 0.4390 | 199 | 0 | 5/5 |
+| 3 | 1 | 0.0400 | 2149 | 150 | 5/5 |
+| 3 | 4 | 0.4733 | 2241 | 127 | 5/5 |
+| 4 | 1 | 0.2185 | 11854 | 1421 | 5/5 |
+| 4 | 4 | 0.5739 | 13117 | 1294 | 5/5 |
+
+Small endgames remain much faster sequentially. Resolved workers are capped by
+legal root actions; requesting four does not force four when fewer exist.
+To repeat the new deal workload, run the existing CLI with `--mode deal --seed 42
+--max-nodes 1000 --time-seconds 20 --max-cache-entries 100000` and workers 1/2/4/8.
+For the small-endgame sample use `--objective final_points --seed 0 --samples 5
+--remaining 2 --max-nodes 100000 --time-seconds 5` (then remaining 3 and 4).
+
+A separate eight-worker CLI deadline smoke run used seed 42, 100,000 nodes per
+lead and **0.5 seconds total**. It returned in 0.6090 seconds including shutdown,
+visited 104,404 actual nodes with 17,836 hits, and settled all 252 tasks with
+explicit exact/time-limit/not-started progress. One action/trump/bidder point
+value was exact; complete optimal sets remained unresolved. This was an
+interruption demonstration, not a strict timing assertion; workers returned
+partial results promptly and the final `[252/252]` accounted for skipped work.
+
+Verification passed 52 focused oracle tests and 254 full repository tests,
+including PPO and engine regressions. An additional 320 calls to `solve` and
+`solve_points` matched commit `3e55855` on seeded 2–3-domino positions, both
+output modes and partial tricks, including node/cache counts and proof fields
+(excluding elapsed time). `git diff --check` passed. No unbounded full-hand
+search or training was run for these measurements.
 
 ## Interpretation and limitations
 

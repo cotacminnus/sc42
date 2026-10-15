@@ -49,10 +49,12 @@ python -m examples.endgame_oracle --seed 0 --remaining 3 --samples 100 \
   --max-nodes 100000 --time-seconds 2
 # Final-point endgames (the binary contract cutoff does not apply)
 python -m examples.endgame_oracle --objective final_points --seed 1 --remaining 2
-# Complete deal: each bidder/trump tree gets its own time and node limits
+# Default complete deal: 252 trees, 1048576 nodes/lead, 1800 seconds total
+python -m examples.endgame_oracle --mode deal --seed 42 --workers 8
+# Smaller bounded smoke run: nodes per opening lead, one global time limit
 python -m examples.endgame_oracle --mode deal --seed 42 \
   --max-nodes 10000 --time-seconds 1
-# Spawn multiple independent bidder/trump trees, each with the full allowance
+# Spawn bounded workers for 252 independent opening-lead trees
 python -m examples.endgame_oracle --mode deal --seed 42 --workers 4 \
   --max-nodes 200000 --time-seconds 10
 # Optional independent root-action workers (startup often dominates tiny endgames)
@@ -65,9 +67,9 @@ python -m examples.endgame_oracle --objective final_points --seed 0 \
 
 For the documented parallel smoke measurements, repeat the seed-42 six-domino
 recipe with `--remaining 2`, `3`, `4`, `6` and `--workers 1`, `2`, `4`, `8`.
-The deal recipe now allows 200,000 nodes per bidder/trump tree. Historical
-whole-analysis deal measurements used a different budget scope. See
-[measured scaling and startup costs](endgame_oracle.md#parallelization-smoke-benchmark);
+The deal recipe allows 200,000 nodes per opening-lead tree and ten seconds total.
+Historical whole-analysis node measurements used a different budget scope. See
+[252-task measurements and startup costs](endgame_oracle.md#252-opening-lead-scheduler-benchmark);
 small endgames are usually faster with one worker.
 
 No optional dependencies are required. The default HHR policies generate a
@@ -87,29 +89,37 @@ values, proven lead IDs and complete optimal lead sets, bidder contract bounds,
 proven trump/lead choices, completeness flags and aggregate statistics. All hands
 are visible. This is an open-hand benchmark, not a hidden-information bid
 recommendation; 42 points establishes a one-mark contract without optimizing
-mark stake. Each bidder/trump tree receives a fresh 1,800-second/1,048,576-node
-budget by default, in both sequential and parallel runs. Legal lead branches
-share their parent tree's allowance. Later trees still run after earlier ones
-exhaust their limits, and the whole run may exceed a single tree's time/node cap. Caches
-are private and their aggregate entry count stays within `--max-cache-entries`.
-The CLI prints requested/resolved workers, eligible independent task count,
-aggregate nodes/cache hits, runtime and exact/unresolved results. A deal tree's
-clock starts when its worker begins that task, excluding queueing and startup.
-An endgame position's clock covers the full position call. See [parallel details](endgame_oracle.md#parallel-execution)
+mark stake. There are **252 logical opening-lead tasks**, run by at most eight
+processes. By default, each continuation gets **1,048,576 nodes**, while the
+**entire analysis shares 1,800 seconds**, including validation, worker startup,
+collection and shutdown. The global monotonic deadline never resets per lead.
+Each task has a fresh node counter, so aggregate nodes may exceed the per-lead
+cap (at most 264,241,152 with defaults). Worker-local caches together stay within
+`--max-cache-entries`.
+
+The CLI flushes a live `[completed/252]` line as each task settles, with bidder,
+trump, opening domino, `exact`/`node_limit`/`time_limit`/`not_started`/`cancelled`,
+actual nodes, task runtime and global elapsed time. Explicitly skipped tasks
+count as settled without implying they were searched. Progress can arrive out
+of order; the final tables retain canonical seat/trump/action-ID order. The
+header reports requested/resolved workers and limits. Search statistics and
+proof summaries follow progress. Time limits are cooperative; a transition or
+process shutdown can cause a small overrun. Endgame mode retains its existing
+per-position node/time semantics. See [parallel details](endgame_oracle.md#parallel-execution)
 and [deal proof semantics](endgame_oracle.md#complete-deal-bidding-benchmark).
 
 | Argument | Default | Meaning |
 | --- | --- | --- |
 | `--seed` | Random | Integer deal/policy seed, printed for reproduction; samples use consecutive seeds. |
-| `--mode` | endgame | endgame or deal; deal analyzes all 36 bidder/trump combinations. |
+| `--mode` | endgame | endgame or deal; deal analyzes 252 opening leads across 36 bidder/trump combinations. |
 | `--workers` | 1 | 1 sequential; 0 auto; N requests up to N spawned CPU processes, limited by available CPUs, tasks and a maximum of 8. |
 | `--objective` | contract_success | Endgame: contract_success or final_points. Deal mode always uses final points. |
 | `--remaining` | 3 | Endgame only: 1–7 dominoes per player at the selected trick boundary. |
 | `--partial-plays` | 0 | Endgame only: advance 0–3 additional legal moves after that boundary. |
 | `--policy` | HHR | Endgame only: existing variant HHH, HHR, HRR, CHH, CRR, RRR. |
 | `--output` | all_action_values | Endgame only: all legal root action values, or position_value for root outcome plus one proven optimal action. |
-| `--max-nodes` | 1048576 | Nonnegative node budget per endgame position or bidder/trump tree; lead branches share it. |
-| `--time-seconds` | 1800 | Nonnegative finite seconds per endgame position or bidder/trump tree; no whole-oracle deadline. |
+| `--max-nodes` | 1048576 | Nonnegative nodes per opening-lead continuation in deal mode; per whole endgame position otherwise. |
+| `--time-seconds` | 1800 | Nonnegative finite seconds for the entire deal analysis, or one endgame position. |
 | `--max-cache-entries` | 100000 | Nonnegative aggregate table capacity; parallel workers each get floor(capacity/workers). Zero disables caching. |
 | `--samples` | 1 | Positive endgame position count; >1 selects benchmark summary. Deal mode requires 1. |
 | `-h`, `--help` | Off | Print argument help. |

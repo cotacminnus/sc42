@@ -9,7 +9,7 @@ from texas42.actions import PLAY_ACTIONS
 from texas42.agents import VARIANTS, variant_factory
 from texas42.arena import generate_schedule
 from texas42.models import trump_name
-from texas42.oracle import DealAnalysis, OracleResult, SearchLimits, analyze_deal, solve, solve_points
+from texas42.oracle import DealAnalysis, DealProgress, OracleResult, SearchLimits, analyze_deal, solve, solve_points
 from texas42.parallel import AUTO_WORKER_CAP, resolve_workers
 from texas42.phases import Phase
 from texas42.players import format_hand
@@ -91,6 +91,13 @@ def print_deal(hands, result: DealAnalysis) -> None:
     print(f'Nodes: {result.nodes}; cache hits: {result.cache_hits}; runtime: {result.elapsed_seconds:.6f}s')
 
 
+def print_progress(event: DealProgress) -> None:
+    print(f'[{event.completed}/{event.total}] Bidder {event.bidder} | '
+          f'Trump {trump_name(event.trump)} | Lead {PLAY_ACTIONS[event.action_id]} | '
+          f'{event.status} | nodes={event.nodes} | {event.elapsed_seconds:.3f}s | '
+          f'total={event.global_elapsed_seconds:.3f}s', flush=True)
+
+
 def main(argv: list[str] | None = None) -> None:
     defaults = SearchLimits()
     parser = argparse.ArgumentParser(description=__doc__)
@@ -106,9 +113,9 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument('--policy', choices=tuple(VARIANTS), default='HHR')
     parser.add_argument('--output', choices=('position_value', 'all_action_values'), default='all_action_values')
     parser.add_argument('--max-nodes', type=int, default=defaults.max_nodes,
-                        help='Node limit per tree (default: 1048576)')
+                        help='Nodes per opening lead in deal mode, per position otherwise (default: 1048576)')
     parser.add_argument('--time-seconds', type=float, default=defaults.time_seconds,
-                        help='Seconds per tree (default: 1800)')
+                        help='Total seconds for deal analysis, per position otherwise (default: 1800)')
     parser.add_argument('--max-cache-entries', type=int, default=defaults.max_cache_entries)
     parser.add_argument('--samples', type=int, default=1,
                         help='Consecutive seeds; >1 prints a bounded benchmark summary')
@@ -125,17 +132,20 @@ def main(argv: list[str] | None = None) -> None:
         parser.error(str(error))
     seed = args.seed if args.seed is not None else randbits(64)
     print(f'Seed: {seed}')
-    print(f'Per-tree limits: nodes={limits.max_nodes}, seconds={limits.time_seconds}; '
-          f'aggregate cache entries={limits.max_cache_entries}')
     if args.mode == 'deal':
         deal = generate_schedule(1, seed, shaker=seed % 4)[0]
         hands = [[PLAY_ACTIONS[i] for i in hand] for hand in deal.hands]
-        print('Each bidder/trump combination receives a fresh tree budget; lead branches share it.')
-        count = min(AUTO_WORKER_CAP, resolve_workers(args.workers, 36))
+        count = min(AUTO_WORKER_CAP, resolve_workers(args.workers, 252))
+        print('Starting oracle analysis\nSearch trees: 252')
+        print(f'Workers: {count}\nMaximum nodes per tree: {limits.max_nodes}\n'
+              f'Maximum total time: {limits.time_seconds} seconds\n'
+              f'Aggregate cache entries: {limits.max_cache_entries}', flush=True)
         print(f'Requested oracle workers: {args.workers}; resolved oracle workers: {count}; '
-              'independent search tasks: 36')
-        print_deal(hands, analyze_deal(hands, limits=limits, workers=args.workers))
+              'independent search tasks: 252', flush=True)
+        print_deal(hands, analyze_deal(hands, limits=limits, workers=args.workers, progress=print_progress))
         return
+    print(f'Per-position limits: nodes={limits.max_nodes}, seconds={limits.time_seconds}; '
+          f'aggregate cache entries={limits.max_cache_entries}')
     results = []
     task_counts = []
     undecided = 0

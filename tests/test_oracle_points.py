@@ -226,14 +226,14 @@ class DealAnalysisTests(unittest.TestCase):
         before = deepcopy(hands)
         with patch('texas42.oracle._prepare_state', wraps=_prepare_state) as reconstruct:
             with patch.object(EpisodeState, 'deal', autospec=True, side_effect=EpisodeState.deal) as validate:
-                with patch('texas42.oracle._solve_state', wraps=_solve_state) as search:
+                with patch('texas42.oracle._play_start', wraps=_play_start) as search:
                     result = analyze_deal(hands, limits=SearchLimits(max_nodes=0))
         validate.assert_called_once()
         reconstruct.assert_not_called()
-        self.assertEqual(search.call_count, 36)
-        for call, (bidder, trump) in zip(search.call_args_list,
+        self.assertEqual(search.call_count, 36 + 252)
+        for call, (bidder, trump) in zip(search.call_args_list[:36],
                                         ((seat, trump) for seat in range(4) for trump in TRUMP_ACTIONS)):
-            state = call.args[0]
+            state = _play_start(call.args[0], call.args[1], call.args[2])
             self.assertEqual(state.seat, bidder)
             self.assertEqual(state.bidder, bidder)
             self.assertEqual(state.contract.bidder, bidder)
@@ -278,7 +278,7 @@ class DealAnalysisTests(unittest.TestCase):
             limits = SearchLimits(max_nodes=nodes)
             first = analyze_deal(hands, limits=limits)
             second = analyze_deal(hands, limits=limits)
-            self.assertEqual(first.nodes, 36 * nodes)
+            self.assertEqual(first.nodes, 252 * nodes)
             self.assertEqual(first.status, 'budget_exceeded')
             self.assertEqual(replace(first, elapsed_seconds=0), replace(second, elapsed_seconds=0))
             if nodes > 1:
@@ -301,10 +301,10 @@ class DealAnalysisTests(unittest.TestCase):
 
     def test_bounded_cli_and_point_endgame_smoke(self):
         with redirect_stdout(io.StringIO()) as out:
-            main(['--mode', 'deal', '--seed', '42', '--max-nodes', '100', '--time-seconds', '1'])
-        for text in ('Per-tree limits: nodes=100', 'all hands visible', 'mark stake is not optimized',
+            main(['--mode', 'deal', '--seed', '42', '--max-nodes', '1', '--time-seconds', '10'])
+        for text in ('Maximum nodes per tree: 1', 'all hands visible', 'mark stake is not optimized',
                      'Bidder seat 3', 'Follow Me (no trump)', 'maximum makeable contract: unresolved',
-                     'Status: budget_exceeded', 'Nodes: 3600;'):
+                     'Status: budget_exceeded', 'Nodes: 252;', '[252/252]'):
             self.assertIn(text, out.getvalue())
         unresolved = analyze_deal(full_hands(), limits=SearchLimits(max_nodes=0))
         with patch('examples.endgame_oracle.analyze_deal', return_value=unresolved) as analyze:
