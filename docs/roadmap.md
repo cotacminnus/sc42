@@ -23,7 +23,7 @@ Step numbers match the team's live planning document.
 | 5 | Baseline agents | V1 baselines done | HeuristicAgent, RandomAgent, ConservativeRandomAgent, HybridAgent; [phase ablations](policy_ablation.md) |
 | 6 | Self-play training | Play-only and multi-phase historical PPO implemented | [legacy baseline](ppo_training.md), [current training](multiphase_selfplay.md) |
 | 7 | Hidden-information reasoning | Belief toolkit implemented: exact counting, sampling, policy likelihoods, rollouts, PIMC action values | [belief modelling](belief.md); PIMC agent available, arena study next |
-| 8 | Partnership behavior | Not started | uses the arena (step 11) |
+| 8 | Partnership behavior | Paired-partner training and two-spec team evaluation implemented; studies not started | [paired partners](multiphase_selfplay.md#paired-partner-training) |
 | 9 | Bidding | Neural bid-only/joint PPO and counterfactual tools implemented; strength to evaluate | [multi-phase PPO](multiphase_selfplay.md), [counterfactuals](counterfactual_bidding.md) |
 | 10 | Special contracts (Nello) | IDs reserved | `actions.py` IDs 55–57 |
 | 11 | Evaluation | Paired arena and phase composition implemented | [methodology](arena.md), [agent composition](phase_composable_evaluation.md) |
@@ -161,6 +161,13 @@ comparisons against HHH; uniform vs policy belief log-loss on logged deals
 Train several seeds per method. Compare self-play (a seed with itself) against
 cross-play (seed i partnered with seed j). A large gap indicates arbitrary
 private conventions; Other-Play is a known mitigation.
+
+Paired-partner training (`--paired-partners`) trains two separate networks for
+the learning team. Two-spec team evaluation (`--agent-X-partner-*`) supports
+pair, mirrored and cross-play comparisons; see
+[paired partners](multiphase_selfplay.md#paired-partner-training). Next: compare
+paired vs shared training at equal hands over several seeds, and cross-play each
+partner with heuristic and other-seed partners.
 
 ### 9. Bidding
 

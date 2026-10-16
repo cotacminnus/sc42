@@ -20,6 +20,35 @@ def strategy_label(strategy):
     return 'PIMC' if strategy == 'pimc' else strategy.title()
 
 
+def partner_index(seat):
+    """Paired-partner rule: 0 for a team's first seat (0 or 1), 1 for its second (2 or 3).
+
+    Shared by paired training collection, in-training validation and paired
+    evaluation. The arena seats policy A at 0/2 (ABAB) and then 1/3 (BABA), so
+    "partner 1" is always the lower seat of whichever team it plays for.
+    """
+    return seat // 2
+
+
+@dataclass(frozen=True)
+class PairedAgentFactory:
+    """One partnership from two factories: first seat -> `first`, partner seat -> `second`.
+
+    Any arena-style factories work (composite, frozen PPO, variants). With no
+    pairing, the arena simply calls one factory for both partner seats.
+    """
+    first: object
+    second: object
+
+    def prepare(self):
+        for factory in (self.first, self.second):
+            if hasattr(factory, 'prepare'):
+                factory.prepare()
+
+    def __call__(self, seat, seed):
+        return (self.first if partner_index(seat) == 0 else self.second)(seat, seed)
+
+
 @dataclass(frozen=True)
 class PhasePolicySpec:
     strategy: str = 'heuristic'
@@ -225,13 +254,25 @@ def evaluate_matchups(factory, opponents, *, neural=False, performance=None, **k
             torch.set_num_threads(previous)
 
 
-def evaluate_composed(a, b, *, stochastic=False, pimc_samples=DEFAULT_PIMC_SAMPLES,
-                      performance=None, **kwargs):
-    """Canonical two-agent composition API, backed by the paired arena."""
-    neural = any(s.strategy == 'neural' for spec in (a, b) for _, s in spec.items())
+def evaluate_composed(a, b, *, a_partner=None, b_partner=None, stochastic=False,
+                      pimc_samples=DEFAULT_PIMC_SAMPLES, performance=None, **kwargs):
+    """Canonical two-agent composition API, backed by the paired arena.
+
+    a_partner/b_partner optionally give that team's second seat (2 or 3) its own
+    composition, e.g. the second network of a paired-partner training run.
+    None keeps the original mirrored team: one specification for both seats.
+    """
+    specs = tuple(s for s in (a, b, a_partner, b_partner) if s is not None)
+    neural = any(s.strategy == 'neural' for spec in specs for _, s in spec.items())
+
+    def team(spec, partner):
+        first = CompositeAgentFactory(spec, not stochastic, pimc_samples)
+        if partner is None:
+            return first
+        return PairedAgentFactory(first, CompositeAgentFactory(partner, not stochastic, pimc_samples))
+
     telemetry = {}
-    report = evaluate_matchups(CompositeAgentFactory(a, not stochastic, pimc_samples),
-        ((b.name, CompositeAgentFactory(b, not stochastic, pimc_samples)),), neural=neural,
+    report = evaluate_matchups(team(a, a_partner), ((b.name, team(b, b_partner)),), neural=neural,
         performance=telemetry, **kwargs)[b.name]
     if performance is not None:
         # Keep the public performance shape of this single-comparison API.

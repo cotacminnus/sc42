@@ -511,6 +511,7 @@ learner-width compatibility. See [mechanics](multiphase_selfplay.md#initializati
 | `--opponent-composition` | Repeatable `NAME=JSON_PATH` | No compositions | Register a frozen phase-composable opponent. Source checkpoint registrations are resolved before JSON definitions; earlier composed names cannot serve as single phase sources. See [JSON recipe](#register-composed-training-opponents). |
 | `--snapshot-every-hands` | Integer > 0 | `32768` | Publication threshold since last snapshot, checked at rollout/update boundaries. Publishes only following a nonempty batch when every routed neural phase is trained. Threshold may overshoot; not every exact multiple produces a filename. |
 | `--snapshot-pool-size` | Integer > 0 | `8` | Maximum active historical policies. Evicts oldest membership, not files. The separate anchor is never evicted. No CLI switch disables publication; snapshots can be produced even if the current pool does not sample them. |
+| `--paired-partners` | Boolean flag | Off (shared) | Train two separate learner networks: partner 1 plays the team's first seat (0/1), partner 2 its second seat (2/3). Saves `checkpoints/partner-1/` and `partner-2/`; no historical snapshots (`self-snapshots` is rejected). Stored as `partner_mode` and kept on resume. See [paired partners](multiphase_selfplay.md#paired-partner-training). |
 
 Built-in variants are defined [once above](#22-policy-baselines-and-ablations):
 HHH is heuristic in all phases; CHH passes unless forced but retains heuristic
@@ -796,6 +797,42 @@ Sources are copied once, not followed as their original experiments train furthe
 Do not overwrite files referenced by this experiment. Snapshot files can replace
 the named source paths when their metadata declares the needed trained phase.
 
+### Paired-partner training and evaluation
+
+Two separate networks for the learning team, each free to specialize. Both
+start from the same initialization and are optimized only on their own seat's
+decisions. Historical self-snapshots are not supported in this mode.
+
+```bash
+# Train the pair (bid + play) against HHH and the anchor
+python -m examples.train_selfplay_ppo \
+  --init-play-checkpoint runs/ppo-play-v1/checkpoints/best.pt \
+  --learn-phases bid,play --paired-partners \
+  --opponent-pool HHH:0.5,anchor:0.5 --eval-opponents HHH,anchor --selection-opponent HHH \
+  --total-hands 100000 --rollout-decisions 1024 --threads 4 \
+  --output-dir runs/ppo-paired --log-dir logs/experiments/ppo-paired
+# Resume: pass either partner file; its sibling is located automatically
+python -m examples.train_selfplay_ppo \
+  --resume runs/ppo-paired/checkpoints/partner-1/latest.pt --total-hands 200000 \
+  --output-dir runs/ppo-paired --log-dir logs/experiments/ppo-paired-resume
+# Evaluate the pair as one team (partner 1 in seat 0/1, partner 2 in seat 2/3)
+python -m examples.evaluate_agent_vs_agent \
+  --agent-a-bid neural --agent-a-play neural \
+  --agent-a-checkpoint runs/ppo-paired/checkpoints/partner-1/best.pt \
+  --agent-a-partner-checkpoint runs/ppo-paired/checkpoints/partner-2/best.pt \
+  --deals 2048 --threads 0
+# Cross-play: paired model 1 beside a heuristic partner
+python -m examples.evaluate_agent_vs_agent \
+  --agent-a-bid neural --agent-a-play neural \
+  --agent-a-checkpoint runs/ppo-paired/checkpoints/partner-1/best.pt \
+  --agent-a-partner-bid heuristic --agent-a-partner-play heuristic --deals 2048 --threads 0
+```
+
+Each partner file is an ordinary version-2 checkpoint. Use it alone anywhere a
+checkpoint is accepted, for example `--agent-a-checkpoint .../partner-2/best.pt`
+for a mirrored team of model 2. `best.pt` is selected by the pair's validation
+score and saved for both partners together.
+
 ### Register composed training opponents
 
 **Recipe 10.** Requires a trained joint bid/play checkpoint and its original anchor.
@@ -1010,6 +1047,8 @@ Evaluation is CPU inference; there is no optimizer/device or trainability flag h
 | `--agent-a-trump-checkpoint`, `--agent-b-trump-checkpoint` | Trained trump source path | Unset | Overrides only that agent's neural trump source. |
 | `--agent-a-play-checkpoint`, `--agent-b-play-checkpoint` | Trained play source path | Unset | Overrides only that agent's neural playing source. |
 | `--stochastic-neural` | Boolean flag | Off (greedy) | Seeded phase-local sampling, independent between seats/phases; still frozen inference. |
+| `--agent-a-partner-bid`, `--agent-a-partner-trump`, `--agent-a-partner-play` (and `-b-`) | Same choices as the first seat | First seat's strategy | Second-seat (2/3) strategy. Any partner flag turns on a two-spec team; without them both seats use one spec, as before. |
+| `--agent-a-partner-checkpoint`, `--agent-a-partner-PHASE-checkpoint` (and `-b-`) | Checkpoint path | First seat's sources | Second-seat neural sources, e.g. partner-2 of a paired run. Partner phase override, then partner default, then (only if neither is given) the first seat's sources. |
 | `--pimc-samples` | Integer > 0 | 32 | Sampled hidden deals per PIMC decision (every deal when few remain). Cost grows linearly; recorded in JSON only when PIMC is used. |
 | `--deals` | Integer > 0 | 2048 | Complete duplicate groups; two games/group. |
 | `--seed` | Integer | 42 | Arena deal/agent seed; choose independent final seeds. |

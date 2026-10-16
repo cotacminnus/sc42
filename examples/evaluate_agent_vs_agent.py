@@ -11,13 +11,50 @@ from research.ppo.composition import (STRATEGIES, CompositeAgentFactory, compari
 from texas42.agents.pimc import DEFAULT_PIMC_SAMPLES
 from research.ppo.diagnostics import evaluation_diagnostics
 
+PHASES = ('bid', 'trump', 'play')
+
 
 def policy_spec(args, agent):
     prefix = f'agent_{agent}_'
     return resolve_policy_spec(agent.upper(),
-        tuple(getattr(args, prefix + phase) for phase in ('bid', 'trump', 'play')),
+        tuple(getattr(args, prefix + phase) for phase in PHASES),
         getattr(args, prefix + 'checkpoint'),
-        tuple(getattr(args, prefix + phase + '_checkpoint') for phase in ('bid', 'trump', 'play')))
+        tuple(getattr(args, prefix + phase + '_checkpoint') for phase in PHASES))
+
+
+def partner_spec(args, agent, first):
+    """Second-seat (seat 2/3) composition for one agent, or None for a mirrored team.
+
+    Used for paired-partner models, or for cross-play such as a trained model
+    beside a heuristic partner. An unset partner phase inherits the first
+    seat's strategy. A neural partner phase loads, in order: its own
+    --agent-X-partner-PHASE-checkpoint, then --agent-X-partner-checkpoint, and
+    only when neither partner checkpoint flag is given, the first seat's sources.
+    """
+    prefix = f'agent_{agent}_partner_'
+    strategies = tuple(getattr(args, prefix + phase) for phase in PHASES)
+    default = getattr(args, prefix + 'checkpoint')
+    overrides = tuple(getattr(args, prefix + phase + '_checkpoint') for phase in PHASES)
+    if all(value is None for value in (*strategies, default, *overrides)):
+        return None
+    strategies = tuple(own or inherited.strategy for own, (_, inherited) in zip(strategies, first.items()))
+    if default is None:
+        default = getattr(args, f'agent_{agent}_checkpoint')
+        inherited = tuple(getattr(args, f'agent_{agent}_{phase}_checkpoint') if strategy == 'neural' else None
+                          for phase, strategy in zip(PHASES, strategies))
+        overrides = tuple(own or source for own, source in zip(overrides, inherited))
+    return resolve_policy_spec(f'{agent.upper()} partner', strategies, default, overrides)
+
+
+def describe(title, spec):
+    print(f'{title}: {spec.label()}')
+    for phase, policy in spec.items():
+        checkpoint = f' [{policy.checkpoint.sha256}] {policy.checkpoint.path}' if policy.checkpoint else ''
+        print(f'  {phase.title()}: {strategy_label(policy.strategy)}{checkpoint}')
+
+
+def team_label(spec, partner):
+    return spec.label() if partner is None else f'{spec.label()} + partner {partner.label()}'
 
 
 @record_output
@@ -25,9 +62,15 @@ def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
     for agent in ('a', 'b'):
         p.add_argument(f'--agent-{agent}-checkpoint', type=Path)
-        for phase in ('bid', 'trump', 'play'):
+        p.add_argument(f'--agent-{agent}-partner-checkpoint', type=Path,
+                       help=f'default neural source for agent {agent.upper()}\'s second seat (2/3), '
+                            'e.g. partner-2 of a paired training run')
+        for phase in PHASES:
             p.add_argument(f'--agent-{agent}-{phase}', choices=STRATEGIES[phase], default='heuristic')
             p.add_argument(f'--agent-{agent}-{phase}-checkpoint', type=Path)
+            p.add_argument(f'--agent-{agent}-partner-{phase}', choices=STRATEGIES[phase],
+                           help='second-seat strategy; defaults to the first seat\'s')
+            p.add_argument(f'--agent-{agent}-partner-{phase}-checkpoint', type=Path)
     add_evaluation_arguments(p, seed=42)
     p.add_argument('--stochastic-neural', action='store_true', help='Seeded sampling instead of greedy neural inference')
     p.add_argument('--pimc-samples', type=int, default=DEFAULT_PIMC_SAMPLES,
@@ -41,38 +84,47 @@ def main(argv=None):
         p.error('--pimc-samples must be positive')
     try:
         a, b = (policy_spec(args, agent) for agent in ('a', 'b'))
+        # Optional second-seat compositions; None keeps one spec for both seats.
+        a2, b2 = partner_spec(args, 'a', a), partner_spec(args, 'b', b)
         # Validate availability in the parent so unsupported neural phases fail clearly.
-        for spec in (a, b):
-            CompositeAgentFactory(spec).prepare()
+        for spec in (a, b, a2, b2):
+            if spec is not None:
+                CompositeAgentFactory(spec).prepare()
         metadata = comparison_metadata(a, b)
+        partners = {'A': (a, a2), 'B': (b, b2)}
+        partner_metadata = {name: comparison_metadata(first, second) if second else None
+                            for name, (first, second) in partners.items()}
     except (ValueError, OSError, ImportError) as exc:
         p.error(str(exc))
-    for spec in (a, b):
-        print(f'Agent {spec.name}: {spec.label()}')
-        for phase, policy in spec.items():
-            checkpoint = f' [{policy.checkpoint.sha256}] {policy.checkpoint.path}' if policy.checkpoint else ''
-            print(f'  {phase.title()}: {strategy_label(policy.strategy)}{checkpoint}')
+    for name, (spec, partner) in partners.items():
+        describe(f'Agent {name}' + (' first seat (0/1)' if partner else ''), spec)
+        if partner:
+            describe(f'Agent {name} partner seat (2/3)', partner)
+            same = partner_metadata[name]['neural_parameters_identical']
+            shared = ', '.join(f'{phase} {"YES" if value else "NO"}' for phase, value in same.items() if value is not None)
+            print(f'  Partner shares neural parameters with first seat: {shared or "N/A (no common neural phase)"}')
     for phase, same in metadata['neural_parameters_identical'].items():
         print(f'Shared {dict(bid="bidding", trump="trump", play="playing")[phase]} parameters: ' + ('N/A (not both neural)' if same is None else 'YES' if same else 'NO'))
     print(f'Shared complete checkpoint: {metadata["shared_complete_checkpoint"]}')
     print(f'Only one phase differs: {metadata["only_one_phase_differs"]}; differing phases: {", ".join(metadata["differing_phases"]) or "none"}')
-    uses_pimc = any(s.strategy == 'pimc' for spec in (a, b) for _, s in spec.items())
+    uses_pimc = any(s.strategy == 'pimc' for spec in (a, b, a2, b2) if spec for _, s in spec.items())
     if uses_pimc:
         print(f'PIMC: {args.pimc_samples} sampled deals per decision, Heuristic V1 rollouts '
               '(roughly 0.1-2 s per decision; see docs/belief.md)')
     preparation_seconds = perf_counter() - started
     performance = {}
     try:
-        report = evaluate_composed(a, b, stochastic=args.stochastic_neural, pimc_samples=args.pimc_samples,
-            num_deals=args.deals, seed=args.seed, bootstrap_seed=args.bootstrap_seed,
-            bootstrap_samples=args.bootstrap_samples, threads=args.threads,
-            episode=args.episode, target_marks=args.target_marks, performance=performance)
+        report = evaluate_composed(a, b, a_partner=a2, b_partner=b2, stochastic=args.stochastic_neural,
+            pimc_samples=args.pimc_samples, num_deals=args.deals, seed=args.seed,
+            bootstrap_seed=args.bootstrap_seed, bootstrap_samples=args.bootstrap_samples,
+            threads=args.threads, episode=args.episode, target_marks=args.target_marks,
+            performance=performance)
     except (ValueError, OSError) as exc:
         p.error(str(exc))
     elapsed = perf_counter() - started
     print(f'Configuration/checkpoint preparation: {preparation_seconds:.3f} s')
     print(format_performance(performance))
-    print(format_report(report, {'A': a.label(), 'B': b.label()}, elapsed))
+    print(format_report(report, {'A': team_label(a, a2), 'B': team_label(b, b2)}, elapsed))
     details = evaluation_diagnostics(report)
     print(format_breakdown(details))
     print('\nAuction calls and partnership roles')
@@ -83,6 +135,7 @@ def main(argv=None):
         for name, d in details.items() for role, stats in d['roles'].items()]))
     print('Contracts = auctions won, not hands won. Phase effects interact; this comparison does not establish global optimality.')
     if (all(metadata['phase_policies_identical'].values()) and not args.stochastic_neural
+            and a2 is None and b2 is None
             and all(s.strategy not in ('random', 'pimc') for _, s in a.items())):
         print('Identical deterministic policies: paired symmetry check, not evidence of strength.')
     if args.output:
@@ -92,6 +145,12 @@ def main(argv=None):
             sampling_scheme='composite-phase-v1'), breakdown=details)
         if uses_pimc:
             data['composition']['pimc_samples'] = args.pimc_samples
+        if a2 or b2:
+            # Present only for paired/cross-play teams, so mirrored-team JSON is unchanged.
+            data['composition']['partners'] = {name: second.to_dict() if second else None
+                                               for name, (_, second) in partners.items()}
+            data['composition']['partner_comparisons'] = partner_metadata
+            data['composition']['partner_seat_rule'] = 'first spec: seat 0/1; partner spec: seat 2/3'
         args.output.write_text(json.dumps(data, indent=2) + '\n', encoding='utf-8')
         print(f'JSON results saved to {args.output}')
     return report

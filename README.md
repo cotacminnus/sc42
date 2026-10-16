@@ -44,6 +44,7 @@ explains sample counts, rewards, source identities and resume. Use the
 | Commands, arguments, JSON/log/CSV paths | [Command reference](docs/command_reference.md) |
 | Original play-only PPO and version-1 reproduction | [Legacy PPO](docs/ppo_training.md) |
 | Independently train/freeze bidding, trump and play; composed/historical opponents | [Multi-phase PPO](docs/multiphase_selfplay.md) |
+| Two separately trained partner networks; pair and cross-play evaluation | [Paired partners](docs/multiphase_selfplay.md#paired-partner-training) |
 | Independently composed agents and phase ablations | [Phase-composable evaluation](docs/phase_composable_evaluation.md) |
 | Duplicate deals, metrics, bootstrap uncertainty | [Arena methodology](docs/arena.md) |
 | Frozen heuristic and random/conservative variants | [Heuristic V1](docs/simpleheuristic.md), [policy ablations](docs/policy_ablation.md) |

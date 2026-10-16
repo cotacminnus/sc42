@@ -92,6 +92,10 @@ def save(path, trainer):
     data['bc_metrics'] = trainer.bc_metrics
     data['metadata']['learner_phases'] = [asdict(s) for s in trainer.learner_phases]
     data['metadata']['optimizer_parameters'] = [name for name, p in trainer.model.named_parameters() if p.requires_grad]
+    if getattr(trainer, 'pairing', None):
+        # Paired-partner provenance only. The file stays an ordinary version-2
+        # checkpoint: evaluation, opponents and stage initialization load it alone.
+        data['metadata']['pairing'] = dict(trainer.pairing)
     temporary = path.with_name(path.name + '.tmp')
     torch.save(data, temporary)
     temporary.replace(path)
@@ -140,3 +144,47 @@ def resume(path, trainer):
         from .multiphase import LearnerPhaseSpec
         trainer.learner_phases = tuple(LearnerPhaseSpec(**s) for s in data['metadata']['learner_phases'])
     restore_rng(data['rng'], trainer)
+
+
+# Paired-partner checkpoints. A pair is two ordinary version-2 files saved side
+# by side as <checkpoints>/partner-1/<name> and <checkpoints>/partner-2/<name>,
+# each tagged with metadata['pairing']. Either file can be used alone anywhere a
+# checkpoint is accepted ("paired model 1/2"); exact resume needs both.
+PARTNER_DIRECTORIES = ('partner-1', 'partner-2')
+
+
+def save_pair(directory, name, trainer):
+    """Save a PairedSelfPlayTrainer's two partners with the existing save()."""
+    directory = Path(directory)
+    save(directory / PARTNER_DIRECTORIES[0] / name, trainer)
+    save(directory / PARTNER_DIRECTORIES[1] / name, trainer.partner)
+    return tuple(directory / folder / name for folder in PARTNER_DIRECTORIES)
+
+
+def pair_paths(path):
+    """Given either partner file, return (partner-1 path, partner-2 path)."""
+    from .checkpoint import read
+    path = Path(path)
+    pairing = read(path)['metadata'].get('pairing')
+    if not pairing or pairing.get('mode') != 'paired-v1':
+        raise ValueError(f'{path} is not a paired-partner checkpoint')
+    root = path.parent.parent
+    return tuple(root / folder / path.name for folder in PARTNER_DIRECTORIES)
+
+
+def resume_pair(path, trainer):
+    """Exactly resume both partners of a PairedSelfPlayTrainer from one saved pair.
+
+    Checks that the two files are partners 1 and 2 of the same run (identical
+    configuration and hand count) before restoring each with resume().
+    """
+    from .checkpoint import read
+    first, second = pair_paths(path)
+    a, b = read(first), read(second)
+    if [a['metadata'].get('pairing', {}).get('partner'), b['metadata'].get('pairing', {}).get('partner')] != [1, 2]:
+        raise ValueError('Paired checkpoint files are not partners 1 and 2')
+    if a['config'] != b['config'] or a['progress']['hands'] != b['progress']['hands']:
+        raise ValueError('Paired checkpoint files come from different runs or update boundaries')
+    resume(first, trainer)
+    resume(second, trainer.partner)
+    return first, second

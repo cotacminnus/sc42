@@ -348,6 +348,30 @@ inference/RSS separately, so those legacy baseline fields are unavailable rather
 than estimated. Snapshot SHA256 covers the entire file: execution provenance can
 change a file's hash even when model tensors and future sampled decisions agree.
 
+## Paired-partner training
+
+`--paired-partners` (`SelfPlayConfig.partner_mode='paired'`) replaces the one
+shared learner network with two, so the partners can develop complementary
+habits. Shared mode remains the default and is unchanged.
+
+| Aspect | Paired behaviour |
+| --- | --- |
+| Seats | Partner 1 plays the learning team's first seat (0 or 1); partner 2 its second (2 or 3). The learning team still alternates by episode, and the shaker rotates, so the seat is not a fixed bidding position. Specialization can only be conventional. |
+| Initialization | Both partners start from identical weights: the second trainer repeats the first's seeded initialization. Differences come only from experience. |
+| Collection | One rollout. Each learner seat acts and records with its own network; opponents, deals and the per-hand sampling stream are shared. With identical weights, records equal shared mode exactly (tested). |
+| Optimization | Each partner runs the unchanged PPO update on its own seat's samples, with its own Adam state and minibatch-shuffle stream. Advantages are normalized per partner batch. |
+| Samples | About half per network: about 8 per hand with bid+play, versus 16 for a shared network. `--rollout-decisions` counts both partners together. |
+| Validation and best.pt | The pair validates as one team (seat-aware factory). `best.pt` is chosen by the pair's score and saved for both partners. |
+| Files | `checkpoints/partner-1/{latest,best}.pt` and `partner-2/...`: ordinary version-2 checkpoints tagged `metadata.pairing`. Each loads alone wherever a checkpoint is accepted. |
+| Resume | `--resume` with either partner file restores both after checking they belong together. `partner_mode` is part of the config and cannot change on resume. |
+| Not yet supported | Historical self-snapshots (`self-snapshots` is rejected; no snapshots are published). Bidding imitation, frozen-phase verification and anchor KL run per partner; progress rows add a `partners` block. |
+
+Implementation: `PairedSelfPlayTrainer` in `selfplay_trainer.py` (partner 2 is
+an ordinary `SelfPlayTrainer`); `save_pair`, `pair_paths` and `resume_pair` in
+`selfplay_checkpoint.py`. For evaluation, see
+[two-spec teams](phase_composable_evaluation.md#two-spec-teams-paired-partners-and-cross-play)
+and the [recipes](command_reference.md#paired-partner-training-and-evaluation).
+
 ## Evaluation ownership
 
 [Phase-composable evaluation](phase_composable_evaluation.md) is the canonical

@@ -11,8 +11,8 @@ from research.ppo.trainer import Config
 from research.ppo.checkpoint import load_model
 from research.ppo.multiphase import phases, PhaseActorCritic, PHASES, resolve_learner_phases
 from research.ppo.opponents import PolicySpec, CheckpointIdentity, historical_pool, policy_registry
-from research.ppo.selfplay_trainer import SelfPlayConfig, SelfPlayTrainer
-from research.ppo.selfplay_checkpoint import save, resume, config_from_dict
+from research.ppo.selfplay_trainer import SelfPlayConfig, SelfPlayTrainer, PairedSelfPlayTrainer
+from research.ppo.selfplay_checkpoint import save, resume, config_from_dict, save_pair, resume_pair
 from research.ppo.selfplay_evaluation import evaluate_phases, frozen_model, evaluation_diagnostics
 from research.ppo.imitation import clone_bidding, teacher_data, playing_kl
 from research.ppo.seeds import stream_seed
@@ -49,6 +49,9 @@ def main(argv=None):
     parser.add_argument('--snapshot-pool-size', type=int, default=8)
     parser.add_argument('--bid-bc-hands', type=int, default=0)
     parser.add_argument('--forgetting-hands', type=int, default=8)
+    parser.add_argument('--paired-partners', action='store_true',
+                        help='train two separate learner networks: partner 1 plays the team\'s first seat '
+                             '(0/1), partner 2 its second seat (2/3); saved as checkpoints/partner-1 and partner-2')
     parser.add_argument('--eval-threads', type=int, default=1)
     parser.add_argument('--output-dir', type=Path, default=Path('runs/ppo-selfplay'))
     add_output_arguments(parser)
@@ -146,7 +149,8 @@ def main(argv=None):
             rollout_decisions=args.rollout_decisions, snapshot_every_hands=args.snapshot_every_hands,
             snapshot_pool_size=args.snapshot_pool_size, bid_bc_hands=args.bid_bc_hands,
             forgetting_hands=args.forgetting_hands, sampling_scheme='episode-v1',
-            learner_phases=learner, max_rollout_hands=args.max_rollout_hands)
+            learner_phases=learner, max_rollout_hands=args.max_rollout_hands,
+            partner_mode='paired' if args.paired_partners else 'shared')
         if args.resume:
             if saved is None:
                 raise ValueError('Resume requires a multi-phase checkpoint; use --init-play-checkpoint for migration')
@@ -156,7 +160,8 @@ def main(argv=None):
             for flag, key in (('--opponent-pool', 'opponent_probabilities'),
                               ('--opponent-checkpoint', 'opponent_policies'),
                               ('--opponent-composition', 'opponent_policies'),
-                              ('--eval-opponents', 'evaluation_names'), ('--selection-opponent', 'primary_opponent')):
+                              ('--eval-opponents', 'evaluation_names'), ('--selection-opponent', 'primary_opponent'),
+                              ('--paired-partners', 'partner_mode')):
                 if flag in explicit:
                     changes[key] = getattr(config, key)
             if configured:
@@ -173,14 +178,24 @@ def main(argv=None):
             factory = spec.factory()
             if hasattr(factory, 'prepare'):
                 factory.prepare()
-        trainer = SelfPlayTrainer(config, initial)
+        # Paired mode (saved in the config, so resume keeps it): two learner
+        # networks. `learners` lists every network-owning trainer, partner 1 first.
+        paired = config.partner_mode == 'paired'
+        trainer = (PairedSelfPlayTrainer if paired else SelfPlayTrainer)(config, initial)
+        learners = (trainer, trainer.partner) if paired else (trainer,)
         if args.resume:
-            resume(args.resume, trainer)
+            (resume_pair if paired else resume)(args.resume, trainer)
         elif args.bid_bc_hands:
-            bc = clone_bidding(trainer, args.bid_bc_hands)
-            print(f'Bidding imitation: {bc["samples"]} samples; loss {bc["loss"]:.4f}; accuracy {bc["accuracy"]:.1%}')
+            for index, learner in enumerate(learners, start=1):
+                bc = clone_bidding(learner, args.bid_bc_hands)
+                who = f' (partner {index})' if paired else ''
+                print(f'Bidding imitation{who}: {bc["samples"]} samples; loss {bc["loss"]:.4f}; accuracy {bc["accuracy"]:.1%}')
     except (ValueError, OSError) as exc:
         parser.error(str(exc))
+
+    def save_checkpoint(name):
+        # Shared: checkpoints/<name>. Paired: checkpoints/partner-{1,2}/<name>.
+        return save_pair(checkpoints, name, trainer) if paired else save(checkpoints / name, trainer)
     directory.mkdir(parents=True, exist_ok=True)
     (directory / 'config.json').write_text(json.dumps(asdict(config), indent=2) + '\n')
     checkpoints = directory / 'checkpoints'
@@ -188,9 +203,13 @@ def main(argv=None):
     validation_seed = stream_seed(config.seed, 'selfplay-validation-v1')
     bootstrap_seed = stream_seed(config.seed, 'selfplay-validation-bootstrap-v1')
     reference = teacher_data(config.seed, config.forgetting_hands, anchor=anchor)
-    frozen_states = {p: {k: v.detach().cpu().clone() for k, v in trainer.model.networks[p].state_dict().items()}
-                     for p in trainer.model.neural_phases if p not in config.learn_phases}
+    # One snapshot per learner network; frozen phases must stay bitwise equal in every partner.
+    frozen_states = [{p: {k: v.detach().cpu().clone() for k, v in t.model.networks[p].state_dict().items()}
+                      for p in t.model.neural_phases if p not in config.learn_phases} for t in learners]
     print(f'Multi-phase PPO: learn {",".join(config.learn_phases)}, neural {",".join(trainer.model.neural_phases)}')
+    if paired:
+        print('Partners: paired (partner 1 = team first seat 0/1, partner 2 = second seat 2/3; '
+              'no historical snapshots)')
     for phase, spec in zip(PHASES, trainer.learner_phases):
         print(f'  {phase}: {spec.state}; initialization={spec.initialization}; source={spec.source}')
     print(f'Anchor: {config.anchor.path}\nAnchor SHA256: {config.anchor.sha256}')
@@ -199,17 +218,20 @@ def main(argv=None):
     try:
         while trainer.hands < config.total_hands:
             before, update_started = trainer.hands, perf_counter()
+            # Paired collect() returns one buffer per partner; update() trains each separately.
             buffer, reward = trainer.collect()
-            sample_count = len(buffer)
+            sample_count = sum(len(b) for b in buffer) if paired else len(buffer)
             trainer.optimization_seconds = 0.0
             metrics = trainer.update(buffer) if sample_count else {}
-            frozen_verified = {p: all(torch.equal(v.detach().cpu(), frozen_states[p][k])
-                for k, v in trainer.model.networks[p].state_dict().items()) for p in frozen_states}
+            frozen_verified = {p: all(torch.equal(v.detach().cpu(), states[p][k])
+                for t, states in zip(learners, frozen_states)
+                for k, v in t.model.networks[p].state_dict().items()) for p in frozen_states[0]}
             if not all(frozen_verified.values()):
                 raise RuntimeError('Frozen phase parameters changed during training')
             frozen_play_verified = frozen_verified.get('play')
             final = trainer.hands == config.total_hands
-            row = dict(hands=trainer.hands, play_samples=trainer.samples, training_samples=trainer.samples,
+            total_samples = sum(t.samples for t in learners)  # Both partners when paired.
+            row = dict(hands=trainer.hands, play_samples=total_samples, training_samples=total_samples,
                 updates=trainer.updates, optimizer_steps=trainer.optimizer_steps, mean_reward=reward,
                 phase_samples=trainer.phase_counts, training_by_opponent=trainer.opponent_metrics,
                 train_opponents=config.opponent_probabilities, opponent_assignments=trainer.opponent_assignments,
@@ -223,10 +245,22 @@ def main(argv=None):
                 collection_hands_per_second=(trainer.hands - before) / trainer.collection_seconds,
                 collection_decisions_per_second=sample_count / trainer.collection_seconds,
                 evaluation_seconds=0.0, checkpoint_seconds=0.0)
+            if paired:
+                # Top-level fields keep partner 1 / combined values; per-partner detail here.
+                # metrics is {'partner_1': ..., 'partner_2': ...} (a partner without samples is absent).
+                row['partners'] = {f'partner_{i}': dict(
+                    samples=t.samples, updates=t.updates, optimizer_steps=t.optimizer_steps,
+                    phase_samples=trainer.partner_phase_counts[i - 1],
+                    metrics=metrics.get(f'partner_{i}', {}),
+                    playing_anchor_kl=playing_kl(t.model, anchor, reference) if 'play' in t.model.neural_phases else None)
+                    for i, t in enumerate(learners, start=1)}
             print(f'Update {trainer.updates}: {trainer.hands}/{config.total_hands} hands; samples {trainer.phase_counts}; reward {reward:+.4f}')
-            for phase in config.learn_phases:
-                print(f'  {phase}: policy {metrics.get(phase + "_policy_loss", 0):.5f}, entropy {metrics.get(phase + "_entropy", 0):.4f}, KL {metrics.get(phase + "_approx_kl", 0):.6f}')
-            if (sample_count and set(trainer.model.neural_phases) <= set(trainer.model.trained_phases)
+            groups = ([(f'partner {i} ', metrics.get(f'partner_{i}', {})) for i in (1, 2)]
+                      if paired else [('', metrics)])
+            for label, values in groups:
+                for phase in config.learn_phases:
+                    print(f'  {label}{phase}: policy {values.get(phase + "_policy_loss", 0):.5f}, entropy {values.get(phase + "_entropy", 0):.4f}, KL {values.get(phase + "_approx_kl", 0):.6f}')
+            if (not paired and sample_count and set(trainer.model.neural_phases) <= set(trainer.model.trained_phases)
                     and trainer.hands - trainer.last_snapshot >= config.snapshot_every_hands):
                 spec = trainer.publish_snapshot(directory / 'snapshots')
                 print(f'Historical snapshot: {spec.name} SHA256 {spec.sha256}')
@@ -234,9 +268,11 @@ def main(argv=None):
                 evaluation_started = perf_counter()
                 telemetry = {}
                 specs = tuple(next(p for p in config.opponent_policies if p.name == n) for n in config.evaluation_names)
+                # Paired: the two partners validate together as one team (seat-aware factory).
                 reports = evaluate_phases(trainer.model, specs, deals=config.eval_deals, seed=validation_seed,
                     bootstrap_seed=bootstrap_seed, bootstrap_samples=config.bootstrap_samples,
-                    threads=args.eval_threads, performance=telemetry)
+                    threads=args.eval_threads, performance=telemetry,
+                    partner_model=trainer.partner.model if paired else None)
                 row['evaluation_seconds'] = perf_counter() - evaluation_started
                 row['evaluations'] = {n: r.to_dict() for n, r in reports.items()}
                 row['evaluation_performances'] = telemetry
@@ -250,11 +286,11 @@ def main(argv=None):
                 score = reports[config.primary_opponent].metrics[0].mean_signed_marks
                 if score > trainer.best_score:
                     trainer.best_score = score
-                    saving_started = perf_counter(); save(checkpoints / 'best.pt', trainer)
+                    saving_started = perf_counter(); save_checkpoint('best.pt')
                     row['checkpoint_seconds'] += perf_counter() - saving_started
             if trainer.hands - trainer.last_checkpoint >= config.checkpoint_every_hands or final:
                 trainer.last_checkpoint = trainer.hands
-                saving_started = perf_counter(); save(checkpoints / 'latest.pt', trainer)
+                saving_started = perf_counter(); save_checkpoint('latest.pt')
                 row['checkpoint_seconds'] += perf_counter() - saving_started
             row['update_seconds'] = perf_counter() - update_started
             row['runtime_seconds'] = perf_counter() - started
@@ -265,7 +301,9 @@ def main(argv=None):
                 sink.write(json.dumps(row, allow_nan=False) + '\n')
     finally:
         trainer.close()
-    print(f'Complete: {trainer.hands} hands, {trainer.samples} training decisions, {trainer.updates} updates; elapsed {perf_counter() - started:.3f}s')
+    print(f'Complete: {trainer.hands} hands, {sum(t.samples for t in learners)} training decisions, {trainer.updates} updates; elapsed {perf_counter() - started:.3f}s')
+    if paired:
+        print(f'Paired models: {checkpoints / "partner-1"} (seat 0/1) and {checkpoints / "partner-2"} (seat 2/3)')
     return trainer
 
 

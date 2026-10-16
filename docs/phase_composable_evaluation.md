@@ -20,7 +20,7 @@ move in each with Heuristic V1 rollouts, and picks the best expected points; see
 is a poor objective. `--pimc-samples` (default 32) sets sampled deals per decision;
 it is recorded in the JSON `composition` block only when PIMC is used, and is a
 run setting rather than part of the stored policy identity. PIMC costs roughly
-0.1–2 s per decision, so prefer `--deals 64`–`128` with `--threads` rather than the
+0.1ï¿½2 s per decision, so prefer `--deals 64`ï¿½`128` with `--threads` rather than the
 2048-deal default.
 
 Neural phases use `--agent-a-PHASE-checkpoint` before `--agent-a-checkpoint` (and
@@ -64,6 +64,22 @@ joint bidding and playing sources while training trump. Use the
 [held-out trump comparison](command_reference.md#held-out-trump-ablation) to verify
 that only trump differs. Source selection for a new training stage copies weights;
 it never follows a moving snapshot file during training.
+
+## Two-spec teams: paired partners and cross-play
+
+By default one composition plays both seats of a team. Any
+`--agent-X-partner-*` flag gives the team's second seat (2 or 3) its own
+composition, while the first composition keeps seat 0 or 1. The arena seats
+agent A at 0/2 and then 1/3, so the first composition always plays the team's
+lower seat. This matches paired-partner training, where partner 1 is that seat.
+
+- **Paired models:** `--agent-a-checkpoint .../partner-1/best.pt --agent-a-partner-checkpoint .../partner-2/best.pt`.
+- **Cross-play:** a trained model beside a heuristic partner (`--agent-a-partner-play heuristic`), or models from different runs or seeds side by side (roadmap step 8).
+- **Inheritance:** unset partner phases inherit the first seat's strategy. Neural partner phases use partner checkpoints first, then the first seat's sources.
+- **Output:** the console reports whether the partners share neural parameters. JSON gains `partners`, `partner_comparisons` and `partner_seat_rule` only when a partner is configured.
+
+`research.ppo.composition.PairedAgentFactory` implements the seat rule for any
+arena factories, and training validation uses it for in-memory paired models.
 
 ## Non-neural comparisons
 

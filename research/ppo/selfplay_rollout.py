@@ -9,6 +9,7 @@ from texas42.encoding import encode
 from texas42.selfplay import SelfPlayEnv
 from .agent import PPOAgent
 from .buffer import Experience
+from .composition import partner_index
 from .selfplay_evaluation import PhaseFactory
 from .seeds import stream_seed
 
@@ -18,7 +19,21 @@ _VERSION = None
 
 
 @torch.no_grad()
-def collect_phase_hand(model, seed, episode, learn_phases, pool):
+def collect_phase_hand(models, seed, episode, learn_phases, pool):
+    """One complete hand; `models` is one shared learner or a (partner 1, partner 2) pair.
+
+    Shared mode passes a single model (or a 1-tuple) and keeps the original
+    records and random streams. Paired mode passes two models: each learner seat
+    acts and records with its own partner's network. The per-hand sampling
+    generator is shared, so draws interleave in decision order in both modes.
+    """
+    models = models if isinstance(models, tuple) else (models,)
+    if len(models) not in (1, 2):
+        raise ValueError('Expected one shared learner or two paired partners')
+
+    def learner(seat):
+        return models[partner_index(seat)] if len(models) == 2 else models[0]
+
     team = (episode + seed) % 2
     label, spec = pool.choose(seed, episode)
     started = perf_counter()
@@ -33,7 +48,7 @@ def collect_phase_hand(model, seed, episode, learn_phases, pool):
     agents = []
     for seat in range(4):
         agent_seed = stream_seed(seed, 'multiphase-opponent-actions-v1', episode * 4 + seat)
-        agent = (PPOAgent(model, seed=agent_seed) if seat % 2 == team else factory(seat, agent_seed))
+        agent = (PPOAgent(learner(seat), seed=agent_seed) if seat % 2 == team else factory(seat, agent_seed))
         agent.reset(seat)
         if isinstance(agent, PPOAgent):
             agent.profile_inference = True
@@ -50,7 +65,7 @@ def collect_phase_hand(model, seed, episode, learn_phases, pool):
             x = torch.tensor([features], dtype=torch.float32)
             mask = torch.tensor([obs.action_mask], dtype=torch.bool)
             neural_started = perf_counter()
-            action, logp, value = model.select(x, mask, generator=generator)
+            action, logp, value = learner(obs.seat).select(x, mask, generator=generator)
             neural_inference += perf_counter() - neural_started
             action = int(action.item())
             paths[obs.seat].append(Experience(features, obs.action_mask, action,
@@ -96,11 +111,17 @@ def phase_chunk(task):
     for key in tuple(_FROZEN_MODELS):
         if key not in identities:
             del _FROZEN_MODELS[key]
-    version = (hashlib.sha256(weights).digest(), hidden, neural)
+    # weights: one CPU snapshot (shared learner) or a tuple of two (paired
+    # partners). The cached learner models are keyed on every payload.
+    payloads = weights if isinstance(weights, tuple) else (weights,)
+    version = (tuple(hashlib.sha256(w).digest() for w in payloads), hidden, neural)
     if version != _VERSION:
-        factory = PhaseFactory(weights, hidden, neural)
-        factory.prepare()
-        _LEARNER, _VERSION = factory.model, version
+        learners = []
+        for payload in payloads:
+            factory = PhaseFactory(payload, hidden, neural)
+            factory.prepare()
+            learners.append(factory.model)
+        _LEARNER, _VERSION = tuple(learners), version
     rows = []
     for episode in indices:
         try:
