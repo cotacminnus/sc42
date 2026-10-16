@@ -6,8 +6,9 @@ from time import perf_counter
 
 from examples.benchmark_output import format_report, format_breakdown, format_performance, table
 from examples.experiment_output import record_output, add_evaluation_arguments
-from research.ppo.composition import (CompositeAgentFactory, comparison_metadata, evaluate_composed,
-                                     resolve_policy_spec)
+from research.ppo.composition import (STRATEGIES, CompositeAgentFactory, comparison_metadata,
+                                     evaluate_composed, resolve_policy_spec, strategy_label)
+from texas42.agents.pimc import DEFAULT_PIMC_SAMPLES
 from research.ppo.diagnostics import evaluation_diagnostics
 
 
@@ -25,15 +26,19 @@ def main(argv=None):
     for agent in ('a', 'b'):
         p.add_argument(f'--agent-{agent}-checkpoint', type=Path)
         for phase in ('bid', 'trump', 'play'):
-            choices = ('neural', 'heuristic', 'random', 'conservative') if phase == 'bid' else ('neural', 'heuristic', 'random')
-            p.add_argument(f'--agent-{agent}-{phase}', choices=choices, default='heuristic')
+            p.add_argument(f'--agent-{agent}-{phase}', choices=STRATEGIES[phase], default='heuristic')
             p.add_argument(f'--agent-{agent}-{phase}-checkpoint', type=Path)
     add_evaluation_arguments(p, seed=42)
     p.add_argument('--stochastic-neural', action='store_true', help='Seeded sampling instead of greedy neural inference')
+    p.add_argument('--pimc-samples', type=int, default=DEFAULT_PIMC_SAMPLES,
+                   help='sampled hidden deals per PIMC decision (trump/play strategy "pimc"); '
+                        'cost grows linearly, so pair large values with few --deals')
     p.add_argument('--episode', choices=('hand', 'match'), default='hand')
     p.add_argument('--target-marks', type=int, default=7)
     args = p.parse_args(argv)
     started = perf_counter()
+    if args.pimc_samples < 1:
+        p.error('--pimc-samples must be positive')
     try:
         a, b = (policy_spec(args, agent) for agent in ('a', 'b'))
         # Validate availability in the parent so unsupported neural phases fail clearly.
@@ -46,15 +51,19 @@ def main(argv=None):
         print(f'Agent {spec.name}: {spec.label()}')
         for phase, policy in spec.items():
             checkpoint = f' [{policy.checkpoint.sha256}] {policy.checkpoint.path}' if policy.checkpoint else ''
-            print(f'  {phase.title()}: {policy.strategy.title()}{checkpoint}')
+            print(f'  {phase.title()}: {strategy_label(policy.strategy)}{checkpoint}')
     for phase, same in metadata['neural_parameters_identical'].items():
         print(f'Shared {dict(bid="bidding", trump="trump", play="playing")[phase]} parameters: ' + ('N/A (not both neural)' if same is None else 'YES' if same else 'NO'))
     print(f'Shared complete checkpoint: {metadata["shared_complete_checkpoint"]}')
     print(f'Only one phase differs: {metadata["only_one_phase_differs"]}; differing phases: {", ".join(metadata["differing_phases"]) or "none"}')
+    uses_pimc = any(s.strategy == 'pimc' for spec in (a, b) for _, s in spec.items())
+    if uses_pimc:
+        print(f'PIMC: {args.pimc_samples} sampled deals per decision, Heuristic V1 rollouts '
+              '(roughly 0.1-2 s per decision; see docs/belief.md)')
     preparation_seconds = perf_counter() - started
     performance = {}
     try:
-        report = evaluate_composed(a, b, stochastic=args.stochastic_neural,
+        report = evaluate_composed(a, b, stochastic=args.stochastic_neural, pimc_samples=args.pimc_samples,
             num_deals=args.deals, seed=args.seed, bootstrap_seed=args.bootstrap_seed,
             bootstrap_samples=args.bootstrap_samples, threads=args.threads,
             episode=args.episode, target_marks=args.target_marks, performance=performance)
@@ -74,13 +83,15 @@ def main(argv=None):
         for name, d in details.items() for role, stats in d['roles'].items()]))
     print('Contracts = auctions won, not hands won. Phase effects interact; this comparison does not establish global optimality.')
     if (all(metadata['phase_policies_identical'].values()) and not args.stochastic_neural
-            and all(s.strategy != 'random' for _, s in a.items())):
+            and all(s.strategy not in ('random', 'pimc') for _, s in a.items())):
         print('Identical deterministic policies: paired symmetry check, not evidence of strength.')
     if args.output:
         data = report.to_dict()
         data.update(composition=dict(agents={'A': a.to_dict(), 'B': b.to_dict()},
             comparisons=metadata, neural_inference='stochastic' if args.stochastic_neural else 'greedy',
             sampling_scheme='composite-phase-v1'), breakdown=details)
+        if uses_pimc:
+            data['composition']['pimc_samples'] = args.pimc_samples
         args.output.write_text(json.dumps(data, indent=2) + '\n', encoding='utf-8')
         print(f'JSON results saved to {args.output}')
     return report

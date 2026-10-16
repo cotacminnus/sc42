@@ -22,7 +22,7 @@ Step numbers match the team's live planning document.
 | 4 | Common agent interface | Done | `agents/`: protocols, RandomAgent, AgentPlayer |
 | 5 | Baseline agents | V1 baselines done | HeuristicAgent, RandomAgent, ConservativeRandomAgent, HybridAgent; [phase ablations](policy_ablation.md) |
 | 6 | Self-play training | Play-only and multi-phase historical PPO implemented | [legacy baseline](ppo_training.md), [current training](multiphase_selfplay.md) |
-| 7 | Hidden-information reasoning | Belief toolkit implemented: exact counting, sampling, policy likelihoods, rollouts, PIMC action values | [belief modelling](belief.md); PIMC agent and arena study next |
+| 7 | Hidden-information reasoning | Belief toolkit implemented: exact counting, sampling, policy likelihoods, rollouts, PIMC action values | [belief modelling](belief.md); PIMC agent available, arena study next |
 | 8 | Partnership behavior | Not started | uses the arena (step 11) |
 | 9 | Bidding | Neural bid-only/joint PPO and counterfactual tools implemented; strength to evaluate | [multi-phase PPO](multiphase_selfplay.md), [counterfactuals](counterfactual_bidding.md) |
 | 10 | Special contracts (Nello) | IDs reserved | `actions.py` IDs 55–57 |
@@ -90,7 +90,9 @@ Frozen Heuristic V1, conservative random bidding, and composable phase policies
 are implemented. HHH/HHR/HRR/CHH/CRR/RRR factories support reproducible duplicate
 hand and match experiments with independent per-phase RNG streams. See
 [policy_ablation.md](policy_ablation.md) for commands, methodology and limits.
-PIMC remains future work; Stage-1 PPO provides a learned trick-play baseline.
+A PIMC trump/play baseline (`texas42.agents.pimc`, strategy `pimc` in agent-vs-agent
+composition) is implemented; see [belief modelling](belief.md#the-pimc-agent). Stage-1
+PPO provides a learned trick-play baseline.
 
 - **Random:** choose uniformly from `legal_action_ids` (bids too).
 - **Heuristic:** bid on trump length, doubles, and counters; call the longest
@@ -150,7 +152,7 @@ Implemented in `texas42/belief.py` ([belief modelling](belief.md)):
 
 Observed so far: deterministic Heuristic likelihoods collapse the effective
 sample size to about 1 by trick 3–4, so policy-weighted beliefs need softer
-models or resampling. Next: a PIMC `Agent` wrapper and duplicate-arena
+models or resampling. Next: duplicate-arena
 comparisons against HHH; uniform vs policy belief log-loss on logged deals
 (`TrainingCollector(include_initial_deal=True)`); then learned beliefs (B/C).
 

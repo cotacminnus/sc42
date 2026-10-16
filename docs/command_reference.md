@@ -977,6 +977,24 @@ python -m examples.evaluate_agent_vs_agent \
   --agent-b-trump random --agent-b-play random --deals 64
 ```
 
+### Belief-based (PIMC) trump and play
+
+```bash
+# PIMC trump/play (heuristic bidding) against HHH; PIMC is slow, so use few deals
+python -m examples.evaluate_agent_vs_agent \
+  --agent-a-trump pimc --agent-a-play pimc --pimc-samples 32 \
+  --deals 128 --threads 0 --seed 42
+# PIMC play against a trained neural player, both with heuristic bid/trump
+python -m examples.evaluate_agent_vs_agent \
+  --agent-a-play pimc \
+  --agent-b-play neural --agent-b-checkpoint runs/ppo-play-v1/checkpoints/best.pt \
+  --deals 128 --threads 0
+```
+
+A PIMC decision takes roughly 0.1–2 s, and one team makes about 14 per hand, so
+start with small `--deals` and raise `--pimc-samples` only when time allows. See
+[belief modelling](belief.md) for the method and its limitations.
+
 ### Composition arguments
 
 This is the complete argument surface of `examples.evaluate_agent_vs_agent`.
@@ -985,13 +1003,14 @@ Evaluation is CPU inference; there is no optimizer/device or trainability flag h
 | Argument | Type / accepted values | Default | Meaning |
 | --- | --- | --- | --- |
 | `--agent-a-bid`, `--agent-b-bid` | neural, heuristic, random, conservative | heuristic | Bidding strategy; conservative passes when legal, otherwise minimum bid. |
-| `--agent-a-trump`, `--agent-b-trump` | neural, heuristic, random | heuristic | Independent trump strategy. |
-| `--agent-a-play`, `--agent-b-play` | neural, heuristic, random | heuristic | Independent playing strategy. |
+| `--agent-a-trump`, `--agent-b-trump` | neural, heuristic, random, pimc | heuristic | Independent trump strategy; pimc = belief-based Monte Carlo. |
+| `--agent-a-play`, `--agent-b-play` | neural, heuristic, random, pimc | heuristic | Independent playing strategy; pimc = belief-based Monte Carlo. |
 | `--agent-a-checkpoint`, `--agent-b-checkpoint` | Compatible checkpoint path | Unset | Default neural source for that agent; ignored when no phase needs it. Version 1 supplies play only. |
 | `--agent-a-bid-checkpoint`, `--agent-b-bid-checkpoint` | Trained bid source path | Unset | Overrides only that agent's neural bidding source. |
 | `--agent-a-trump-checkpoint`, `--agent-b-trump-checkpoint` | Trained trump source path | Unset | Overrides only that agent's neural trump source. |
 | `--agent-a-play-checkpoint`, `--agent-b-play-checkpoint` | Trained play source path | Unset | Overrides only that agent's neural playing source. |
 | `--stochastic-neural` | Boolean flag | Off (greedy) | Seeded phase-local sampling, independent between seats/phases; still frozen inference. |
+| `--pimc-samples` | Integer > 0 | 32 | Sampled hidden deals per PIMC decision (every deal when few remain). Cost grows linearly; recorded in JSON only when PIMC is used. |
 | `--deals` | Integer > 0 | 2048 | Complete duplicate groups; two games/group. |
 | `--seed` | Integer | 42 | Arena deal/agent seed; choose independent final seeds. |
 | `--bootstrap-seed` | Integer | 0 | Separate resampling seed. |

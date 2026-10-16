@@ -148,6 +148,8 @@ Agents may also implement the optional pure query
 samples from (the `ActionProbabilities` protocol). It must not consume RNG or
 change memory. All built-in agents implement it. [Belief modelling](docs/belief.md)
 uses it to weight hypothetical deals and to compute rollout probabilities.
+`texas42.agents.pimc.PIMCAgent` is a search baseline built on those beliefs; compare
+it through the `pimc` trump/play strategy of `examples.evaluate_agent_vs_agent`.
 
 ## Self-play and data contracts
 

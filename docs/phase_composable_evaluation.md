@@ -8,10 +8,20 @@ heuristic; neural inference is greedy unless `--stochastic-neural` is supplied.
 ## Strategies and checkpoint resolution
 
 For each of `--agent-a-*` and `--agent-b-*`, bidding accepts `neural`, `heuristic`,
-`random` or `conservative`; trump/play accept the first three. Conservative bidding
-passes when legal and otherwise chooses the minimum legal bid. Existing agents
-implement all non-neural decisions. No checkpoint or PyTorch installation is
-needed for purely non-neural comparisons.
+`random` or `conservative`; trump/play accept `neural`, `heuristic`, `random` or
+`pimc`. Conservative bidding passes when legal and otherwise chooses the minimum
+legal bid. Existing agents implement all non-neural decisions. No checkpoint or
+PyTorch installation is needed for purely non-neural comparisons.
+
+`pimc` is the belief-based Monte Carlo agent (`texas42.agents.pimc.PIMCAgent`). It
+samples hidden deals consistent with the actor's observation, tries every legal
+move in each with Heuristic V1 rollouts, and picks the best expected points; see
+[belief modelling](belief.md). It is not offered for bidding, where expected points
+is a poor objective. `--pimc-samples` (default 32) sets sampled deals per decision;
+it is recorded in the JSON `composition` block only when PIMC is used, and is a
+run setting rather than part of the stored policy identity. PIMC costs roughly
+0.1–2 s per decision, so prefer `--deals 64`–`128` with `--threads` rather than the
+2048-deal default.
 
 Neural phases use `--agent-a-PHASE-checkpoint` before `--agent-a-checkpoint` (and
 likewise for B). Missing sources fail clearly. A phase override for a non-neural

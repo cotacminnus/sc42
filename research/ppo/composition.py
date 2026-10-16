@@ -4,10 +4,20 @@ import random
 from time import perf_counter
 
 from texas42.agents import HeuristicAgent, RandomAgent, ConservativeRandomAgent
+from texas42.agents.pimc import DEFAULT_PIMC_SAMPLES, PIMCAgent
 from .seeds import stream_seed
 from .opponents import CheckpointIdentity
 
 PHASES = ('bid', 'trump', 'play')
+# 'pimc' (belief-based Monte Carlo, texas42.agents.pimc) maximizes expected
+# points, which suits trump and play but not bidding, so bid does not offer it.
+STRATEGIES = {'bid': ('neural', 'heuristic', 'random', 'conservative'),
+              'trump': ('neural', 'heuristic', 'random', 'pimc'),
+              'play': ('neural', 'heuristic', 'random', 'pimc')}
+
+
+def strategy_label(strategy):
+    return 'PIMC' if strategy == 'pimc' else strategy.title()
 
 
 @dataclass(frozen=True)
@@ -16,8 +26,7 @@ class PhasePolicySpec:
     checkpoint: CheckpointIdentity | None = None
 
     def validate(self, phase):
-        allowed = ('neural', 'heuristic', 'random', 'conservative') if phase == 'bid' else ('neural', 'heuristic', 'random')
-        if self.strategy not in allowed:
+        if self.strategy not in STRATEGIES[phase]:
             raise ValueError(f'{phase}: unsupported strategy {self.strategy!r}')
         if self.strategy == 'neural' and self.checkpoint is None:
             raise ValueError(f'Neural {phase} requires a phase checkpoint or agent default checkpoint')
@@ -43,7 +52,7 @@ class CompositePolicySpec:
         return asdict(self)
 
     def label(self):
-        return '[' + ' | '.join(f'{s.strategy.title()} {p.title()}' for p, s in self.items()) + ']'
+        return '[' + ' | '.join(f'{strategy_label(s.strategy)} {p.title()}' for p, s in self.items()) + ']'
 
 
 def resolve_policy_spec(name, strategies, checkpoint=None, phase_checkpoints=None):
@@ -101,8 +110,12 @@ class _NeuralPolicy:
 
 
 class CompositeAgent:
-    """Independent delegate memory per seat and phase; reset does not rewind RNGs."""
-    def __init__(self, spec, seed, *, greedy=True):
+    """Independent delegate memory per seat and phase; reset does not rewind RNGs.
+
+    pimc_samples configures PIMC delegates only. It is a factory/agent setting,
+    not part of CompositePolicySpec, so stored composite identities are unchanged.
+    """
+    def __init__(self, spec, seed, *, greedy=True, pimc_samples=DEFAULT_PIMC_SAMPLES):
         self.spec, self.seat = spec, None
         self.delegates = {}
         # Match HybridAgent's documented streams for existing non-neural variants.
@@ -116,6 +129,8 @@ class CompositeAgent:
                 delegate = HeuristicAgent()
             elif policy.strategy == 'conservative':
                 delegate = ConservativeRandomAgent(phase_seed)
+            elif policy.strategy == 'pimc':
+                delegate = PIMCAgent(phase_seed, samples=pimc_samples)
             else:
                 delegate = RandomAgent(phase_seed)
             self.delegates[phase] = delegate
@@ -144,6 +159,7 @@ class CompositeAgent:
 class CompositeAgentFactory:
     spec: CompositePolicySpec
     greedy: bool = True
+    pimc_samples: int = DEFAULT_PIMC_SAMPLES
 
     def prepare(self):
         identities = {s.checkpoint for _, s in self.spec.items() if s.strategy == 'neural'}
@@ -161,7 +177,7 @@ class CompositeAgentFactory:
                 phase_network(policy, phase)
 
     def __call__(self, seat, seed):
-        return CompositeAgent(self.spec, seed, greedy=self.greedy)
+        return CompositeAgent(self.spec, seed, greedy=self.greedy, pimc_samples=self.pimc_samples)
 
 
 def comparison_metadata(a, b):
@@ -209,12 +225,13 @@ def evaluate_matchups(factory, opponents, *, neural=False, performance=None, **k
             torch.set_num_threads(previous)
 
 
-def evaluate_composed(a, b, *, stochastic=False, performance=None, **kwargs):
+def evaluate_composed(a, b, *, stochastic=False, pimc_samples=DEFAULT_PIMC_SAMPLES,
+                      performance=None, **kwargs):
     """Canonical two-agent composition API, backed by the paired arena."""
     neural = any(s.strategy == 'neural' for spec in (a, b) for _, s in spec.items())
     telemetry = {}
-    report = evaluate_matchups(CompositeAgentFactory(a, not stochastic),
-        ((b.name, CompositeAgentFactory(b, not stochastic)),), neural=neural,
+    report = evaluate_matchups(CompositeAgentFactory(a, not stochastic, pimc_samples),
+        ((b.name, CompositeAgentFactory(b, not stochastic, pimc_samples)),), neural=neural,
         performance=telemetry, **kwargs)[b.name]
     if performance is not None:
         # Keep the public performance shape of this single-comparison API.

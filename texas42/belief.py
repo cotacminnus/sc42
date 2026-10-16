@@ -56,10 +56,10 @@ import random
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
 from itertools import combinations
+from typing import TYPE_CHECKING
 
 from .actions import PLAY_ACTIONS
 from .agents.base import PrivilegedState
-from .arena import AgentFactory
 from .encoding import revealed_voids
 from .history import public_history
 from .models import Suit, Trump
@@ -67,6 +67,11 @@ from .rules import follows_suit
 from .selfplay import Observation, observation_from_view
 from .state import HandResult, HandState
 from .training import TrainingBidView, TrainingPlayView
+
+if TYPE_CHECKING:
+    # Annotation-only: belief code never needs the arena (process pools,
+    # statistics) at runtime, and agents.pimc imports this module.
+    from .arena import AgentFactory
 
 SEATS = (0, 1, 2, 3)
 STOP_CONDITIONS = ('trick', 'phase', 'hand')

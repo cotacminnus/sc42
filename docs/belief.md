@@ -30,6 +30,7 @@ tools. No learning code is involved.
 - [Evaluating actions](#7-evaluating-actions)
 - [The ActionProbabilities agent query](#the-actionprobabilities-agent-query)
 - [Measured behaviour](#measured-behaviour)
+- [The PIMC agent](#the-pimc-agent)
 - [Choosing settings](#choosing-settings)
 - [Limitations and next steps](#limitations-and-next-steps)
 - [Research background](#research-background)
@@ -364,6 +365,33 @@ particle filters and Loki-style weighting. Options: larger ε, more samples,
 stochastic models, or resampling. Check `effective_sample_size` before trusting
 policy-weighted estimates.
 
+## The PIMC agent
+
+`texas42.agents.pimc.PIMCAgent(seed, *, samples=32, enumerate_below=256)` wraps
+`evaluate_actions` as an ordinary `Agent` (`reset(seat)`, `act(obs) -> int`).
+
+| Phase | Decision |
+| --- | --- |
+| Bid | Delegated to `HeuristicAgent` (expected points is a poor bidding objective) |
+| Trump, play | `evaluate_actions` with Heuristic V1 rollouts for all seats and a uniform belief, choosing `best_action_id` |
+| Forced move | Returned directly; no search, no random draws |
+
+- **Randomness:** one `random.Random(seed)` per instance supplies belief sampling
+  and rollout seeds, so equal seeds and equal observation sequences give equal
+  actions. `reset` does not rewind the stream.
+- **Diagnostics:** `last_evaluation` keeps the latest `ActionEvaluation` for
+  inspection.
+- **No `action_probabilities`:** decisions consume RNG, so the agent cannot
+  answer the pure query and cannot serve as a likelihood model.
+- **Import path:** import it from `texas42.agents.pimc`, not the package root.
+  `texas42.belief` imports `texas42.agents`, so a root-level import would be
+  circular.
+
+To compare it with heuristic or trained policies, use the `pimc` trump/play
+strategy of `examples.evaluate_agent_vs_agent` ([composition](phase_composable_evaluation.md),
+[commands](command_reference.md#belief-based-pimc-trump-and-play)), with
+`--pimc-samples` and modest `--deals`. Expect a few seconds per hand.
+
 ## Choosing settings
 
 | Situation | Suggested settings |
@@ -376,8 +404,8 @@ policy-weighted estimates.
 
 ## Limitations and next steps
 
-- **No agent wrapper yet.** An `Agent` that calls `evaluate_actions` (a PIMC
-  baseline) and arena comparisons against HHH are the natural next step.
+- **Strength not yet measured.** The PIMC agent exists, but no multi-seed arena
+  study against HHH or PPO has been run; smoke tests show mechanics only.
 - **Single-hand objective.** Match marks and future hands are not modelled.
 - **Strategy fusion** remains (see section 7); ISMCTS or EPIMC are possible
   extensions.
