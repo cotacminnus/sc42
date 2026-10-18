@@ -49,6 +49,8 @@ explains sample counts, rewards, source identities and resume. Use the
 | Frozen heuristic and random/conservative variants | [Heuristic V1](docs/simpleheuristic.md), [policy ablations](docs/policy_ablation.md) |
 | Bid-versus-pass replay experiments | [Counterfactual bidding](docs/counterfactual_bidding.md) |
 | Exact open-hand contract/point endgames and complete-deal bid benchmarks | [Endgame oracle](docs/endgame_oracle.md) |
+=======
+| Hidden-deal beliefs, world counting/sampling, rollouts, PIMC action values | [Belief modelling](docs/belief.md) |
 | Observations, public history and training-data validation | [Encoding](docs/encoding.md) |
 | Permanent global actions and reserved contracts | [Action space](docs/action-space.md) |
 | Process workers and evaluation profiling | [Parallel execution](docs/parallel_execution.md), [evaluation performance](docs/evaluation_performance.md) |
@@ -65,6 +67,7 @@ explains sample counts, rewards, source identities and resume. Use the
 | `texas42/agents/` | Common protocol, built-in agents and Player adapter |
 | `texas42/arena.py`, `parallel.py` | Paired evaluation, metrics and ordered process workers |
 | `texas42/oracle.py` | Shared perfect-information contract/point search, complete-deal analysis and exhaustive reference |
+| `texas42/belief.py` | Hidden-deal constraints, exact counting/sampling, rollouts and expected action values |
 | `texas42/training.py`, `encoding.py`, `actions.py` | Versioned ID-based views, 387 features and legal global actions |
 | `texas42/openspiel.py` | Optional adapter depending on the native engine |
 | `research/ppo/` | Optional training, checkpoints and frozen policy composition |
@@ -144,6 +147,12 @@ memory between hands of a match. Construct fresh agents to restart RNG streams.
 privileged runners. The standalone [endgame oracle](docs/endgame_oracle.md) accepts
 a full `HandState` explicitly; ordinary adapters never supply `PrivilegedState`
 or hidden-hand labels.
+
+Agents may also implement the optional pure query
+`action_probabilities(obs) -> {action_id: probability}`, the distribution `act`
+samples from (the `ActionProbabilities` protocol). It must not consume RNG or
+change memory. All built-in agents implement it. [Belief modelling](docs/belief.md)
+uses it to weight hypothetical deals and to compute rollout probabilities.
 
 ## Self-play and data contracts
 
