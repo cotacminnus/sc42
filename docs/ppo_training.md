@@ -14,7 +14,7 @@ Use [multi-phase PPO](multiphase_selfplay.md) for new independent bid/trump/play
 experiments, phase freezing and historical neural opponents. Modern play-only
 training is also possible, but has a different checkpoint architecture and sampling
 scheme; matching its phase routes does not reproduce a version-1 experiment.
-Copy-ready commands and all flag defaults are in the [command reference](command_reference.md#24-start-legacy-play-only-ppo-from-scratch-parallel).
+Copy-ready commands and all flag defaults are in the [command reference](command_reference.md#recipe-1-original-play-only-ppo).
 
 Python 3.11+ is supported, subject to available PyTorch wheels for your Python
 version/platform. Install `python -m pip install -e '.[rl]'`. This extra includes
@@ -37,8 +37,8 @@ settings, opponent distribution, checkpoint generation and sampling scheme, not
 only the root seed. `auto` with one requested simulation worker selects legacy-v1;
 episode-v1 is explicitly available for worker-count reproducibility. Modern
 multi-phase sampling uses its own multiphase-episode-v1 stream. See
-[Recipe 1](command_reference.md#24-start-legacy-play-only-ppo-from-scratch-parallel)
-and [modern playing-only](command_reference.md#playing-only-with-the-modern-trainer).
+[Recipe 1](command_reference.md#recipe-1-original-play-only-ppo)
+and [modern playing-only](command_reference.md#recipe-3-playing-only-with-the-modern-trainer).
 Legacy CLI resume requires repeating nondefault saved settings; unlike modern
 resume, omitted arguments do not generally reconstruct the saved Config.
 
@@ -87,7 +87,7 @@ using a dedicated generator. PPO minimizes the clipped surrogate plus value MSE
 minus legal entropy, using detached old log probabilities and targets. The buffer
 is cleared after updating. Model parameters actually change through Adam steps.
 
-Optimizer defaults are listed in the [argument reference](command_reference.md#33-ppo-training-configuration-flags).
+Optimizer defaults are listed in the [argument reference](command_reference.md#train_ppo-arguments).
 All are CLI options (`--gamma`, `--gae-lambda`, `--clip-epsilon`, `--value-coef`,
 `--entropy-coef`, `--max-grad-norm`, `--target-kl`). Non-finite losses or gradients
 abort training. Logs report sample-weighted optimization diagnostics, including
@@ -170,7 +170,7 @@ episode exactly as before. Rewards, per-seat GAE and PPO optimization are unchan
 
 Fixed HHH training retains its original agent construction and sampling behavior.
 Single-opponent and mixture arguments are mutually exclusive. See the
-[mixed-opponent recipes](command_reference.md#legacy-mixed-opponent-training-recipes)
+[mixed-opponent recipes](command_reference.md#legacy-mixed-opponent-training)
 for HHH, CHH, HHR, mixed training, validation, resume and warm-start commands.
 
 Names must be registered and unique; weights must be finite and strictly positive.
@@ -230,7 +230,7 @@ snapshots belong to the [multi-phase path](multiphase_selfplay.md). Live self-pl
 Performance against random agents, especially RRR's aggressive bidding, does not
 establish competitive strength. Validate on held-out seeds against fixed policies.
 
-Use `examples.opponent_benchmark` from the [command reference](command_reference.md#legacy-mixed-opponent-training-recipes)
+Use `examples.opponent_benchmark` from the [command reference](command_reference.md#legacy-mixed-opponent-training)
 for warmed collection measurements. The historical measurements below use identical
 budgets and several measured updates; no strength claims follow.
 
