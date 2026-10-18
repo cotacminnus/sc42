@@ -24,6 +24,7 @@ python -m unittest discover -s tests -v
 | Human/AI console game | python -m texas42 | Interactive play; optional JSONL self-play logs |
 | Baseline comparison | python -m examples.policy_ablation_benchmark | HHH, CHH, HHR, etc. in paired duplicate deals |
 | Bid/pass experiment | python -m examples.counterfactual_bidding | Counterfactual voluntary bid intervention |
+| Open-hand oracle | python -m examples.endgame_oracle | Contract/point endgames and bounded complete-deal bidding benchmarks |
 | Train legacy play-only PPO | python -m examples.train_ppo | Reproducible baseline; fixed or mixed heuristic variants |
 | Legacy checkpoint evaluation | python -m examples.evaluate_ppo | Held-out, paired checkpoint evaluation |
 | Current PPO training | python -m examples.train_selfplay_ppo | Independent phase networks and historical opponents |
@@ -34,6 +35,116 @@ python -m unittest discover -s tests -v
 | Validation benchmark | python -m examples.validation_benchmark | Evaluation scaling by group and worker count |
 
 ## 2. Copy-ready commands
+
+### Perfect-information endgame oracle
+
+```bash
+python -m examples.endgame_oracle --seed 42 --remaining 3 --max-nodes 100000
+python -m examples.endgame_oracle --seed 7 --remaining 2 --partial-plays 3
+# Prove the position and one action; other actions may remain unresolved
+python -m examples.endgame_oracle --seed 1 --remaining 2 --partial-plays 1 \
+  --output position_value --max-nodes 4
+# Bounded smoke benchmark, consecutive seeds starting at zero
+python -m examples.endgame_oracle --seed 0 --remaining 3 --samples 100 \
+  --max-nodes 100000 --time-seconds 2
+# Final-point endgames (the binary contract cutoff does not apply)
+python -m examples.endgame_oracle --objective final_points --seed 1 --remaining 2
+# Default complete deal: 252 trees, 1048576 nodes/lead, 1800 seconds total
+python -m examples.endgame_oracle --mode deal --seed 42 --workers 8
+# Maximum-contract proof search with ordering and cancellation
+python -m examples.endgame_oracle --mode deal --seed 42 --workers 4 \
+  --output maximum_contract --move-ordering combined --max-nodes 2000 --time-seconds 10
+# Threshold-search ablation: classify every lead, without bidder cancellation
+python -m examples.endgame_oracle --mode deal --seed 42 --workers 4 \
+  --output maximum_contract --move-ordering combined --no-proof-cancellation \
+  --max-nodes 2000 --time-seconds 10
+# Smaller bounded smoke run: nodes per opening lead, one global time limit
+python -m examples.endgame_oracle --mode deal --seed 42 \
+  --max-nodes 10000 --time-seconds 1
+# Spawn bounded workers for 252 independent opening-lead trees
+python -m examples.endgame_oracle --mode deal --seed 42 --workers 4 \
+  --max-nodes 200000 --time-seconds 10
+# Optional independent root-action workers (startup often dominates tiny endgames)
+python -m examples.endgame_oracle --objective final_points --seed 42 \
+  --remaining 6 --workers 4 --max-nodes 1000000 --time-seconds 20
+# Small-endgame point benchmark; per-position limits
+python -m examples.endgame_oracle --objective final_points --seed 0 \
+  --remaining 3 --samples 100 --max-nodes 100000 --time-seconds 2
+```
+
+For the documented parallel smoke measurements, repeat the seed-42 six-domino
+recipe with `--remaining 2`, `3`, `4`, `6` and `--workers 1`, `2`, `4`, `8`.
+The deal recipe allows 200,000 nodes per opening-lead tree and ten seconds total.
+Historical whole-analysis node measurements used a different budget scope. See
+[252-task measurements and startup costs](endgame_oracle.md#252-opening-lead-scheduler-benchmark);
+small endgames are usually faster with one worker.
+
+No optional dependencies are required. The default HHR policies generate a
+reachable ordinary contract with heuristic bidding/trump and seeded random play.
+Omitting `--seed` chooses a fresh random seed. Every run prints its resolved seed;
+pass that value with `--seed` to reproduce the positions. Multiple samples use
+consecutive seeds starting at the resolved seed.
+The command prints the contract, scores, trump, actor/team, four hands, partial
+trick, legal global IDs/dominoes and exact values or bounds, proven optimal
+actions, completion flags, nodes, cache hits and runtime. With multiple samples it
+prints completion rates and mean/median/max statistics instead. See the
+[oracle guide](endgame_oracle.md) for fixed bidding-team value and proof semantics.
+
+`--mode deal` uses the seeded arena deal directly, with no preliminary policy
+play. It prints a trump table for every candidate bidder, point bounds or exact
+values, proven lead IDs and complete optimal lead sets, bidder contract bounds,
+proven trump/lead choices, completeness flags and aggregate statistics. All hands
+are visible. This is an open-hand benchmark, not a hidden-information bid
+recommendation; 42 points establishes a one-mark contract without optimizing
+mark stake. There are **252 logical opening-lead tasks**, run by at most eight
+processes. By default, each continuation gets **1,048,576 nodes**, while the
+**entire analysis shares 1,800 seconds**, including validation, worker startup,
+collection and shutdown. The global monotonic deadline never resets per lead.
+Each task has a fresh node counter, so aggregate nodes may exceed the per-lead
+cap (at most 264,241,152 with defaults). Worker-local caches together stay within
+`--max-cache-entries`.
+
+The CLI flushes a live `[completed/252]` line as each task settles, with bidder,
+trump, opening domino, `exact`/`contract_proven`/`node_limit`/`time_limit`/
+`skipped_proven`/`cancelled_proven`/`cancelled_deadline`,
+actual nodes, task runtime and global elapsed time. Explicitly skipped tasks
+count as settled without implying they were searched. Progress can arrive out
+of order; the final tables retain canonical seat/trump/action-ID order. The
+header reports requested/resolved workers and limits. Search statistics and
+proof summaries follow progress, together with search-cutoff counters, settled
+task counts, and requested-output completeness. Time limits are cooperative; a transition or
+process shutdown can cause a small overrun. Endgame mode retains its existing
+per-position node/time semantics. See [parallel details](endgame_oracle.md#parallel-execution)
+and [deal proof semantics](endgame_oracle.md#complete-deal-bidding-benchmark).
+
+`--output maximum_contract` uses exact point-threshold proofs and stops a bidder's
+unnecessary alternatives once its maximum bid classification is established.
+`--output all_action_values` retains exhaustive alternative analysis subject to
+budgets and never skips work after a bid proof. These are different completion
+obligations: the new `Requested output complete` line distinguishes them from
+the legacy status requiring exact points and the complete optimal-pair set.
+Proven bid classes, exact point values and identified ties are reported separately.
+`--move-ordering combined` can help larger positions, but remains opt-in because
+some workloads slow down. See [proof and ordering semantics](endgame_oracle.md#maximum-contract-proof-mode)
+and the [optimization ablations](endgame_oracle.md#ordering-and-proof-search-ablations).
+
+| Argument | Default | Meaning |
+| --- | --- | --- |
+| `--seed` | Random | Integer deal/policy seed, printed for reproduction; samples use consecutive seeds. |
+| `--mode` | endgame | endgame or deal; deal analyzes 252 opening leads across 36 bidder/trump combinations. |
+| `--workers` | 1 | 1 sequential; 0 auto; N requests up to N spawned CPU processes, limited by available CPUs, tasks and a maximum of 8. |
+| `--objective` | contract_success | Endgame: contract_success or final_points. Deal mode always uses final points. |
+| `--remaining` | 3 | Endgame only: 1–7 dominoes per player at the selected trick boundary. |
+| `--partial-plays` | 0 | Endgame only: advance 0–3 additional legal moves after that boundary. |
+| `--policy` | HHR | Endgame only: existing variant HHH, HHR, HRR, CHH, CRR, RRR. |
+| `--output` | all_action_values | Endgame: all_action_values or position_value. Deal: all_action_values (exact point-analysis request) or maximum_contract (bid-classification proof request). |
+| `--move-ordering` | none | none, heuristic, tt, or combined. Only traversal changes; reported IDs remain canonical. |
+| `--no-proof-cancellation` | Off | Deal maximum_contract ablation: classify every lead without stopping other tasks after a bidder proof. Ignored for exhaustive/endgame requests. |
+| `--max-nodes` | 1048576 | Nonnegative nodes per opening-lead continuation in deal mode; per whole endgame position otherwise. |
+| `--time-seconds` | 1800 | Nonnegative finite seconds for the entire deal analysis, or one endgame position. |
+| `--max-cache-entries` | 100000 | Nonnegative aggregate table capacity; parallel workers each get floor(capacity/workers). Zero disables caching. |
+| `--samples` | 1 | Positive endgame position count; >1 selects benchmark summary. Deal mode requires 1. |
+| `-h`, `--help` | Off | Print argument help. |
 
 ### 2.1 Console game, self-play log and engine smoke test
 
