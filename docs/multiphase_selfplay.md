@@ -6,7 +6,7 @@ play-only `train_ppo` remains a separate reproducible baseline; see
 [legacy PPO](ppo_training.md). Neither command trains multi-hand matches.
 
 This guide explains mechanics and interpretation. The
-[command reference](command_reference.md#multi-phase-ppo-commands) owns every flag,
+[command reference](command_reference.md#multi-phase-trainer-train_selfplay_ppo) owns every flag,
 default, prerequisite and copy-ready recipe. Start with original play training,
 then choose a phase experiment, train against fixed or historical opponents, and
 finish with independent [controlled evaluation](phase_composable_evaluation.md).
@@ -193,7 +193,7 @@ The original anchor is separate and never evicted. The roster retains at most it
 configured capacity; evicted files remain on disk because old resumes may need them.
 Publication may overshoot its threshold and can occur even in HHH-only training.
 
-Starting a [new historical stage](command_reference.md#stage-b-joint-training-with-historical-opponents)
+Starting a [new historical stage](command_reference.md#recipe-6-joint-training-with-historical-opponents)
 from an HHH-trained checkpoint copies its trained phase weights, not its historical
 roster or Adam state. Using the same root seed is a new experiment, not an exact
 continuation; counters and episode streams start again. Retain fixed validation
@@ -242,7 +242,7 @@ exact snapshot roster, selection opponent and all game/encoder compatibility
 versions. Loading uses CPU mapping and weights_only=True with strict dimensions.
 Original checkpoint files are never rewritten by evaluation or stage initialization.
 
-[Resume recipes](command_reference.md#resume-and-multi-opponent-validation) distinguish
+[Resume recipes](command_reference.md#recipe-7-resume-and-multi-opponent-validation) distinguish
 an exact stage continuation from fresh initialization. Omitted modern settings
 restore saved values; explicit changes undergo compatibility checks. Budget extension
 and worker-count changes are permitted within the same sampling/numerical scheme.
@@ -259,7 +259,7 @@ one primary opponent's mean signed marks/hand. Training always validates the
 current in-memory weights without creating a temporary checkpoint. latest.pt is
 most recent periodically saved progress, not necessarily highest performance.
 An interruption can lose work since that save; progress/log records alone cannot
-restore optimizer state. See [artifact/metric reference](command_reference.md#f-execution-diagnostics-and-files).
+restore optimizer state. See [artifact/metric reference](command_reference.md#training-artifacts-and-metrics).
 
 Final evaluation uses held-out deal seeds and the
 [phase-composable interface](phase_composable_evaluation.md), including actual
@@ -296,7 +296,7 @@ not optimal bidding. Its temporary Adam optimizer is discarded before PPO.
   which model becomes best.pt. Repeated selection can overfit that schedule; report
   independent final results and avoid retroactively selecting from held-out tests.
 
-For controlled experiments, [hold continuation networks constant](command_reference.md#held-out-phase-ablations)
+For controlled experiments, [hold continuation networks constant](command_reference.md#recipe-12-held-out-phase-ablations)
 and check actual tensor equality for neural-vs-neural phases. Compare multiple
 training seeds, sample counts, contracts/roles and uncertainty. Performance against
 HHH or historical snapshots is an empirical result under those opponents, not a

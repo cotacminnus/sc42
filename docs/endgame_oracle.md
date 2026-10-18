@@ -443,7 +443,7 @@ figures, and an already-proven root may dispatch no work.
 
 ## Running and validation
 
-See the [command reference](command_reference.md#perfect-information-endgame-oracle)
+See the [command reference](command_reference.md#endgame-oracle)
 for copy-ready example/benchmark commands and all flags. The example uses arena
 deal generation and existing ordinary policies, stops after legal engine play,
 and explicitly prints all four hands. With no `--seed`, it chooses and prints a
@@ -557,7 +557,7 @@ no partial trick, the final-point objective and all root action values. Limits
 are one million nodes/20 seconds and 100,000 aggregate cache entries per call.
 The complete deal uses seed 42 with 200,000 nodes/10 seconds and the same cache
 cap. Input generation is excluded; validation, spawn and shutdown are included.
-Repeat the [point command recipes](command_reference.md#perfect-information-endgame-oracle)
+Repeat the [point command recipes](command_reference.md#endgame-oracle)
 with `--workers 1`, `2`, `4`, `8` and the corresponding remaining hand size.
 The historical deal rows used 200,000 nodes for the whole analysis. Current deal commands give that node allowance to each of 252 opening-lead
 trees and share one time limit, so they do not reproduce those rows.

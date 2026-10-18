@@ -128,7 +128,7 @@ with open('arena-report.json', 'w') as output:
 
 `to_dict()` includes derived success/length fields and preserves nested contract
 values. Experiment CLIs export per-hand and metric CSVs through `experiment_output.py`,
-retaining group IDs and policy assignments. See [output locations](command_reference.md#4-outputs-reproducibility-and-common-pitfalls).
+retaining group IDs and policy assignments. See [output locations](command_reference.md#outputs-and-logs).
 The arena report is separate from schema-5 training logs.
 
 ## Uncertainty

@@ -47,7 +47,7 @@ Neural trump requires a compatible checkpoint recording trained neural trump;
 ordinary bid/play checkpoints do not supply it.
 
 The same compositions can now serve as frozen training opponents through
-[named JSON registration](command_reference.md#register-composed-training-opponents).
+[named JSON registration](command_reference.md#recipe-10-composed-training-opponents).
 Training reuses this factory and its per-phase validation/cache; all opponent
 parameters remain frozen. For a trump ablation, the learner can freeze the same
 joint bidding and playing sources while training trump. Use the
@@ -62,7 +62,7 @@ cover HHH symmetry checks, conservative bidding and random phase substitutions.
 
 ## Controlled training comparisons
 
-Use the [held-out phase recipes](command_reference.md#held-out-phase-ablations)
+Use the [held-out phase recipes](command_reference.md#recipe-12-held-out-phase-ablations)
 after training; checkpoint selection uses a separate fixed validation schedule.
 For bidding-only or trump-only learning, compare with the exact selected frozen
 continuations, which may differ from original anchor. Checkpoint provenance alone
@@ -120,7 +120,7 @@ neural parameters; it does not compare stochastic realizations.
 `CompositePolicySpec`, `PhasePolicySpec`, `CompositeAgentFactory`, and
 `evaluate_composed()` in `research/ppo/composition.py` form the reusable API.
 `resolve_policy_spec()` shares default/phase checkpoint resolution between the
-arena CLI and [console player selection](command_reference.md#neural-console-players-and-phase-ablations).
+arena CLI and [console player selection](command_reference.md#neural-console-players).
 The console uses these same factories through `AgentPlayer` to combine human
 players and independently composed bots, without changing arena methodology.
 Factories are spawn-safe. `evaluate_matchups()` shares arena execution with the
