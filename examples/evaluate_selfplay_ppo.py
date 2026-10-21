@@ -12,14 +12,20 @@ from research.ppo.opponents import NO_ANCHOR, PolicySpec, policy_registry
 from research.ppo.selfplay_evaluation import evaluate_phases, evaluation_diagnostics, frozen_model
 
 
-@record_output
-def main(argv=None):
+def build_parser():
+    """The command's argparse definition (also used by examples.run_pipeline to validate)."""
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--checkpoint', required=True, type=Path)
     p.add_argument('--anchor-checkpoint', type=Path)
     p.add_argument('--opponents', help='default HHH,CHH,HHR,anchor; HHH,CHH,HHR for anchor-free checkpoints')
     p.add_argument('--opponent-checkpoint', action='append', default=[], metavar='NAME=PATH')
     add_evaluation_arguments(p)
+    return p
+
+
+@record_output
+def main(argv=None):
+    p = build_parser()
     a = p.parse_args(argv)
     try:
         model, data = load_model(a.checkpoint)

@@ -19,8 +19,8 @@ def fractions(text):
     return values
 
 
-@record_output
-def main(argv=None):
+def build_parser():
+    """The command's argparse definition (also used by examples.run_pipeline to validate)."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', type=Path, required=True, help='dataset JSON path (also the label cache)')
     parser.add_argument('--deals', type=int, default=64, help='seeded hands to sample from')
@@ -38,6 +38,12 @@ def main(argv=None):
     parser.add_argument('--split', type=fractions, default=(0.8, 0.1, 0.1),
                         help='deal-level TRAIN,VALIDATION,TEST fractions')
     add_output_arguments(parser)
+    return parser
+
+
+@record_output
+def main(argv=None):
+    parser = build_parser()
     args = parser.parse_args(argv)
     try:
         limits = SearchLimits(args.time_seconds, args.max_nodes, args.max_cache_entries)

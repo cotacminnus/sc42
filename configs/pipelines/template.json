@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "name": "my-experiment",
+  "description": "Copy this file and edit it. Steps run in order. 'args' are the command's ordinary CLI flags without '--': strings and numbers are passed exactly, true adds a flag, false omits it, and a list repeats the flag. Reference earlier steps with ${STEP.best}, ${STEP.latest} (training checkpoints) or ${STEP.output} (evaluation report or label dataset). Output directories are created under output_root/STEP unless you set output-dir/output/log-dir. See docs/command_reference.md#experiment-pipelines.",
+  "output_root": "runs/pipelines/my-experiment",
+  "steps": [
+    {
+      "id": "stage1",
+      "command": "train_selfplay_ppo",
+      "description": "Allowed commands: train_ppo, train_selfplay_ppo, evaluate_ppo, evaluate_selfplay_ppo, evaluate_agent_vs_agent, oracle_labels. Set learner-* to neural-train, neural-frozen or heuristic; from-scratch needs no checkpoint.",
+      "args": {
+        "from-scratch": true,
+        "learner-bid": "heuristic",
+        "learner-trump": "heuristic",
+        "learner-play": "neural-train",
+        "opponent-pool": "HHH:1",
+        "eval-opponents": "HHH,CHH",
+        "selection-opponent": "HHH",
+        "total-hands": 65536,
+        "rollout-decisions": 4096,
+        "threads": 4,
+        "seed": 42
+      }
+    },
+    {
+      "id": "stage2",
+      "command": "train_selfplay_ppo",
+      "description": "init-checkpoint starts a NEW stage from stage1 weights (fresh optimizer and counters); it is not an exact resume. Register earlier checkpoints as named opponents with a list.",
+      "args": {
+        "init-checkpoint": "${stage1.best}",
+        "learner-bid": "neural-train",
+        "learner-bid-source": "new",
+        "learner-trump": "heuristic",
+        "learner-play": "neural-train",
+        "opponent-checkpoint": ["stage1=${stage1.best}"],
+        "opponent-pool": "HHH:0.5,stage1:0.5",
+        "eval-opponents": "HHH,CHH,stage1",
+        "selection-opponent": "HHH",
+        "total-hands": 65536,
+        "rollout-decisions": 4096,
+        "threads": 4,
+        "seed": 42
+      }
+    },
+    {
+      "id": "evaluation",
+      "command": "evaluate_selfplay_ppo",
+      "description": "Fixed held-out opponents; use a seed different from training validation.",
+      "args": {
+        "checkpoint": "${stage2.best}",
+        "opponents": "HHH,CHH,HHR",
+        "deals": 2048,
+        "seed": 12345,
+        "threads": 4
+      }
+    }
+  ]
+}

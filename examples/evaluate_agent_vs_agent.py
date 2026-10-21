@@ -19,8 +19,8 @@ def policy_spec(args, agent):
         tuple(getattr(args, prefix + phase + '_checkpoint') for phase in ('bid', 'trump', 'play')))
 
 
-@record_output
-def main(argv=None):
+def build_parser():
+    """The command's argparse definition (also used by examples.run_pipeline to validate)."""
     p = argparse.ArgumentParser(description=__doc__)
     for agent in ('a', 'b'):
         p.add_argument(f'--agent-{agent}-checkpoint', type=Path)
@@ -32,6 +32,12 @@ def main(argv=None):
     p.add_argument('--stochastic-neural', action='store_true', help='Seeded sampling instead of greedy neural inference')
     p.add_argument('--episode', choices=('hand', 'match'), default='hand')
     p.add_argument('--target-marks', type=int, default=7)
+    return p
+
+
+@record_output
+def main(argv=None):
+    p = build_parser()
     args = p.parse_args(argv)
     started = perf_counter()
     try:

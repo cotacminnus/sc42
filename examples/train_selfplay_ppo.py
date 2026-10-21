@@ -47,12 +47,14 @@ def scratch_phases(args, explicit):
                           else LearnerPhaseSpec('heuristic', initialization='none') for s in states)
 
 
-@record_output
-def main(argv=None):
+SKIPPED = {'train_opponents', 'eval_opponents', 'selection_opponent', 'rollout_play_steps', 'sampling_scheme'}
+
+
+def build_parser():
+    """The command's argparse definition (also used by examples.run_pipeline to validate)."""
     parser = argparse.ArgumentParser(description=__doc__)
     defaults = Config(learning_rate=1e-4)
-    skipped = {'train_opponents', 'eval_opponents', 'selection_opponent', 'rollout_play_steps', 'sampling_scheme'}
-    add_config_arguments(parser, defaults, exclude=skipped)
+    add_config_arguments(parser, defaults, exclude=SKIPPED)
     source = parser.add_mutually_exclusive_group()
     source.add_argument('--init-play-checkpoint', type=Path)
     source.add_argument('--init-checkpoint', type=Path, help='New stage: weights only, fresh optimizer/RNG')
@@ -91,6 +93,12 @@ def main(argv=None):
     parser.add_argument('--eval-threads', type=int, default=1)
     parser.add_argument('--output-dir', type=Path, default=Path('runs/ppo-selfplay'))
     add_output_arguments(parser)
+    return parser
+
+
+@record_output
+def main(argv=None):
+    parser = build_parser()
     args = parser.parse_args(argv)
     arguments = list(sys.argv[1:] if argv is None else argv)
     explicit = {arg.split('=')[0] for arg in arguments if arg.startswith('--')}
@@ -191,7 +199,7 @@ def main(argv=None):
         scratch_lineage = args.from_scratch or bool(args.resume and saved.from_scratch)
         pool = historical_pool(args.opponent_pool, policies, anchor_spec,
                                snapshot_fallback='current' if scratch_lineage or anchor_spec is None else 'anchor')
-        base = {f.name: getattr(args, f.name) for f in fields(Config) if f.name not in skipped}
+        base = {f.name: getattr(args, f.name) for f in fields(Config) if f.name not in SKIPPED}
         if '--hidden-size' not in explicit and initial is not None:
             base['hidden_size'] = initial.hidden_size
         config = SelfPlayConfig(**base, learn_phases=enabled, opponent_probabilities=pool.probabilities,
