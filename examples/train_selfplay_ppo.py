@@ -16,6 +16,7 @@ from research.ppo.selfplay_checkpoint import save, resume, config_from_dict
 from research.ppo.selfplay_evaluation import evaluate_phases, frozen_model, evaluation_diagnostics
 from research.ppo.imitation import clone_bidding, teacher_data, playing_kl
 from research.ppo.seeds import stream_seed
+from research.ppo.oracle_dataset import dataset_sha256
 from texas42.parallel import resolve_workers
 
 
@@ -49,6 +50,14 @@ def main(argv=None):
     parser.add_argument('--snapshot-pool-size', type=int, default=8)
     parser.add_argument('--bid-bc-hands', type=int, default=0)
     parser.add_argument('--forgetting-hands', type=int, default=8)
+    parser.add_argument('--critic-mode', choices=('local', 'centralized'), default='local',
+                        help='local: existing per-phase value heads; centralized: separate privileged critic')
+    parser.add_argument('--return-estimator', choices=('gae', 'monte-carlo'), default='gae',
+                        help='monte-carlo uses complete-hand returns (diagnostic baseline)')
+    parser.add_argument('--oracle-aux-coef', type=float, default=0.0,
+                        help='weight of the critic oracle-point interval loss; 0 disables it')
+    parser.add_argument('--oracle-dataset', type=Path,
+                        help='labels from examples.oracle_labels; requires --oracle-aux-coef > 0')
     parser.add_argument('--eval-threads', type=int, default=1)
     parser.add_argument('--output-dir', type=Path, default=Path('runs/ppo-selfplay'))
     add_output_arguments(parser)
@@ -146,7 +155,11 @@ def main(argv=None):
             rollout_decisions=args.rollout_decisions, snapshot_every_hands=args.snapshot_every_hands,
             snapshot_pool_size=args.snapshot_pool_size, bid_bc_hands=args.bid_bc_hands,
             forgetting_hands=args.forgetting_hands, sampling_scheme='episode-v1',
-            learner_phases=learner, max_rollout_hands=args.max_rollout_hands)
+            learner_phases=learner, max_rollout_hands=args.max_rollout_hands,
+            critic_mode=args.critic_mode, return_estimator=args.return_estimator,
+            oracle_aux_coef=args.oracle_aux_coef,
+            oracle_dataset=str(args.oracle_dataset.resolve()) if args.oracle_dataset else None,
+            oracle_dataset_sha256=dataset_sha256(args.oracle_dataset) if args.oracle_dataset else None)
         if args.resume:
             if saved is None:
                 raise ValueError('Resume requires a multi-phase checkpoint; use --init-play-checkpoint for migration')
@@ -156,7 +169,8 @@ def main(argv=None):
             for flag, key in (('--opponent-pool', 'opponent_probabilities'),
                               ('--opponent-checkpoint', 'opponent_policies'),
                               ('--opponent-composition', 'opponent_policies'),
-                              ('--eval-opponents', 'evaluation_names'), ('--selection-opponent', 'primary_opponent')):
+                              ('--eval-opponents', 'evaluation_names'), ('--selection-opponent', 'primary_opponent'),
+                              ('--oracle-dataset', 'oracle_dataset_sha256')):
                 if flag in explicit:
                     changes[key] = getattr(config, key)
             if configured:
@@ -173,7 +187,11 @@ def main(argv=None):
             factory = spec.factory()
             if hasattr(factory, 'prepare'):
                 factory.prepare()
-        trainer = SelfPlayTrainer(config, initial)
+        initial_critic = None
+        if (not args.resume and config.critic_mode == 'centralized' and data.get('critic') is not None
+                and data['config']['hidden_size'] == config.hidden_size):
+            initial_critic = data['critic']
+        trainer = SelfPlayTrainer(config, initial, initial_critic=initial_critic)
         if args.resume:
             resume(args.resume, trainer)
         elif args.bid_bc_hands:
@@ -196,6 +214,15 @@ def main(argv=None):
     print(f'Anchor: {config.anchor.path}\nAnchor SHA256: {config.anchor.sha256}')
     print(f'Device: {trainer.device}; workers: {trainer.workers}; torch threads: {config.torch_threads}; validation workers: {resolve_workers(args.eval_threads)}')
     print(f'Primary selection opponent: {config.primary_opponent}; training pool: {config.opponent_probabilities}')
+    print(f'Critic: {config.critic_mode}; returns: {config.return_estimator} (gamma={config.gamma}, lambda={config.gae_lambda})')
+    if trainer.critic is not None:
+        origin = ('copied from the initialization checkpoint' if trainer.critic_initialization == 'checkpoint'
+                  else 'restored from the resume checkpoint' if args.resume
+                  else 'initialized fresh (the source checkpoint has no compatible centralized critic)')
+        print(f'Centralized critic {origin}')
+    if trainer.oracle_summary is not None:
+        print(f'Oracle auxiliary: coefficient {config.oracle_aux_coef}; dataset {config.oracle_dataset} '
+              f'SHA256 {config.oracle_dataset_sha256}; {trainer.oracle_summary}')
     try:
         while trainer.hands < config.total_hands:
             before, update_started = trainer.hands, perf_counter()
@@ -222,8 +249,19 @@ def main(argv=None):
                 rollout_performance=trainer.rollout_performance, execution=trainer.execution_metadata(),
                 collection_hands_per_second=(trainer.hands - before) / trainer.collection_seconds,
                 collection_decisions_per_second=sample_count / trainer.collection_seconds,
-                evaluation_seconds=0.0, checkpoint_seconds=0.0)
+                evaluation_seconds=0.0, checkpoint_seconds=0.0,
+                critic_mode=config.critic_mode, return_estimator=config.return_estimator,
+                critic_initialization=trainer.critic_initialization,
+                value_diagnostics=trainer.value_diagnostics if sample_count else None,
+                oracle_dataset=trainer.oracle_summary,
+                oracle_validation=trainer.oracle_validation_metrics() if sample_count else None)
             print(f'Update {trainer.updates}: {trainer.hands}/{config.total_hands} hands; samples {trainer.phase_counts}; reward {reward:+.4f}')
+            if sample_count:
+                ev = trainer.value_diagnostics['explained_variance']
+                print(f'  critic: value loss {metrics["value_loss"]:.5f}; explained variance '
+                      + ('N/A' if ev is None else f'{ev:.4f}')
+                      + (f'; oracle interval loss {metrics["oracle_aux_loss"]:.5f} '
+                         f'({metrics["oracle_aux_point_error"]:.3f} points)' if 'oracle_aux_loss' in metrics else ''))
             for phase in config.learn_phases:
                 print(f'  {phase}: policy {metrics.get(phase + "_policy_loss", 0):.5f}, entropy {metrics.get(phase + "_entropy", 0):.4f}, KL {metrics.get(phase + "_approx_kl", 0):.6f}')
             if (sample_count and set(trainer.model.neural_phases) <= set(trainer.model.trained_phases)

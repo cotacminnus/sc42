@@ -6,6 +6,7 @@ from time import perf_counter
 import torch
 from texas42.agents import HeuristicAgent
 from texas42.encoding import encode
+from texas42.privileged import encode_privileged
 from texas42.selfplay import SelfPlayEnv
 from .agent import PPOAgent
 from .buffer import Experience
@@ -15,10 +16,18 @@ from .seeds import stream_seed
 _FACTORIES = {}
 _LEARNER = None
 _VERSION = None
+_CRITIC = None
+_CRITIC_VERSION = None
 
 
 @torch.no_grad()
-def collect_phase_hand(model, seed, episode, learn_phases, pool):
+def collect_phase_hand(model, seed, episode, learn_phases, pool, critic=None):
+    """critic=None keeps the local actor-critic values.
+
+    With a centralized critic, the actor still sees only `encode(obs)`; the
+    privileged features and the critic's value are stored beside the decision
+    for the update and never enter action selection.
+    """
     team = (episode + seed) % 2
     label, spec = pool.choose(seed, episode)
     started = perf_counter()
@@ -51,10 +60,15 @@ def collect_phase_hand(model, seed, episode, learn_phases, pool):
             mask = torch.tensor([obs.action_mask], dtype=torch.bool)
             neural_started = perf_counter()
             action, logp, value = model.select(x, mask, generator=generator)
+            critic_features = None
+            if critic is not None:
+                critic_features = tuple(encode_privileged(obs, env.remaining_hands()))
+                value = critic(torch.tensor([critic_features], dtype=torch.float32))
             neural_inference += perf_counter() - neural_started
             action = int(action.item())
             paths[obs.seat].append(Experience(features, obs.action_mask, action,
-                float(logp.item()), float(value.item()), 0.0, False, obs.seat, episode))
+                float(logp.item()), float(value.item()), 0.0, False, obs.seat, episode,
+                critic_features))
         else:
             action = agents[obs.seat].act(obs)
         inference += perf_counter() - started
@@ -84,8 +98,9 @@ def collect_phase_hand(model, seed, episode, learn_phases, pool):
 
 
 def phase_chunk(task):
-    global _LEARNER, _VERSION
-    weights, hidden, neural, learn, seed, indices, pool = task
+    global _LEARNER, _VERSION, _CRITIC, _CRITIC_VERSION
+    weights, hidden, neural, learn, seed, indices, pool, *optional = task
+    critic_weights = optional[0] if optional else None
     # Bound process-local opponent caches to the current roster plus anchor.
     from .checkpoint import _FROZEN_MODELS
     allowed = {pool.anchor, *pool.policies, *pool.snapshots}
@@ -101,10 +116,22 @@ def phase_chunk(task):
         factory = PhaseFactory(weights, hidden, neural)
         factory.prepare()
         _LEARNER, _VERSION = factory.model, version
+    critic = None
+    if critic_weights is not None:
+        critic_version = (hashlib.sha256(critic_weights).digest(), hidden)
+        if critic_version != _CRITIC_VERSION:
+            from .critic import CentralCritic
+            from io import BytesIO
+            with torch.random.fork_rng(devices=[]):
+                _CRITIC = CentralCritic(hidden)
+            _CRITIC.load_state_dict(torch.load(BytesIO(critic_weights), map_location='cpu', weights_only=True))
+            _CRITIC.eval()
+            _CRITIC_VERSION = critic_version
+        critic = _CRITIC
     rows = []
     for episode in indices:
         try:
-            rows.append(collect_phase_hand(_LEARNER, seed, episode, learn, pool))
+            rows.append(collect_phase_hand(_LEARNER, seed, episode, learn, pool, critic))
         except Exception as exc:
             raise RuntimeError(f'Multi-phase episode={episode} worker={os.getpid()}: {exc}') from exc
     return rows, os.getpid()

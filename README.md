@@ -66,11 +66,12 @@ explains sample counts, rewards, source identities and resume. Use the
 | `texas42/engine.py`, `players.py`, `cli.py` | Console runner and object-based player decisions |
 | `texas42/agents/` | Common protocol, built-in agents and Player adapter |
 | `texas42/arena.py`, `parallel.py` | Paired evaluation, metrics and ordered process workers |
-| `texas42/oracle.py` | Shared perfect-information contract/point search, complete-deal analysis and exhaustive reference |
+| `texas42/oracle.py` | Shared perfect-information contract/point search, arbitrary-position bounds, complete-deal analysis and exhaustive reference |
+| `texas42/privileged.py` | Training-only centralized-critic features (all remaining hands); never an actor input |
 | `texas42/belief.py` | Hidden-deal constraints, exact counting/sampling, rollouts and expected action values |
 | `texas42/training.py`, `encoding.py`, `actions.py` | Versioned ID-based views, 387 features and legal global actions |
 | `texas42/openspiel.py` | Optional adapter depending on the native engine |
-| `research/ppo/` | Optional training, checkpoints and frozen policy composition |
+| `research/ppo/` | Optional training (local or centralized critic), oracle label datasets, checkpoints and frozen policy composition |
 | `examples/` | Runnable game, training and evaluation commands |
 | `tests/`, `docs/` | Deterministic unittest coverage and technical documentation |
 | `runs/`, `logs/` | Ignored generated checkpoints, results and readable exports |

@@ -18,7 +18,7 @@ Step numbers match the team's live planning document.
 | 1 | Game engine | Done | `models.py`, `rules.py`, `state.py`, `engine.py` |
 | 2 | Self-play setup | Mostly done | `selfplay.py`, `training.py`, `encoding.py`, `serialization.py`, `history.py`, `collection.py` |
 | — | OpenSpiel compatibility | Done | `openspiel.py`, [openspiel.md](openspiel.md) |
-| 3 | Perfect-information oracle | Prototype only | planned `texas42/oracle.py` |
+| 3 | Perfect-information oracle | Endgame, complete-deal and arbitrary-position bounds implemented | `texas42/oracle.py`, [oracle guide](endgame_oracle.md) |
 | 4 | Common agent interface | Done | `agents/`: protocols, RandomAgent, AgentPlayer |
 | 5 | Baseline agents | V1 baselines done | HeuristicAgent, RandomAgent, ConservativeRandomAgent, HybridAgent; [phase ablations](policy_ablation.md) |
 | 6 | Self-play training | Play-only and multi-phase historical PPO implemented | [legacy baseline](ppo_training.md), [current training](multiphase_selfplay.md) |
@@ -39,8 +39,9 @@ execution and partnership cross-play remain separate research milestones.
   the shaker. Use `SelfPlayEnv` with random legal IDs for bidding data.
 - Ordinary CLI logs contain only actor-visible observations and public history.
   `TrainingCollector(include_initial_deal=True)` can separately record complete
-  initial deals for belief/oracle labels. Label generation and models remain
-  future work; ordinary policies receive only `Observation`.
+  initial deals for belief/oracle labels. Offline oracle labels for the
+  centralized critic's auxiliary head are implemented (`examples.oracle_labels`);
+  belief-model labels remain future work. Ordinary policies receive only `Observation`.
 - OpenSpiel's `deal_counts` observer field is always zero (see the TODO in
   `openspiel.py`).
 - `pyspiel` wheels target Linux and macOS. On Windows, use WSL2; OpenSpiel tests
@@ -114,8 +115,11 @@ Next experiments:
 - Compare multiple Stage A seeds against heuristic bidding with identical play.
 - Evaluate joint historical training against HHH, CHH and the original anchor on
   independent held-out schedules; track playing-policy forgetting.
+- Compare the local critic, the centralized privileged critic and its optional
+  oracle auxiliary head under matched budgets
+  ([Recipe 13](command_reference.md#recipe-13-local-versus-centralized-critic-and-oracle-auxiliary)).
 - Study opponent-pool curricula and cross-play partners before introducing live
-  self-play, recurrent policies, match-level PPO or privileged critics.
+  self-play, recurrent policies or match-level PPO.
 - Deep Monte Carlo remains an alternative algorithm to compare under equal budgets.
 
 Short smoke tests establish mechanics, not competitive gains or generalization.
