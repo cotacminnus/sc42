@@ -976,3 +976,269 @@ def _parallel_root(state: HandState, search: _Search, *, output: str, start: flo
             search.cache_hits += sum(hits for _, _, hits in results)
             bounds = _combine(rows, maximizing=state.seat % 2 == search.team(state), complete=True)
     return _root_result(state, search, rows, bounds, output=output, start=start)
+
+
+# ---------------------------------------------------------------------------
+# Arbitrary play positions (training labels, belief leaves, diagnostics).
+# ---------------------------------------------------------------------------
+
+PositionObjective = Literal['final_points', 'contract']
+
+
+@dataclass(frozen=True, slots=True)
+class PlayPosition:
+    """A play-phase position without its earlier trick contents.
+
+    hands: remaining permanent domino IDs per absolute seat. trick: current
+    partial trick as (seat, domino ID) in play order, started by leader.
+    captured_points: points already awarded to teams (0, 1) by completed tricks.
+    trump: a decoded trump value (0-6, DOUBLE_TRUMP or None for Follow Me).
+    bid is the contract stake; None uses the 30-point placeholder that the
+    final-point objective never reads. next_player, when given, is verified.
+    """
+
+    hands: tuple[tuple[int, ...], ...]
+    trick: tuple[tuple[int, int], ...]
+    leader: int
+    trump: Trump
+    bidder: int
+    captured_points: tuple[int, int]
+    bid: Bid | None = None
+    next_player: int | None = None
+    contract_kind: ContractKind = ContractKind.NORMAL
+
+    @property
+    def completed_tricks(self) -> int:
+        played = {seat for seat, _ in self.trick}
+        return 7 - len(self.hands[self.leader]) - int(self.leader in played)
+
+
+@dataclass(frozen=True, slots=True)
+class PositionActionResult:
+    """Certified final-total bounds for one candidate action.
+
+    lower/upper are final team points for the reference team, including points
+    already captured. contract_status is None for the final-point objective.
+    termination: exact, threshold_proven, decided, node_limit, time_limit or
+    not_started (the global deadline expired first). Never an estimate.
+    """
+
+    action_id: int
+    lower: int
+    upper: int
+    contract_status: Literal['proven_makeable', 'proven_unmakeable', 'unresolved'] | None
+    nodes: int
+    termination: str
+
+    @property
+    def exact(self) -> bool:
+        return self.lower == self.upper
+
+
+@dataclass(frozen=True, slots=True)
+class PositionEvaluation:
+    """Per-action and root bounds; units are always final team points (0-42)."""
+
+    objective: PositionObjective
+    reference_team: int
+    acting_seat: int
+    threshold: int | None
+    actions: tuple[PositionActionResult, ...]
+    lower: int
+    upper: int
+    all_legal_actions: bool
+    proven_optimal_actions: tuple[int, ...] | None
+    nodes: int
+    cache_hits: int
+    elapsed_seconds: float
+    units: str = 'final_team_points'
+
+    @property
+    def exact(self) -> bool:
+        return self.lower == self.upper
+
+    @property
+    def contract_status(self) -> str | None:
+        return None if self.threshold is None else _threshold_status(self.lower, self.upper, self.threshold)
+
+    @property
+    def perspective(self) -> str:
+        return f'team {self.reference_team}'
+
+
+def _threshold_status(lower: int, upper: int, threshold: int) -> str:
+    if lower >= threshold:
+        return 'proven_makeable'
+    if upper < threshold:
+        return 'proven_unmakeable'
+    return 'unresolved'
+
+
+def position_from_state(state: HandState) -> PlayPosition:
+    """Privileged snapshot of a live play-phase HandState (never a policy input)."""
+    if state.phase != Phase.PLAY or state.result is not None or state.contract is None:
+        raise ValueError('Expected an unfinished play-phase hand')
+    leader = state.trick[0][0] if state.trick else state.seat
+    return PlayPosition(tuple(tuple(sorted(d.id for d in hand)) for hand in state.hands),
+                        tuple((seat, d.id) for seat, d in state.trick), leader, state.trump,
+                        state.contract.bidder, tuple(state.points), state.contract.bid,
+                        state.seat, state.contract.kind)
+
+
+def position_state(position: PlayPosition) -> HandState:
+    """Validate a PlayPosition and build a search-only HandState.
+
+    Earlier trick contents are unknown, so `completed` holds empty placeholders:
+    only their count affects termination, legality and scoring. Consistency
+    checks: disjoint hands, turn order from the leader, hand sizes matching the
+    trick count, captured points equal to completed tricks plus counters of
+    every domino no longer in a hand or the partial trick, and partial-trick
+    followers either following suit or still void in it. Do not pass the
+    result to solve(), which requires a fully replayable history.
+    """
+    if position.contract_kind != ContractKind.NORMAL:
+        raise ValueError('Only ordinary contracts are supported by the position oracle')
+    seats = (position.leader, position.bidder)
+    if any(type(s) is not int or s not in range(4) for s in seats):
+        raise ValueError('leader and bidder must be seats 0-3')
+    hands = tuple(tuple(hand) for hand in position.hands)
+    trick = tuple(tuple(play) for play in position.trick)
+    ids = [i for hand in hands for i in hand] + [d for _, d in trick]
+    if (len(hands) != 4 or any(type(i) is not int or i not in range(28) for i in ids)
+            or len(set(ids)) != len(ids)):
+        raise ValueError('Expected four hands and a trick of distinct domino IDs 0-27')
+    if len(trick) > 3:
+        raise ValueError('A partial trick has at most three plays')
+    if [seat for seat, _ in trick] != [(position.leader + i) % 4 for i in range(len(trick))]:
+        raise ValueError('Partial trick seats must follow the leader in turn order')
+    actor = (position.leader + len(trick)) % 4
+    if position.next_player is not None and position.next_player != actor:
+        raise ValueError('next_player disagrees with the leader and partial trick')
+    completed = position.completed_tricks
+    played = {seat for seat, _ in trick}
+    if (not 0 <= completed < 7 or
+            any(len(hands[s]) != 7 - completed - int(s in played) for s in range(4))):
+        raise ValueError('Hand sizes are inconsistent with one shared trick count')
+    ACTION_REGISTRY.encode(Phase.TRUMP, position.trump)
+    points = tuple(position.captured_points)
+    gone = set(range(28)) - set(ids)
+    expected = completed + sum(PLAY_ACTIONS[i].count_value for i in gone)
+    if (len(points) != 2 or any(type(p) is not int or p < 0 for p in points)
+            or sum(points) != expected):
+        raise ValueError(f'Captured points must total {expected} for this position')
+    if trick:
+        suit = led_suit(PLAY_ACTIONS[trick[0][1]], position.trump)
+        from .rules import follows_suit
+        for seat, domino in trick[1:]:
+            if (not follows_suit(PLAY_ACTIONS[domino], suit, position.trump)
+                    and any(follows_suit(PLAY_ACTIONS[i], suit, position.trump) for i in hands[seat])):
+                raise ValueError(f'Seat {seat} failed to follow suit while holding it')
+    bid = position.bid if position.bid is not None else Bid(points=30)
+    state = HandState([[PLAY_ACTIONS[i] for i in hand] for hand in hands],
+                      (position.bidder - 1) % 4, (0, 0), 7)
+    state.phase, state.contract = Phase.PLAY, Contract(ContractKind.NORMAL, position.bidder, bid)
+    state.bidder, state.trump, state.seat = position.bidder, position.trump, actor
+    state.trick = [(seat, PLAY_ACTIONS[d]) for seat, d in trick]
+    state.completed = [()] * completed
+    state.points = list(points)
+    return state
+
+
+def evaluate_position(position: PlayPosition, *, objective: PositionObjective = 'final_points',
+                      reference_team: int | None = None, threshold: int | None = None,
+                      actions: Sequence[int] | None = None, limits: SearchLimits | None = None,
+                      total_time_seconds: float | None = None, move_ordering: MoveOrdering = 'none',
+                      cache: dict | None = None) -> PositionEvaluation:
+    """Certified bounds for each candidate action of an arbitrary play position.
+
+    Budgets: `limits.max_nodes` and `limits.time_seconds` apply to EACH action
+    search separately (a fresh node counter and clock per action);
+    `total_time_seconds` is one optional global deadline for the whole call.
+    Exhausted searches keep their valid bounds and are never labelled exact.
+
+    objective='final_points' bounds the reference team's final points (default
+    team: the acting seat's). objective='contract' asks whether the bidding
+    team can force `threshold` (default: the contract's target points): a
+    lower bound >= threshold proves makeable, an upper bound < threshold proves
+    unmakeable. Its reference team is always the bidders. Both objectives use
+    the same alpha-beta search, transposition entries and final-total units;
+    `cache` may be shared across calls because keys include the ruleset,
+    objective and reference team.
+    """
+    start = monotonic()
+    if objective not in ('final_points', 'contract'):
+        raise ValueError("objective must be 'final_points' or 'contract'")
+    state = position_state(position)
+    bidders = position.bidder % 2
+    if objective == 'contract':
+        if reference_team not in (None, bidders):
+            raise ValueError('The contract objective uses the bidding team as reference')
+        reference_team = bidders
+        if threshold is None:
+            if position.bid is None:
+                raise ValueError('The contract objective needs a bid or an explicit threshold')
+            threshold = position.bid.target_points
+        if type(threshold) is not int or not 30 <= threshold <= 42:
+            raise ValueError('An ordinary contract threshold must be 30-42 points')
+    else:
+        if threshold is not None:
+            raise ValueError('threshold applies only to the contract objective')
+        reference_team = state.seat % 2 if reference_team is None else reference_team
+    if reference_team not in (0, 1):
+        raise ValueError('reference_team must be 0 or 1')
+    if total_time_seconds is not None and (not math.isfinite(total_time_seconds) or total_time_seconds < 0):
+        raise ValueError('total_time_seconds must be finite and nonnegative')
+    limits = limits if limits is not None else SearchLimits()
+    legal = state.legal_action_ids()
+    requested = legal if actions is None else tuple(actions)
+    if not requested or len(set(requested)) != len(requested) or not set(requested) <= set(legal):
+        raise ValueError('Candidate actions must be distinct legal play IDs')
+    deadline = None if total_time_seconds is None else start + total_time_seconds
+    cache = {} if cache is None else cache
+    rows, nodes, hits = [], 0, 0
+    for action in requested:
+        now = monotonic()
+        child = _child(state, action)
+        if deadline is not None and now >= deadline:
+            search = _Search(limits, now, objective='final_points', reference_team=reference_team)
+            bounds, termination, used = search.initial_bounds(child), 'not_started', 0
+        else:
+            budget = limits
+            if deadline is not None:
+                remaining = deadline - now
+                if limits.time_seconds is None or limits.time_seconds > remaining:
+                    budget = replace(limits, time_seconds=remaining)
+            search = _Search(budget, now, objective='final_points', reference_team=reference_team,
+                             move_ordering=move_ordering)
+            search.cache = cache
+            if threshold is None:
+                bounds = search.search(child)
+            else:
+                bounds = search.search(child, alpha=threshold - 1, beta=threshold)
+            used = search.nodes
+            hits += search.cache_hits
+            if bounds.exact:
+                termination = 'exact' if used else 'decided'
+            elif threshold is not None and _threshold_status(bounds.lower, bounds.upper, threshold) != 'unresolved':
+                termination = 'threshold_proven'
+            elif budget.max_nodes is not None and used >= budget.max_nodes:
+                termination = 'node_limit'
+            else:
+                termination = 'time_limit'
+        nodes += used
+        rows.append(PositionActionResult(
+            action, bounds.lower, bounds.upper,
+            None if threshold is None else _threshold_status(bounds.lower, bounds.upper, threshold),
+            used, termination))
+    complete = set(requested) == set(legal)
+    maximizing = state.seat % 2 == reference_team
+    prior = _Search(limits, start, objective='final_points', reference_team=reference_team).initial_bounds(state)
+    root = _combine([ValueBounds(r.lower, r.upper) for r in rows], maximizing=maximizing,
+                    complete=complete, unknown=prior)
+    proven = None
+    if complete and threshold is None:
+        _, _, choices = _choice_proof([ValueBounds(r.lower, r.upper) for r in rows], maximizing=maximizing)
+        proven = tuple(rows[i].action_id for i in choices) if choices is not None else None
+    return PositionEvaluation(objective, reference_team, state.seat, threshold, tuple(rows),
+                              root.lower, root.upper, complete, proven, nodes, hits,
+                              monotonic() - start)

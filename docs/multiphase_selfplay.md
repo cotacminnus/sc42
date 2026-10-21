@@ -175,6 +175,72 @@ gamma below one, changing enabled phases changes the number of discount steps.
 The value target is advantage plus old value, predicting signed marks, not merely
 contract success. Advantage normalization is over the merged batch, not per phase.
 
+## Critic modes, returns and oracle auxiliary supervision
+
+Three independently selectable features let their effects be measured separately
+([flags](command_reference.md#g-critic-returns-and-oracle-auxiliary),
+[A/B/C recipe](command_reference.md#recipe-13-local-versus-centralized-critic-and-oracle-auxiliary)).
+All defaults reproduce the existing local critic and GAE bit for bit (verified by
+comparing progress metrics and weights against the previous code).
+
+**Return audit.** The existing per-seat trajectories already satisfy the reference-
+team requirements: both learners belong to one partnership, each trajectory holds
+one seat's decisions in one hand, the terminal reward is that seat's team signed
+marks (partners equal, opponents opposite), and GAE never crosses seats, hands or
+teams. Opponent turns and frozen/heuristic decisions are skipped rather than
+discounted, and bid → trump → play are ordinary steps of one seat trajectory, so
+a bid value bootstraps from the same seat's (same team's) next value. Hands always
+complete inside a rollout, so no trajectory is truncated in training; `gae` and
+`monte_carlo` nevertheless accept a same-team `bootstrap_value` for truncated
+trajectories, and the buffer requires it whenever the last decision is not terminal.
+`gamma` stays 1 by default for undiscounted hand-level signed marks.
+
+**Return estimators.** `gae` is unchanged. `monte-carlo` assigns every decision the
+complete discounted hand return (the final signed marks when gamma = 1), with
+advantage = return − value: GAE with λ = 1, kept as a diagnostic baseline.
+
+**Centralized critic.** `--critic-mode centralized` adds a separate `CentralCritic`
+(`research/ppo/critic.py`): the same two-layer MLP width as the actor, a signed-mark
+value head and a separate oracle head. Its input is
+`texas42.privileged.encode_privileged` (509 features, layout version 1): the
+acting seat's ordinary 387-feature vector (own hand, public bidding and play
+history, contract, trump, scores, phase, voids, relative seats), plus all four
+remaining hands by relative seat, the relative trick leader and next player, and
+an explicit perspective field (the actor's team is always the reference). With the
+public record of who played what, the remaining hands determine the full initial
+deal, so the critic sees every input the non-recurrent seat policies have seen.
+Approximations: opponent identity is not encoded, so values average over the
+training opponent mixture; there are no recurrent policies, so no recurrent state
+needs privileged isolation.
+
+Actors are unchanged: one shared actor per phase across both learner seats,
+separate bid/trump/play networks and all freezing controls. Privileged features are
+computed beside each learner decision in the rollout (from
+`SelfPlayEnv.remaining_hands()`, a privileged accessor that agents never receive)
+and enter only the critic. The actor's own value heads are left untouched in this
+mode. The critic predicts expected final signed marks **under the rollout
+policies** from actual returns, not a perfect-information value. It has its own
+initialization seed stream (actor initialization and rollouts stay matched across
+modes), joins the Adam optimizer after the trainable actor parameters, and has its
+gradient clipped separately so a large value gradient never rescales the actor's.
+
+**Oracle auxiliary head (optional, off by default).** With `--oracle-aux-coef c > 0`
+and an [offline label dataset](command_reference.md#oracle-training-labels), each
+optimizer step also samples a batch of labelled positions (separate seed stream)
+and adds `c · mean(relu(L − v)² + relu(v − U)²)`, where `v` is the oracle head's
+prediction and `[L, U]` the certified double-dummy final-point bounds for the
+acting team, all divided by 42. When `L = U` this is squared error. The loss
+shapes the shared critic trunk only: main value targets remain actual rollout
+returns, advantages are unchanged, no reward shaping or actor imitation is added,
+and no search runs during training. Labels come from late-hand positions by
+default because they are cheap to prove exactly; one open-hand deal is not a
+realistic bidding success probability, so no bid-phase targets are produced.
+
+Checkpoints record `critic_mode`, the critic weights and architecture, the
+privileged layout version and how the critic was initialized; local and older
+checkpoints load unchanged. Actor-only inference (`load_model`, evaluation,
+console) never needs the critic, a dataset or the oracle.
+
 ## Opponent pools, archives and historical self-play
 
 [Opponent arguments and recipes](command_reference.md#d-training-opponents-and-historical-snapshots)

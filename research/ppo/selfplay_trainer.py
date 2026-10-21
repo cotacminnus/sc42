@@ -10,6 +10,8 @@ from .opponents import HistoricalPool, PolicySpec
 from .buffer import RolloutBuffer
 from .rollout import initialize_worker, snapshot
 from .selfplay_rollout import phase_chunk
+from .critic import CRITIC_MODES, RETURN_ESTIMATORS, ORACLE_POINT_SCALE, interval_loss, new_critic
+from .seeds import stream_seed
 
 
 @dataclass(frozen=True)
@@ -27,6 +29,12 @@ class SelfPlayConfig(Config):
     forgetting_hands: int = 8
     learner_phases: tuple = ()  # Empty migrates the legacy initialization path.
     max_rollout_hands: int = 4096  # Bounds zero-sample trump-only collection.
+    # Defaults reproduce the existing local actor-critic with GAE exactly.
+    critic_mode: str = 'local'
+    return_estimator: str = 'gae'
+    oracle_aux_coef: float = 0.0
+    oracle_dataset: str | None = None
+    oracle_dataset_sha256: str | None = None
 
     def __post_init__(self):
         super().__post_init__()
@@ -56,10 +64,28 @@ class SelfPlayConfig(Config):
             raise ValueError('bid_bc_hands must be nonnegative')
         if self.sampling_scheme not in ('auto', 'episode-v1'):
             raise ValueError('Multi-phase training uses episode-seeded streams only')
+        if self.critic_mode not in CRITIC_MODES:
+            raise ValueError('critic_mode must be local or centralized')
+        if self.return_estimator not in RETURN_ESTIMATORS:
+            raise ValueError('return_estimator must be gae or monte-carlo')
+        if not math.isfinite(self.oracle_aux_coef) or self.oracle_aux_coef < 0:
+            raise ValueError('oracle_aux_coef must be finite and nonnegative')
+        if self.oracle_aux_coef > 0:
+            if self.critic_mode != 'centralized':
+                raise ValueError('Oracle auxiliary supervision requires the centralized critic')
+            if not self.oracle_dataset or not self.oracle_dataset_sha256:
+                raise ValueError('Oracle auxiliary supervision requires an oracle dataset identity')
+        elif self.oracle_dataset is not None or self.oracle_dataset_sha256 is not None:
+            raise ValueError('An oracle dataset requires a positive oracle_aux_coef')
 
 
 class SelfPlayTrainer(Trainer):
-    def __init__(self, config, initial):
+    def __init__(self, config, initial, *, initial_critic=None):
+        """initial_critic: a CentralCritic state_dict to continue, else a fresh critic.
+
+        critic_initialization records which happened ('fresh' or 'checkpoint');
+        it is None for the local actor-critic.
+        """
         super().__init__(config)
         if initial.hidden_size != config.hidden_size:
             raise ValueError('Initial checkpoint architecture does not match hidden_size')
@@ -101,8 +127,28 @@ class SelfPlayTrainer(Trainer):
             model.trained_phases = tuple(getattr(initial, 'trained_phases', ('play',)))
         model.configure_learning(config.learn_phases)
         self.model = model.to(self.device)
-        self.optimizer = torch.optim.Adam((p for p in model.parameters() if p.requires_grad),
-                                          lr=config.learning_rate)
+        self.critic, self.critic_initialization = None, None
+        if config.critic_mode == 'centralized':
+            # Separate weights and seed stream: actor initialization stays matched across modes.
+            critic = new_critic(config.hidden_size, config.seed)
+            self.critic_initialization = 'fresh'
+            if initial_critic is not None:
+                critic.load_state_dict(initial_critic, strict=True)
+                self.critic_initialization = 'checkpoint'
+            self.critic = critic.to(self.device)
+        parameters = [p for p in model.parameters() if p.requires_grad]
+        if self.critic is not None:
+            parameters += list(self.critic.parameters())
+        self.optimizer = torch.optim.Adam(parameters, lr=config.learning_rate)
+        self.oracle_data = self.oracle_validation = self.oracle_summary = None
+        self.oracle_shuffle = self.value_diagnostics = None
+        if config.oracle_aux_coef > 0:
+            from .oracle_dataset import load_dataset, training_tensors
+            dataset = load_dataset(config.oracle_dataset, sha256=config.oracle_dataset_sha256)
+            self.oracle_data = training_tensors(dataset, 'train')
+            self.oracle_validation = training_tensors(dataset, 'validation', required=False)
+            self.oracle_summary = dataset.summary()
+            self.oracle_shuffle = torch.Generator().manual_seed(stream_seed(config.seed, 'oracle-auxiliary-v1'))
         self.sampling_scheme = 'multiphase-episode-v1'
         minimum = self.minimum_decisions
         self.workers = resolve_workers(config.threads, min(config.total_hands,
@@ -139,6 +185,7 @@ class SelfPlayTrainer(Trainer):
         if self.hands >= c.total_hands:
             raise ValueError('Training budget exhausted')
         weights, pool = snapshot(self.model), self.opponent_pool()
+        critic = (snapshot(self.critic),) if self.critic is not None else ()
         rows, pids, indices, actual = [], set(), [], 0
         previous = torch.get_num_threads()
         try:
@@ -159,7 +206,7 @@ class SelfPlayTrainer(Trainer):
                 indices.extend(wave)
                 size = math.ceil(count / self.workers)
                 tasks = [(weights, c.hidden_size, self.model.neural_phases, c.learn_phases, c.seed,
-                          wave[i:i + size], pool) for i in range(0, count, size)]
+                          wave[i:i + size], pool, *critic) for i in range(0, count, size)]
                 if self.workers == 1:
                     torch.set_num_threads(1)
                     chunks = [phase_chunk(task) for task in tasks]
@@ -192,7 +239,7 @@ class SelfPlayTrainer(Trainer):
             for path in row['paths']:
                 if not path:
                     continue  # A defending learner has no trump action/reward trajectory.
-                buffer.add_trajectory(path, c.gamma, c.gae_lambda)
+                buffer.add_trajectory(path, c.gamma, c.gae_lambda, estimator=c.return_estimator)
                 for record in path:
                     phase = ('bid', 'trump', 'play')[record.observation_features[:3].index(1.0)]
                     self.phase_counts[phase] = self.phase_counts.get(phase, 0) + 1
@@ -210,9 +257,56 @@ class SelfPlayTrainer(Trainer):
         self.collection_seconds = perf_counter() - started
         return buffer, sum(r['reward'] for r in rows) / count
 
+    def auxiliary_loss(self):
+        """Interval loss of the critic's oracle head on certified point bounds."""
+        if self.oracle_data is None:
+            return None
+        data = self.oracle_data
+        count = len(data['lower'])
+        index = torch.randint(count, (min(self.config.minibatch_size, count),), generator=self.oracle_shuffle)
+        features, lower, upper = (data[k][index].to(self.device) for k in ('features', 'lower', 'upper'))
+        prediction = self.critic.oracle_points(features)
+        loss = interval_loss(prediction, lower, upper).mean()
+        error = (torch.relu(lower - prediction) + torch.relu(prediction - upper)).mean() * ORACLE_POINT_SCALE
+        return self.config.oracle_aux_coef * loss, dict(oracle_aux_loss=loss.item(),
+                                                        oracle_aux_point_error=error.item())
+
+    @torch.no_grad()
+    def oracle_validation_metrics(self):
+        """Held-out (deal-disjoint) interval loss; None without a validation split."""
+        if self.oracle_validation is None:
+            return None
+        data = self.oracle_validation
+        self.critic.eval()
+        prediction = self.critic.oracle_points(data['features'].to(self.device))
+        lower, upper = data['lower'].to(self.device), data['upper'].to(self.device)
+        return dict(loss=interval_loss(prediction, lower, upper).mean().item(),
+                    point_error=((torch.relu(lower - prediction) + torch.relu(prediction - upper)).mean()
+                                 * ORACLE_POINT_SCALE).item(), positions=len(lower))
+
+    def return_diagnostics(self, buffer):
+        """Value-target statistics by phase, before advantage normalization."""
+        from statistics import fmean, pvariance
+        records = buffer.records
+        returns, values = buffer.returns, [r.old_state_value for r in records]
+        variance = pvariance(returns) if len(returns) > 1 else 0.0
+        residual = pvariance([g - v for g, v in zip(returns, values)]) if len(returns) > 1 else 0.0
+        result = dict(explained_variance=1 - residual / variance if variance > 0 else None)
+        for index, phase in enumerate(PHASES):
+            rows = [i for i, r in enumerate(records) if r.observation_features[index] == 1.0]
+            if not rows:
+                continue
+            g = [buffer.returns[i] for i in rows]
+            a = [buffer.advantages[i] for i in rows]
+            result[phase] = dict(samples=len(rows), return_mean=fmean(g), return_std=pvariance(g) ** .5,
+                                 advantage_mean=fmean(a), advantage_std=pvariance(a) ** .5,
+                                 value_mean=fmean(values[i] for i in rows))
+        return result
+
     def update(self, buffer):
         if not len(buffer):
             raise ValueError('No trainable decisions collected; skip the PPO update')
+        self.value_diagnostics = self.return_diagnostics(buffer)
         metrics = super().update(buffer)
         # A KL early stop can leave a collected phase without an optimizer step.
         trained = set(getattr(self.model, 'trained_phases', ('play',))) | {

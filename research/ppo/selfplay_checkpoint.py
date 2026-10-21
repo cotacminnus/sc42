@@ -56,6 +56,15 @@ def validate(data):
             raise ValueError('Incompatible learner source provenance')
     for spec in data['snapshots']:
         spec_from_dict(spec)
+    # Older checkpoints predate critic modes; their configuration defaults to local.
+    if config.critic_mode == 'centralized':
+        from .critic import CRITIC_ARCHITECTURE
+        from texas42.privileged import PRIVILEGED_LAYOUT_VERSION
+        if ('critic' not in data or m.get('critic_architecture') != CRITIC_ARCHITECTURE
+                or m.get('privileged_layout_version') != PRIVILEGED_LAYOUT_VERSION):
+            raise ValueError('Incompatible centralized critic state or privileged feature layout')
+    elif data.get('critic') is not None:
+        raise ValueError('A local-critic checkpoint must not contain centralized critic weights')
 
 
 def config_from_dict(data):
@@ -66,6 +75,14 @@ def config_from_dict(data):
     for name in ('learn_phases', 'evaluation_names', 'eval_opponents'):
         values[name] = tuple(values[name])
     return SelfPlayConfig(**values)
+
+
+def optimizer_parameters(trainer):
+    """Adam membership in optimizer order: trainable actor phases, then the critic."""
+    names = [name for name, p in trainer.model.named_parameters() if p.requires_grad]
+    if trainer.critic is not None:
+        names += ['critic.' + name for name, _ in trainer.critic.named_parameters()]
+    return names
 
 
 def save(path, trainer):
@@ -91,7 +108,17 @@ def save(path, trainer):
     data['progress']['last_snapshot'] = trainer.last_snapshot
     data['bc_metrics'] = trainer.bc_metrics
     data['metadata']['learner_phases'] = [asdict(s) for s in trainer.learner_phases]
-    data['metadata']['optimizer_parameters'] = [name for name, p in trainer.model.named_parameters() if p.requires_grad]
+    data['metadata']['optimizer_parameters'] = optimizer_parameters(trainer)
+    data['metadata']['critic_mode'] = trainer.config.critic_mode
+    if trainer.critic is not None:
+        from .critic import CRITIC_ARCHITECTURE
+        from texas42.privileged import PRIVILEGED_LAYOUT_VERSION
+        data['critic'] = trainer.critic.state_dict()
+        data['metadata'].update(critic_architecture=CRITIC_ARCHITECTURE,
+                                privileged_layout_version=PRIVILEGED_LAYOUT_VERSION,
+                                critic_initialization=trainer.critic_initialization)
+    if trainer.oracle_shuffle is not None:
+        data['rng']['oracle'] = trainer.oracle_shuffle.get_state()
     temporary = path.with_name(path.name + '.tmp')
     torch.save(data, temporary)
     temporary.replace(path)
@@ -113,10 +140,15 @@ def resume(path, trainer):
         raise ValueError('Exact resume requires the same optimizer device type')
     if trainer.config.total_hands < data['progress']['hands']:
         raise ValueError('total_hands precedes saved progress')
-    membership = [name for name, p in trainer.model.named_parameters() if p.requires_grad]
+    membership = optimizer_parameters(trainer)
     if data['metadata'].get('optimizer_parameters', membership) != membership:
         raise ValueError('Exact resume optimizer phase membership mismatch')
     trainer.model.load_state_dict(data['model'], strict=True)
+    if trainer.critic is not None:
+        trainer.critic.load_state_dict(data['critic'], strict=True)
+        trainer.critic_initialization = data['metadata'].get('critic_initialization')
+    if trainer.oracle_shuffle is not None:
+        trainer.oracle_shuffle.set_state(data['rng']['oracle'])
     trainer.model.trained_phases = tuple(data['metadata']['trained_phases'])
     trainer.optimizer.load_state_dict(data['optimizer'])
     trainer.snapshots = [spec_from_dict(s) for s in data['snapshots']]

@@ -198,6 +198,10 @@ class Trainer:
         self.collection_seconds = perf_counter() - started
         return buffer, sum(rewards) / count
 
+    def auxiliary_loss(self):
+        """Optional (weighted loss tensor, metrics) added to each optimizer step."""
+        return None
+
     def update(self, buffer):
         self.synchronize()
         started = perf_counter()
@@ -206,6 +210,11 @@ class Trainer:
         adv = data['advantages']
         data['advantages'] = (adv - adv.mean()) / adv.std(unbiased=False).clamp_min(1e-8)
         self.model.train()
+        # Optional centralized critic (multi-phase trainer); None keeps the local
+        # actor-critic path, and its operation order, unchanged.
+        critic = getattr(self, 'critic', None)
+        if critic is not None:
+            critic.train()
         totals, weight = {}, 0
         phase_totals, phase_weights = {}, {}
         stop = False
@@ -213,6 +222,8 @@ class Trainer:
             for batch in buffer.minibatches(data, c.minibatch_size, self.shuffle):
                 batch = {k: v.to(self.device) for k, v in batch.items()}
                 logp, entropy, values = self.model.evaluate(batch['features'], batch['masks'], batch['actions'])
+                if critic is not None:
+                    values = critic(batch['critic_features'])
                 delta = logp - batch['old_log_probs']
                 kl = ((delta.exp() - 1) - delta).mean()
                 if c.target_kl and kl.item() > c.target_kl:
@@ -221,16 +232,27 @@ class Trainer:
                 policy = clipped_objective(logp, batch['old_log_probs'], batch['advantages'], c.clip_epsilon)
                 value = (values - batch['returns']).square().mean()
                 loss = policy + c.value_coef * value - c.entropy_coef * entropy.mean()
+                auxiliary = self.auxiliary_loss() if critic is not None else None
+                if auxiliary is not None:
+                    loss = loss + auxiliary[0]
                 if not torch.isfinite(loss):
                     raise FloatingPointError('Non-finite PPO loss')
                 self.optimizer.zero_grad()
                 loss.backward()
                 norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), c.max_grad_norm, error_if_nonfinite=True)
+                if critic is not None:
+                    # Separate clipping: a large value gradient never rescales the actor's.
+                    critic_norm = torch.nn.utils.clip_grad_norm_(critic.parameters(), c.max_grad_norm,
+                                                                 error_if_nonfinite=True)
                 self.optimizer.step()
                 self.optimizer_steps += 1
                 metrics = dict(policy_loss=policy.item(), value_loss=value.item(), entropy=entropy.mean().item(),
                                approx_kl=kl.item(), clip_fraction=((delta.exp() - 1).abs() > c.clip_epsilon).float().mean().item(),
                                gradient_norm=norm.item())
+                if critic is not None:
+                    metrics['critic_gradient_norm'] = critic_norm.item()
+                if auxiliary is not None:
+                    metrics.update(auxiliary[1])
                 if hasattr(self.model, 'neural_phases'):
                     for index, phase in enumerate(('bid', 'trump', 'play')):
                         selected = batch['features'][:, index] == 1

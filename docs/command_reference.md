@@ -15,10 +15,10 @@ page owns *how to run things*.
 - [Shared conventions](#shared-conventions) — duplicate deals, common flags, policy variants, outputs
 - [Console game](#console-game) — `texas42`, self-play examples
 - [Fixed-policy experiments](#fixed-policy-experiments) — policy ablations, counterfactual bidding
-- [Endgame oracle](#endgame-oracle) — open-hand endgames and complete-deal bidding
+- [Endgame oracle](#endgame-oracle) — open-hand endgames, complete-deal bidding, [training labels](#oracle-training-labels)
 - [PPO training overview](#ppo-training-overview) — choosing a trainer, [workflow finder](#workflow-finder)
 - [Legacy trainer: train_ppo](#legacy-trainer-train_ppo) — Recipe 1, resume, mixed opponents
-- [Multi-phase trainer: train_selfplay_ppo](#multi-phase-trainer-train_selfplay_ppo) — Recipes 2–11, arguments, artifacts, troubleshooting
+- [Multi-phase trainer: train_selfplay_ppo](#multi-phase-trainer-train_selfplay_ppo) — Recipes 2–11 and 13, arguments, artifacts, troubleshooting
 - [Evaluation](#evaluation) — agent-vs-agent composition (Recipe 12), compatibility commands
 - [Performance benchmarks](#performance-benchmarks)
 - [Reproducibility checklist](#reproducibility-checklist)
@@ -41,6 +41,7 @@ python -m unittest discover -s tests -v  # verify the checkout
 | Original heuristic-vs-random baseline | `python -m examples.heuristic_benchmark` | — | [Fixed-policy experiments](#fixed-policy-experiments) |
 | Bid-versus-pass intervention | `python -m examples.counterfactual_bidding` | — | [Counterfactual bidding](#counterfactual-bidding) |
 | Open-hand endgames and complete-deal bids | `python -m examples.endgame_oracle` | — | [Endgame oracle](#endgame-oracle) |
+| Sample and label play positions for critic supervision | `python -m examples.oracle_labels` | — | [Oracle training labels](#oracle-training-labels) |
 | Train legacy play-only PPO | `python -m examples.train_ppo` | `rl` | [Legacy trainer](#legacy-trainer-train_ppo) |
 | Train independent-phase PPO / historical self-play | `python -m examples.train_selfplay_ppo` | `rl` | [Multi-phase trainer](#multi-phase-trainer-train_selfplay_ppo) |
 | Phase-composed agent-vs-agent evaluation (canonical) | `python -m examples.evaluate_agent_vs_agent` | `rl` only for neural phases | [Agent-vs-agent](#agent-vs-agent-composition) |
@@ -376,6 +377,45 @@ small endgames are usually faster with one worker.
 | `--max-cache-entries` | `100000` | Nonnegative aggregate table capacity; parallel workers each get floor(capacity/workers). Zero disables caching. |
 | `--samples` | `1` | Positive endgame position count; >1 selects benchmark summary. Deal mode requires 1. |
 
+### Oracle training labels
+
+`examples.oracle_labels` samples play positions from seeded rollouts and labels
+them with the [position oracle](endgame_oracle.md#arbitrary-play-positions). The
+output JSON is the `--oracle-dataset` for [Recipe 13](#recipe-13-local-versus-centralized-critic-and-oracle-auxiliary)
+and also its label cache: rerunning with the same `--output`, budget and split
+labels only new positions, and a different budget or split is rejected.
+
+```bash
+# Late-hand positions (4-6 completed tricks) give exact labels cheaply
+python -m examples.oracle_labels --output runs/oracle-labels/late-v1.json \
+  --deals 2048 --seed 42 --policy HHH --min-tricks 4 --max-tricks 6 --per-deal 2 \
+  --max-nodes 200000 --time-seconds 10 --split 0.8,0.1,0.1 --split-seed 0
+# Tiny smoke dataset
+python -m examples.oracle_labels --output runs/oracle-labels/smoke.json \
+  --deals 40 --per-deal 2 --min-tricks 3 --max-nodes 50000 --time-seconds 2
+```
+
+| Argument | Default | Meaning |
+| --- | --- | --- |
+| `--output` | Required | Dataset JSON path; also the label cache. |
+| `--deals` | `64` | Seeded hands played to collect candidate positions. |
+| `--seed` | `42` | Deal, agent and position-choice seed. |
+| `--policy` | `HHH` | [Variant](#built-in-policy-variants) playing all four seats. |
+| `--min-tricks`, `--max-tricks` | `4`, `6` | Game-stage window in completed tricks (0–6). |
+| `--per-deal` | `1` | Maximum positions kept per deal. |
+| `--max-positions` | Unset | Stop after this many positions. |
+| `--max-nodes`, `--time-seconds` | `200000`, `10` | **Per action search** budget; an exhausted search stores valid bounds, not an exact label. |
+| `--max-cache-entries` | `100000` | Transposition-table capacity, shared across one position's actions. |
+| `--move-ordering` | `none` | `none`, `heuristic`, `tt` or `combined`. |
+| `--split`, `--split-seed` | `0.8,0.1,0.1`, `0` | Train/validation/test fractions, assigned per **deal**: positions of one deal never cross splits. |
+
+Each record stores the initial deal, shaker, action prefix and acting seat (enough
+to replay the position), certified final-point bounds for the acting seat's team,
+exactness, the bidders' contract proof status, nodes and seconds. The header stores
+the schema, objective, ruleset, action-space, encoder and privileged-layout
+versions, the search budget and the split; incompatible files are rejected. The
+printed sampling and labeling times are the labeling cost, separate from training.
+
 ## PPO training overview
 
 Install the `rl` extra first. Two trainers exist deliberately:
@@ -404,6 +444,7 @@ option. The recipes are research configurations, not proven optimal settings.
 | [10: composed opponents](#recipe-10-composed-training-opponents) | Independent frozen opponent phases | JSON definition and compatible phase checkpoints |
 | [11: archived opponent](#recipe-11-training-against-an-archived-checkpoint) | Train against one fixed historical policy | Existing immutable trained snapshot/checkpoint |
 | [12: controlled evaluation](#recipe-12-held-out-phase-ablations) | Compare one phase while holding continuations constant | Trained checkpoint(s), independent final deal seed |
+| [13: critic comparison](#recipe-13-local-versus-centralized-critic-and-oracle-auxiliary) | Local critic (A), centralized critic (B), centralized plus oracle auxiliary (C) | Original play checkpoint; an oracle dataset for C |
 
 Before running a recipe, confirm the named input files exist and satisfy its
 trained-phase prerequisites. Output directories must be new unless resuming. An
@@ -825,6 +866,60 @@ python -m examples.train_selfplay_ppo \
   --output-dir runs/ppo-versus-archive --log-dir logs/experiments/ppo-versus-archive
 ```
 
+### Recipe 13: local versus centralized critic and oracle auxiliary
+
+Three matched runs: **A** keeps the existing per-phase local value heads, **B**
+trains a separate centralized critic on privileged features, and **C** adds the
+oracle auxiliary head. Actor architecture and initialization, the seed, opponent
+pool, hand budget and validation schedule are identical; only the critic flags
+differ, so the first rollout is identical in all three. Requires the original
+play checkpoint and, for C, a dataset from [oracle training labels](#oracle-training-labels).
+See [critic modes](multiphase_selfplay.md#critic-modes-returns-and-oracle-auxiliary-supervision)
+for the method.
+
+```bash
+COMMON=(--init-play-checkpoint runs/ppo-play-v1/checkpoints/best.pt
+  --learner-bid neural-train --learner-bid-source new --learner-trump heuristic
+  --learner-play neural-train --opponent-pool HHH:0.5,anchor:0.5
+  --eval-opponents HHH,CHH,anchor --selection-opponent anchor
+  --total-hands 262144 --rollout-decisions 4096 --ppo-epochs 4 --minibatch-size 512
+  --learning-rate 0.0001 --seed 42 --threads 8 --eval-threads 1 --device auto)
+python -m examples.train_selfplay_ppo "${COMMON[@]}" --critic-mode local \
+  --output-dir runs/critic-A-local --log-dir logs/experiments/critic-A-local
+python -m examples.train_selfplay_ppo "${COMMON[@]}" --critic-mode centralized \
+  --output-dir runs/critic-B-central --log-dir logs/experiments/critic-B-central
+python -m examples.train_selfplay_ppo "${COMMON[@]}" --critic-mode centralized \
+  --oracle-aux-coef 0.5 --oracle-dataset runs/oracle-labels/late-v1.json \
+  --output-dir runs/critic-C-oracle --log-dir logs/experiments/critic-C-oracle
+```
+
+Evaluate every run against the same fixed opponents on one held-out seed, then
+round-robin the runs head to head (neural bid/play, heuristic trump on both sides):
+
+```bash
+for RUN in critic-A-local critic-B-central critic-C-oracle; do
+  python -m examples.evaluate_selfplay_ppo --checkpoint runs/$RUN/checkpoints/best.pt \
+    --opponents HHH,CHH,HHR,anchor --deals 4096 --seed 27182818 --threads 4 \
+    --output runs/$RUN/heldout.json
+done
+for PAIR in "critic-A-local critic-B-central" "critic-A-local critic-C-oracle" \
+            "critic-B-central critic-C-oracle"; do
+  set -- $PAIR
+  python -m examples.evaluate_agent_vs_agent \
+    --agent-a-checkpoint runs/$1/checkpoints/best.pt --agent-a-bid neural --agent-a-play neural \
+    --agent-b-checkpoint runs/$2/checkpoints/best.pt --agent-b-bid neural --agent-b-play neural \
+    --deals 4096 --seed 27182818 --bootstrap-samples 2000 --threads 4 \
+    --output runs/$1-vs-$2.json
+done
+```
+
+Repeat with `latest.pt` and with further training seeds before drawing conclusions;
+`best.pt` is selected against the anchor on the small validation schedule, so the
+fixed-opponent and head-to-head reports above are the comparison, not the selection
+score. Add `--return-estimator monte-carlo` to any run for the complete-hand return
+baseline. A tiny smoke version: `--total-hands 48 --rollout-decisions 256
+--minibatch-size 64 --eval-deals 8` with the smoke label dataset.
+
 Recipe 12 (held-out evaluation) is in [Evaluation](#recipe-12-held-out-phase-ablations).
 
 ### train_selfplay_ppo arguments
@@ -840,6 +935,7 @@ configuration. Values are checked against argparse, `Config` and `SelfPlayConfig
 | [D. Opponents and snapshots](#d-training-opponents-and-historical-snapshots) | `--opponent-pool`, `--opponent-checkpoint`, `--opponent-composition`, `--snapshot-every-hands`, `--snapshot-pool-size` |
 | [E. Validation and selection](#e-validation-and-checkpoint-selection) | `--eval-opponents`, `--selection-opponent`, `--eval-every-hands`, `--eval-deals`, `--bootstrap-samples`, `--checkpoint-every-hands` |
 | [F. Execution and diagnostics](#f-execution-and-diagnostics) | `--seed`, `--device`, `--threads`, `--eval-threads`, `--torch-threads`, `--output-dir`, `--log-dir`, `--forgetting-hands`, `--bid-bc-hands` |
+| [G. Critic, returns and oracle auxiliary](#g-critic-returns-and-oracle-auxiliary) | `--critic-mode`, `--return-estimator`, `--oracle-aux-coef`, `--oracle-dataset` |
 
 #### A. Budget and PPO optimization
 
@@ -1023,6 +1119,20 @@ determinism checks. Exact cross-GPU, CUDA-build or PyTorch-version reproducibili
 not guaranteed. Increasing workers, epochs or CPU numerical threads is not a
 guarantee of higher hands/second.
 
+#### G. Critic, returns and oracle auxiliary
+
+| Argument | Accepted values | Default | Meaning and interactions |
+| --- | --- | --- | --- |
+| `--critic-mode` | `local`, `centralized` | `local` | `local` reproduces the existing per-phase value heads exactly. `centralized` trains a separate critic on privileged features (all remaining hands); actors still see only their own observation. Fixed for exact resume. |
+| `--return-estimator` | `gae`, `monte-carlo` | `gae` | `monte-carlo` uses complete-hand returns (GAE with λ = 1) as a diagnostic baseline. Uses `--gamma` (default 1). |
+| `--oracle-aux-coef` | Finite float ≥ 0 | `0` (disabled) | Weight of the critic's oracle-point interval loss. A positive value requires `--critic-mode centralized` and `--oracle-dataset`. |
+| `--oracle-dataset` | Path from `examples.oracle_labels` | Unset | Its SHA256 is stored in the configuration and verified on resume; only the `train` split is optimized and the `validation` split is reported. |
+
+When a centralized critic starts from a checkpoint without compatible critic
+weights (every play-only or local-critic file), it is initialized fresh from its own
+seed stream and the startup output says so; `--init-checkpoint` from a centralized
+checkpoint copies its critic.
+
 ### Training artifacts and metrics
 
 | Artifact | Contents / use |
@@ -1052,6 +1162,14 @@ guarantee of higher hands/second.
 - `playing_anchor_kl` can be nonzero for frozen joint play because its reference is
   the **original anchor**, not the stage's selected play source. No KL regularizer is
   implemented.
+- Critic fields: `critic_mode`, `return_estimator`, `critic_initialization`;
+  `metrics.value_loss` (main critic) and `critic_gradient_norm` (centralized only);
+  `value_diagnostics` holds `explained_variance` and per-phase return, advantage
+  (before normalization) and value statistics. With oracle supervision,
+  `metrics.oracle_aux_loss` is the normalized interval loss and
+  `metrics.oracle_aux_point_error` its distance in points; `oracle_validation`
+  repeats both on the deal-disjoint validation split, and `oracle_dataset` reports
+  the dataset size, exact-label fraction, mean bound width and labeling cost.
 - Performance fields separate collection, optimization, validation, checkpoint and
   update time. Throughputs distinguish hands from learned decisions. Worker inference
   and loading durations are sums across workers, not additive wall-time stages; RSS

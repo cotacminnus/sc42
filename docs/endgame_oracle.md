@@ -2,7 +2,8 @@
 
 `texas42.oracle` solves ordinary-contract endgames and analyzes complete deals for
 maximum makeable open-hand contracts. It is a separate analysis/search component,
-with no PPO, belief sampling, policy adapter, or changes to observations and training. Engine rules,
+with no PPO, belief sampling, policy adapter, or changes to observations; training
+uses it only through offline labels for an optional critic auxiliary head. Engine rules,
 legal action IDs, trick resolution and final scoring remain authoritative.
 
 ## Inputs and supported rules
@@ -187,6 +188,38 @@ solving strictly inferior alternatives. An alternative whose upper bound touches
 The terminal-only reference also accepts `objective="final_points"` and
 `reference_team=0` or `1`. Its default remains contract success. It has no budget
 and should only be used on tiny endgames.
+
+## Arbitrary play positions
+
+`evaluate_position(position, *, objective, reference_team, threshold, actions,
+limits, total_time_seconds, move_ordering, cache)` reuses the same alpha-beta search
+for any valid play position, without a replayable trick history. A `PlayPosition`
+gives the remaining hands (domino IDs by absolute seat), the partial trick, its
+leader, optional next player (verified), trump, bidder, optional bid and captured
+points. Validation checks disjoint hands, turn order, hand sizes against one shared
+trick count, captured points equal to completed tricks plus the counters of every
+domino already gone, and that partial-trick followers either followed suit or are
+still void in it. `position_from_state(state)` snapshots a live `HandState`. Only
+ordinary contracts are accepted.
+
+| Objective | Reference team | Result per action |
+| --- | --- | --- |
+| `final_points` | Default: the acting seat's team; 0 or 1 allowed | Certified `[lower, upper]` final team points |
+| `contract` | Always the bidders (another team is rejected) | Bounds plus `proven_makeable` (lower ≥ threshold), `proven_unmakeable` (upper < threshold) or `unresolved` |
+
+The contract threshold defaults to the bid's target points (30–41, or 42 for mark
+bids) and is searched with a null window, so its bounds are proofs about the
+threshold rather than exact values. Bounds always describe **final totals including
+captured points**. `limits.max_nodes` and `limits.time_seconds` apply to **each
+action's search separately**; `total_time_seconds` is one optional global deadline
+for the call. Every row reports nodes and a termination reason (`exact`, `decided`,
+`threshold_proven`, `node_limit`, `time_limit`, or `not_started` after the global
+deadline). Exhausted searches keep valid bounds and are never relabelled exact;
+`proven_optimal_actions` is given only when every legal action was evaluated and
+the bounds prove the choice. A `cache` dictionary can be shared across calls because
+keys include the ruleset, objective and reference team. This API feeds the
+[offline critic labels](command_reference.md#oracle-training-labels); training never
+calls it synchronously.
 
 ## Complete-deal bidding benchmark
 
