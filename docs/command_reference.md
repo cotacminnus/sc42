@@ -18,7 +18,7 @@ page owns *how to run things*.
 - [Endgame oracle](#endgame-oracle) — open-hand endgames, complete-deal bidding, [training labels](#oracle-training-labels)
 - [PPO training overview](#ppo-training-overview) — choosing a trainer, [workflow finder](#workflow-finder)
 - [Legacy trainer: train_ppo](#legacy-trainer-train_ppo) — Recipe 1, resume, mixed opponents
-- [Multi-phase trainer: train_selfplay_ppo](#multi-phase-trainer-train_selfplay_ppo) — Recipes 2–11 and 13, arguments, artifacts, troubleshooting
+- [Multi-phase trainer: train_selfplay_ppo](#multi-phase-trainer-train_selfplay_ppo) — Recipes 2–11, 13 and 14 (from scratch), arguments, artifacts, troubleshooting
 - [Evaluation](#evaluation) — agent-vs-agent composition (Recipe 12), compatibility commands
 - [Performance benchmarks](#performance-benchmarks)
 - [Reproducibility checklist](#reproducibility-checklist)
@@ -445,6 +445,7 @@ option. The recipes are research configurations, not proven optimal settings.
 | [11: archived opponent](#recipe-11-training-against-an-archived-checkpoint) | Train against one fixed historical policy | Existing immutable trained snapshot/checkpoint |
 | [12: controlled evaluation](#recipe-12-held-out-phase-ablations) | Compare one phase while holding continuations constant | Trained checkpoint(s), independent final deal seed |
 | [13: critic comparison](#recipe-13-local-versus-centralized-critic-and-oracle-auxiliary) | Local critic (A), centralized critic (B), centralized plus oracle auxiliary (C) | Original play checkpoint; an oracle dataset for C |
+| [14: from scratch](#recipe-14-from-scratch-training-and-self-play) | Random initialization of any phase subset; HHH, current-policy self-play or historical self-play | **None**: no checkpoint or anchor |
 
 Before running a recipe, confirm the named input files exist and satisfy its
 trained-phase prerequisites. Output directories must be new unless resuming. An
@@ -920,6 +921,83 @@ score. Add `--return-estimator monte-carlo` to any run for the complete-hand ret
 baseline. A tiny smoke version: `--total-hands 48 --rollout-decisions 256
 --minibatch-size 64 --eval-deals 8` with the smoke label dataset.
 
+### Recipe 14: from-scratch training and self-play
+
+Requires **no checkpoint at all**. `--from-scratch` randomly initializes every
+`neural-train` phase (trunk, policy and value heads) from `--seed`, starts Adam,
+counters and RNG streams fresh, and records `initialization: random`, no
+initialization checkpoint and no original anchor. Without phase flags all three
+phases train; with explicit `--learner-*` or `--learn-phases` flags, unmentioned
+phases are heuristic. `neural-frozen` phases and `--learner-*-source` flags are
+rejected (there is nothing trained to freeze or copy). Defaults become
+`--opponent-pool HHH:1 --eval-opponents HHH,CHH --selection-opponent HHH`; `anchor`
+is unavailable unless an `--anchor-checkpoint` is supplied explicitly. Random
+weights are not a playing strength: early self-play policies can be very weak.
+
+```bash
+# A. All three phases from random weights against HHH
+python -m examples.train_selfplay_ppo --from-scratch \
+  --learner-bid neural-train --learner-trump neural-train --learner-play neural-train \
+  --opponent-pool HHH:1 --eval-opponents HHH,CHH --selection-opponent HHH \
+  --total-hands 262144 --rollout-decisions 4096 --threads 8 --seed 42 \
+  --output-dir runs/ppo-scratch-hhh
+
+# B. Immediate current-policy self-play from the first hand
+python -m examples.train_selfplay_ppo --from-scratch \
+  --learner-bid neural-train --learner-trump neural-train --learner-play neural-train \
+  --opponent-pool self-current:1 --eval-opponents HHH,CHH --selection-opponent HHH \
+  --total-hands 262144 --rollout-decisions 4096 --threads 8 --seed 42 \
+  --output-dir runs/ppo-scratch-selfplay
+
+# C. Mixed heuristic and self-play opponents, centralized critic
+python -m examples.train_selfplay_ppo --from-scratch \
+  --learner-bid neural-train --learner-trump neural-train --learner-play neural-train \
+  --critic-mode centralized --return-estimator gae \
+  --opponent-pool HHH:0.3,CHH:0.2,self-current:0.5 \
+  --eval-opponents HHH,CHH --selection-opponent HHH \
+  --total-hands 262144 --rollout-decisions 4096 --threads 8 --seed 42 \
+  --output-dir runs/ppo-scratch-centralized
+
+# D. Historical snapshot self-play without any pretrained checkpoint
+python -m examples.train_selfplay_ppo --from-scratch \
+  --learner-bid neural-train --learner-trump neural-train --learner-play neural-train \
+  --opponent-pool self-snapshots:0.7,HHH:0.3 \
+  --snapshot-every-hands 32768 --snapshot-pool-size 8 \
+  --eval-opponents HHH,CHH --selection-opponent HHH \
+  --total-hands 524288 --rollout-decisions 4096 --threads 8 --seed 42 \
+  --output-dir runs/ppo-scratch-historical
+
+# E. Only trick play from random weights; heuristic bidding and trump
+python -m examples.train_selfplay_ppo --from-scratch \
+  --learner-bid heuristic --learner-trump heuristic --learner-play neural-train \
+  --opponent-pool HHH:1 --eval-opponents HHH --selection-opponent HHH \
+  --total-hands 262144 --rollout-decisions 4096 --threads 8 --seed 42 \
+  --output-dir runs/ppo-scratch-play
+```
+
+Resume, evaluate, or start a new stage from the result without any anchor:
+
+```bash
+python -m examples.train_selfplay_ppo --resume runs/ppo-scratch-selfplay/checkpoints/latest.pt \
+  --total-hands 524288 --output-dir runs/ppo-scratch-selfplay
+python -m examples.evaluate_selfplay_ppo --checkpoint runs/ppo-scratch-selfplay/checkpoints/best.pt \
+  --deals 4096 --threads 4          # default opponents HHH,CHH,HHR when there is no anchor
+python -m examples.evaluate_agent_vs_agent \
+  --agent-a-checkpoint runs/ppo-scratch-selfplay/checkpoints/best.pt \
+  --agent-a-bid neural --agent-a-trump neural --agent-a-play neural \
+  --agent-b-bid heuristic --agent-b-trump heuristic --agent-b-play heuristic \
+  --deals 4096 --threads 4
+python -m examples.train_selfplay_ppo --init-checkpoint runs/ppo-scratch-hhh/checkpoints/best.pt \
+  --learner-bid neural-train --learner-trump neural-train --learner-play neural-train \
+  --opponent-pool HHH:0.3,self-snapshots:0.7 --total-hands 262144 --rollout-decisions 4096 \
+  --threads 8 --output-dir runs/ppo-scratch-stage2
+```
+
+`--resume` restores weights, critic, Adam, RNGs, counters, the snapshot roster,
+opponent distribution, selection settings and the random-initialization
+provenance. `--init-checkpoint` starts a **new stage** (fresh Adam, counters and
+roster); a scratch lineage stays anchor-free, so its defaults are the HHH ones above.
+
 Recipe 12 (held-out evaluation) is in [Evaluation](#recipe-12-held-out-phase-ablations).
 
 ### train_selfplay_ppo arguments
@@ -1022,11 +1100,14 @@ with that syntax, or initialize a new stage to adopt source flags.
 | `--init-checkpoint` | Path to compatible version-1 or version-2 checkpoint | Unset | New stage from model parameters. Does not import optimizer, old best score, progress or historical roster. |
 | `--anchor-checkpoint` | Path to original version-1 play checkpoint | Inferred | Version-1 initialization uses that same file as anchor. Version-2 initialization/resume retains the original anchor identity from metadata; an override must match its SHA256. |
 | `--resume` | Path to compatible version-2 checkpoint | Unset | Exact saved-stage continuation. Mutually exclusive with the two initialization flags. Restores omitted settings, model, optimizer, counters, RNGs and active roster. |
+| `--from-scratch` | Flag | Off | Random initialization of every `neural-train` phase; loads no checkpoint and needs no anchor ([Recipe 14](#recipe-14-from-scratch-training-and-self-play)). An `--anchor-checkpoint` is optional and only registers `anchor` as an opponent. |
 
-If no entry-point source is supplied, the CLI loads
-`runs/ppo-play-v1/checkpoints/best.pt`; it does **not** create a pretrained model. A
-compatible original play-only anchor is required even if learner play is heuristic.
-The three entry-point flags are mutually exclusive. A renamed/moved anchor can be
+If no entry-point flag is supplied, the CLI loads
+`runs/ppo-play-v1/checkpoints/best.pt`; it does **not** create a pretrained model.
+Checkpoint-initialized experiments from a play-only file use it as the original
+anchor, even if learner play is heuristic; version-2 stages keep the anchor
+recorded in their lineage, and an anchor-free (scratch) lineage stays anchor-free.
+The four entry-point flags are mutually exclusive. A renamed/moved anchor can be
 supplied by `--anchor-checkpoint` with the same bytes, but other recorded immutable
 dependencies still need to be accessible at their saved paths.
 
@@ -1036,6 +1117,7 @@ dependencies still need to be accessible at their saved paths.
 | --- | --- |
 | `init` | The initialization checkpoint. Copy the full requested trained phase (trunk, policy and value heads). Only for `neural-train`, a missing trained phase instead gets representation transfer and fresh heads, explicitly recorded. On resume, explicit `init` refers to the original stage initialization identity, not the evolving resume file. |
 | `anchor` | The immutable original play-only checkpoint. Valid for neural play only; bid/trump requests fail even when trainable. |
+| (none, `--from-scratch`) | Recorded as initialization `random`: no source, the network's normal random initialization. Not accepted as a `--learner-*-source` value. |
 | `new` | Trainable phases only. From the initialization file, copy the trained play trunk, or the first trained phase trunk in bid/trump/play order if play is unavailable. Initialize fresh policy/value heads even if the requested phase was already trained. Requires a trained representation. |
 | Registered name | Register with `--opponent-checkpoint NAME=PATH`. Must identify a single checkpoint containing the requested trained neural phase; variants and composed policies are not phase sources. |
 | Direct or archived path | Same trained-phase requirement as a registered name. An archived snapshot is a fixed file, not a live subscription to later snapshots. |
@@ -1054,8 +1136,8 @@ to learner-width compatibility. See
 
 | Argument | Type / accepted values | Default | Meaning and interactions |
 | --- | --- | --- | --- |
-| `--opponent-pool` | Nonempty `NAME:WEIGHT,...`; unique registered names, finite positive weights | `HHH:0.5,anchor:0.5` | One opponent controls both opposing seats for a complete hand. Ratios normalize to sorted exact rational probabilities; `HHH:7,anchor:3` equals `HHH:0.7,anchor:0.3`. Realized counts fluctuate. |
-| `--opponent-checkpoint` | Repeatable `NAME=PATH` | No archives | Register an immutable compatible checkpoint for learner sources, training or validation. Names cannot duplicate built-ins/anchor or reserved `init`, `new`, `self-snapshots`. Active whole-checkpoint opponents need all routed neural phases trained. |
+| `--opponent-pool` | Nonempty `NAME:WEIGHT,...`; unique registered names, `self-current`, `self-snapshots`; finite positive weights | `HHH:0.5,anchor:0.5` with an anchor, else `HHH:1` | One opponent controls both opposing seats for a complete hand. Ratios normalize to sorted exact rational probabilities; `HHH:7,anchor:3` equals `HHH:0.7,anchor:0.3`. Realized counts fluctuate. |
+| `--opponent-checkpoint` | Repeatable `NAME=PATH` | No archives | Register an immutable compatible checkpoint for learner sources, training or validation. Names cannot duplicate built-ins/anchor or reserved `init`, `new`, `self-snapshots`, `self-current`. Active whole-checkpoint opponents need all routed neural phases trained. |
 | `--opponent-composition` | Repeatable `NAME=JSON_PATH` | No compositions | Register a frozen phase-composable opponent. Source checkpoint registrations are resolved before JSON definitions; earlier composed names cannot serve as single phase sources. See [Recipe 10](#recipe-10-composed-training-opponents). |
 | `--snapshot-every-hands` | Integer > 0 | `32768` | Publication threshold since last snapshot, checked at rollout/update boundaries. Publishes only following a nonempty batch when every routed neural phase is trained. Threshold may overshoot; not every exact multiple produces a filename. |
 | `--snapshot-pool-size` | Integer > 0 | `8` | Maximum active historical policies. Evicts oldest membership, not files. The separate anchor is never evicted. No CLI switch disables publication; snapshots can be produced even if the current pool does not sample them. |
@@ -1067,20 +1149,30 @@ phases and use heuristic fallbacks. Composed opponents specify phases independen
 including different neural files. All opponents remain frozen and use greedy neural
 inference.
 
+**`self-current`** seats a frozen copy of the learner's own actor weights, taken at
+the start of each rollout (the same snapshot the learner collects with) and
+refreshed for the next rollout after the PPO update. It samples stochastically from
+the legal softmax on trainable phases, is greedy on frozen neural phases, keeps
+heuristic phases heuristic, and uses its own per-seat action streams. Its decisions
+never enter the PPO buffer. The progress log records the snapshot's SHA256.
+
 **`self-snapshots`** first uses the **original anchor** if the active roster is
-empty; it does not automatically use the stage's initial joint model. Once published
-policies exist it selects uniformly from the active roster using a separate seed
-stream. A new stage starts with an empty roster; resume restores the exact saved
-roster. Keep files immutable and preserve evicted archives needed by older
-checkpoints. This is a learning partnership against frozen opponents, not four
-simultaneously updated PPO players. No live learner opponent is implemented.
+empty in an anchor-based experiment; it does not automatically use the stage's
+initial joint model. In a from-scratch or anchor-free lineage it instead uses the
+frozen current policy (as `self-current`) until a snapshot is published. Once
+published policies exist it selects uniformly from the active roster using a
+separate seed stream. Snapshots are published only when every routed neural phase
+has been trained. A new stage starts with an empty roster; resume restores the
+exact saved roster. Keep files immutable and preserve evicted archives needed by
+older checkpoints. Both self-play modes optimize **one** learning partnership
+against frozen opponents; they are not four simultaneously updated PPO players.
 
 #### E. Validation and checkpoint selection
 
 | Argument | Type / accepted values | Default | Meaning and interactions |
 | --- | --- | --- | --- |
-| `--eval-opponents` | Nonempty, unique comma-separated exact registry names; no separator whitespace | `HHH,CHH,anchor` | Separate reports using the same fixed paired schedules. May include registered archives/compositions, but not the dynamic `self-snapshots` pool entry; register a concrete snapshot to evaluate it. |
-| `--selection-opponent` | One name present in `--eval-opponents` | `anchor` | `best.pt` maximizes this opponent's mean signed marks/hand, strictly greater than the previous best; ties retain the earlier best. Does not automatically change when training opponents or validation names change. |
+| `--eval-opponents` | Nonempty, unique comma-separated exact registry names; no separator whitespace | `HHH,CHH,anchor` with an anchor, else `HHH,CHH` | Separate reports using the same fixed paired schedules. May include registered archives/compositions, but not the dynamic `self-current`/`self-snapshots` entries (rejected); register a concrete snapshot to evaluate it. `anchor` without an anchor is an error. |
+| `--selection-opponent` | One name present in `--eval-opponents` | `anchor` with an anchor, else `HHH` | `best.pt` maximizes this opponent's mean signed marks/hand, strictly greater than the previous best; ties retain the earlier best. Does not automatically change when training opponents or validation names change. |
 | `--eval-every-hands` | Integer > 0 | `5000` | Validation threshold since last evaluation, checked after collection/update. May overshoot by a rollout; also evaluates at total-hand completion, including an empty final batch. |
 | `--eval-deals` | Integer > 0 | `128` | Duplicate-deal **groups per opponent** per validation. Two swapped games/group in hand mode, so 128 means 256 games against each opponent. Increasing this changes the selection experiment/cost. |
 | `--bootstrap-samples` | Integer > 0 | `200` | Complete-group percentile-bootstrap replicates in validation, not PPO minibatches. CLI cannot disable validation bootstrap with zero. Evaluation CLIs have their own defaults. |
@@ -1388,7 +1480,7 @@ expose independent phase strategies or stochastic inference.
 | `evaluate_ppo` | `--opponents` | Unique comma-separated built-in variants | Separate reports; no archive or composition registration. |
 | `evaluate_selfplay_ppo` | `--checkpoint` | Required version-2 path | Rejects version 1; use `evaluate_ppo` or composable evaluation for play-only files. |
 | `evaluate_selfplay_ppo` | `--anchor-checkpoint` | Original anchor path; inferred from checkpoint config | Override must match original anchor SHA256. |
-| `evaluate_selfplay_ppo` | `--opponents` | Unique registered names; default `HHH,CHH,HHR,anchor` | Built-ins, anchor and explicitly registered archives. |
+| `evaluate_selfplay_ppo` | `--opponents` | Unique registered names; default `HHH,CHH,HHR,anchor`, or `HHH,CHH,HHR` for an anchor-free checkpoint | Built-ins, anchor and explicitly registered archives. Requesting `anchor` from an anchor-free checkpoint fails. |
 | `evaluate_selfplay_ppo` | `--opponent-checkpoint` | Repeatable `NAME=PATH` | Registers whole frozen checkpoint opponents. No opponent-composition option here. |
 
 These compatibility learner routes do not add the canonical per-selected-phase

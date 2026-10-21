@@ -14,6 +14,9 @@ Use [multi-phase PPO](multiphase_selfplay.md) for new independent bid/trump/play
 experiments, phase freezing and historical neural opponents. Modern play-only
 training is also possible, but has a different checkpoint architecture and sampling
 scheme; matching its phase routes does not reproduce a version-1 experiment.
+A random-weight play-only run needs no checkpoint either: use the multi-phase
+trainer's [`--from-scratch`](command_reference.md#recipe-14-from-scratch-training-and-self-play)
+(example E), which is likewise not a version-1 reproduction.
 Copy-ready commands and all flag defaults are in the [command reference](command_reference.md#recipe-1-original-play-only-ppo).
 
 Python 3.11+ is supported, subject to available PyTorch wheels for your Python

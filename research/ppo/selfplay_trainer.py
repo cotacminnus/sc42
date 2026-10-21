@@ -6,7 +6,7 @@ import torch
 from texas42.parallel import OrderedPool, resolve_workers
 from .trainer import Config, Trainer
 from .multiphase import PhaseActorCritic, LearnerPhaseSpec, phases, PHASES
-from .opponents import HistoricalPool, PolicySpec
+from .opponents import DYNAMIC_OPPONENTS, NO_ANCHOR, HistoricalPool, PolicySpec
 from .buffer import RolloutBuffer
 from .rollout import initialize_worker, snapshot
 from .selfplay_rollout import phase_chunk
@@ -35,6 +35,13 @@ class SelfPlayConfig(Config):
     oracle_aux_coef: float = 0.0
     oracle_dataset: str | None = None
     oracle_dataset_sha256: str | None = None
+    # Random initialization of every neural learner phase; no checkpoint or anchor needed.
+    from_scratch: bool = False
+
+    @property
+    def snapshot_fallback(self):
+        """Legacy anchor fallback for self-snapshots; the current policy when anchor-free or from scratch."""
+        return 'current' if self.from_scratch or self.anchor is None else 'anchor'
 
     def __post_init__(self):
         super().__post_init__()
@@ -49,11 +56,28 @@ class SelfPlayConfig(Config):
                 raise ValueError('Training requires at least one neural-train phase')
             if tuple(p for p, s in zip(PHASES, specs) if s.state == 'neural-train') != enabled:
                 raise ValueError('learn_phases must match neural-train learner phases')
-        if self.anchor is None or self.anchor.kind != 'checkpoint':
-            raise ValueError('An immutable original play checkpoint anchor is required')
-        pool = HistoricalPool(self.opponent_probabilities, self.opponent_policies, self.anchor)
+        if type(self.from_scratch) is not bool:
+            raise ValueError('from_scratch must be a boolean')
+        if self.from_scratch and (not specs or any(s.initialization not in ('none', 'random') for s in specs)):
+            raise ValueError('From-scratch training requires random or heuristic learner phases only')
+        if not self.from_scratch and any(s.initialization == 'random' for s in specs):
+            raise ValueError('Random phase initialization is only valid for from-scratch training')
+        # The anchor is optional (from-scratch and anchor-free lineages) but, when
+        # present, it is always an immutable checkpoint identity.
+        if self.anchor is not None and self.anchor.kind != 'checkpoint':
+            raise ValueError('The original play anchor must be an immutable checkpoint')
+        if any(p.name == 'anchor' for p in self.opponent_policies) != (self.anchor is not None):
+            raise ValueError('The policy registry must contain the anchor exactly when one is configured')
+        pool = HistoricalPool(self.opponent_probabilities, self.opponent_policies, self.anchor,
+                              snapshot_fallback=self.snapshot_fallback)
         object.__setattr__(self, 'opponent_probabilities', pool.probabilities)
         names = {p.name for p in self.opponent_policies}
+        for name in (*self.evaluation_names, self.primary_opponent):
+            if name in DYNAMIC_OPPONENTS:
+                raise ValueError(f'{name} changes during training; it cannot be a fixed validation '
+                                 'or checkpoint-selection opponent')
+            if name == 'anchor' and self.anchor is None:
+                raise ValueError(NO_ANCHOR)
         if (not self.evaluation_names or len(set(self.evaluation_names)) != len(self.evaluation_names)
                 or not set(self.evaluation_names) <= names or self.primary_opponent not in self.evaluation_names):
             raise ValueError('Evaluation names and primary opponent must exist in frozen policy registry')
@@ -80,16 +104,30 @@ class SelfPlayConfig(Config):
 
 
 class SelfPlayTrainer(Trainer):
-    def __init__(self, config, initial, *, initial_critic=None):
-        """initial_critic: a CentralCritic state_dict to continue, else a fresh critic.
+    def __init__(self, config, initial=None, *, initial_critic=None):
+        """initial: the initialization model; None (required) for from-scratch training.
 
+        initial_critic: a CentralCritic state_dict to continue, else a fresh critic.
         critic_initialization records which happened ('fresh' or 'checkpoint');
-        it is None for the local actor-critic.
+        it is None for the local actor-critic. A from-scratch resume restores
+        weights afterwards through selfplay_checkpoint.resume().
         """
         super().__init__(config)
-        if initial.hidden_size != config.hidden_size:
+        if config.from_scratch:
+            if initial is not None:
+                raise ValueError('From-scratch training does not load an initialization model')
+            neural = tuple(p for p, s in zip(PHASES, config.learner_phases) if s.state != 'heuristic')
+            # Normal random initialization from its own --seed stream, independent of
+            # earlier global-RNG use; nothing is copied from any checkpoint.
+            with torch.random.fork_rng(devices=[]):
+                torch.manual_seed(stream_seed(config.seed, 'scratch-actor-init-v1'))
+                model = PhaseActorCritic(config.hidden_size, neural)
+            model.trained_phases = ()  # Untrained until an optimizer step updates a phase.
+        elif initial is None:
+            raise ValueError('Checkpoint-initialized training requires an initialization model')
+        elif initial.hidden_size != config.hidden_size:
             raise ValueError('Initial checkpoint architecture does not match hidden_size')
-        if config.learner_phases:
+        elif config.learner_phases:
             from .checkpoint import load_frozen
             from .composition import PhasePolicySpec, phase_network
             neural = tuple(p for p, s in zip(PHASES, config.learner_phases) if s.state != 'heuristic')
@@ -123,7 +161,7 @@ class SelfPlayTrainer(Trainer):
             model.load_state_dict(initial.state_dict())
         else:
             model = PhaseActorCritic.from_play(initial, config.learn_phases)
-        if not config.learner_phases:
+        if not config.learner_phases and not config.from_scratch:
             model.trained_phases = tuple(getattr(initial, 'trained_phases', ('play',)))
         model.configure_learning(config.learn_phases)
         self.model = model.to(self.device)
@@ -155,7 +193,7 @@ class SelfPlayTrainer(Trainer):
                                 math.ceil(config.rollout_decisions / max(1, minimum))))
         self.snapshots = []
         self.last_snapshot = 0
-        self.anchor_sha256 = config.anchor.sha256
+        self.anchor_sha256 = config.anchor.sha256 if config.anchor is not None else None
         self.initial_checkpoint_sha256 = getattr(initial, 'checkpoint_sha256', None)
         self.initial_checkpoint_path = getattr(initial, 'checkpoint_path', None)
         # The same resolved specification describes legacy and explicit phase syntax.
@@ -177,7 +215,8 @@ class SelfPlayTrainer(Trainer):
 
     def opponent_pool(self):
         c = self.config
-        return HistoricalPool(c.opponent_probabilities, c.opponent_policies, c.anchor, tuple(self.snapshots))
+        return HistoricalPool(c.opponent_probabilities, c.opponent_policies, c.anchor, tuple(self.snapshots),
+                              c.snapshot_fallback)
 
     @torch.no_grad()
     def collect(self):

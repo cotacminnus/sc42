@@ -12,6 +12,12 @@ if TYPE_CHECKING:
 
 
 DEFAULT_OPPONENTS = (('HHH', '1'),)
+# Dynamic training-only opponents: never fixed validation or selection opponents.
+SELF_CURRENT = 'self-current'      # frozen copy of the learner, refreshed every rollout
+SELF_SNAPSHOTS = 'self-snapshots'  # published historical learner snapshots
+DYNAMIC_OPPONENTS = (SELF_CURRENT, SELF_SNAPSHOTS)
+NO_ANCHOR = ('anchor requested, but this experiment has no original play-only anchor '
+             '(from-scratch or anchor-free lineage)')
 
 
 @dataclass(frozen=True)
@@ -197,6 +203,8 @@ def checkpoint_source(source, registry, initial=None):
         if initial is None:
             raise ValueError('init requires an initialization checkpoint')
         return initial
+    if source == 'anchor' and 'anchor' not in registry:
+        raise ValueError(NO_ANCHOR)
     if source in registry:
         spec = registry[source]
         if spec.kind != 'checkpoint':
@@ -206,9 +214,15 @@ def checkpoint_source(source, registry, initial=None):
 
 
 def policy_registry(anchor, checkpoints=(), *, reserved=(), compositions=(), initial=None):
-    """The built-in variants, original anchor and explicitly named frozen archives."""
+    """The built-in variants, original anchor and explicitly named frozen archives.
+
+    anchor=None registers no anchor; the name stays reserved so it can never
+    resolve to a different policy.
+    """
     registry = {name: PolicySpec(name) for name in VARIANTS}
-    registry['anchor'] = anchor
+    if anchor is not None:
+        registry['anchor'] = anchor
+    reserved = (*reserved, 'anchor')
     for entry in checkpoints:
         name, path = entry.split('=', 1)
         if not name or name in registry or name in reserved:
@@ -237,18 +251,30 @@ def policy_registry(anchor, checkpoints=(), *, reserved=(), compositions=(), ini
 
 @dataclass(frozen=True, slots=True)
 class HistoricalPool:
-    """Canonical mixture of named policies; snapshots have a separate RNG stream."""
+    """Canonical mixture of named policies; snapshots have a separate RNG stream.
+
+    choose() returns (name, None) for the learner's own current rollout policy:
+    always for self-current, and for self-snapshots before any snapshot exists
+    when snapshot_fallback is 'current'. The legacy fallback is the anchor.
+    """
     probabilities: tuple
     policies: tuple[PolicySpec, ...]
-    anchor: PolicySpec
+    anchor: PolicySpec | None
     snapshots: tuple[PolicySpec, ...] = ()
+    snapshot_fallback: str = 'anchor'
 
     def __post_init__(self):
         entries, seen = [], set()
-        known = {p.name for p in self.policies} | {'self-snapshots'}
+        known = {p.name for p in self.policies} | set(DYNAMIC_OPPONENTS)
         if len({p.name for p in self.policies}) != len(self.policies):
             raise ValueError('Duplicate policy names')
+        if self.snapshot_fallback not in ('anchor', 'current'):
+            raise ValueError("snapshot_fallback must be 'anchor' or 'current'")
+        if self.snapshot_fallback == 'anchor' and self.anchor is None:
+            raise ValueError('The anchor snapshot fallback requires an anchor')
         for name, weight in self.probabilities:
+            if name == 'anchor' and name not in known:
+                raise ValueError(NO_ANCHOR)
             if name not in known or name in seen or isinstance(weight, bool):
                 raise ValueError(f'Unknown or duplicate opponent: {name}')
             seen.add(name)
@@ -273,19 +299,22 @@ class HistoricalPool:
                 cumulative += float(Fraction(probability))
                 if draw < cumulative:
                     break
-        if name == 'self-snapshots':
+        if name == SELF_CURRENT or (name == SELF_SNAPSHOTS and not self.snapshots
+                                    and self.snapshot_fallback == 'current'):
+            return name, None
+        if name == SELF_SNAPSHOTS:
             roster = self.snapshots or (self.anchor,)
             index = random.Random(stream_seed(seed, 'historical-snapshot-v1', episode)).randrange(len(roster))
             return name, roster[index]
         return name, next(p for p in self.policies if p.name == name)
 
 
-def historical_pool(spec, policies, anchor, snapshots=()):
+def historical_pool(spec, policies, anchor, snapshots=(), snapshot_fallback='anchor'):
     """Parse named ratios without introducing checkpoint paths into weight syntax."""
     try:
         entries = [tuple(part.strip() for part in entry.split(':')) for entry in spec.split(',')]
         if any(len(entry) != 2 for entry in entries):
             raise ValueError('Expected NAME:WEIGHT pairs')
-        return HistoricalPool(tuple(entries), tuple(policies), anchor, tuple(snapshots))
+        return HistoricalPool(tuple(entries), tuple(policies), anchor, tuple(snapshots), snapshot_fallback)
     except (TypeError, AttributeError) as exc:
         raise ValueError('Invalid opponent pool') from exc
