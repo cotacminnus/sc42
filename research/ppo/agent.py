@@ -6,8 +6,10 @@ from texas42.encoding import encode
 
 
 class PPOAgent:
-    def __init__(self, model, *, seed=0, greedy=True):
+    def __init__(self, model, *, seed=0, greedy=True, stochastic_phases=()):
+        """stochastic_phases: neural phases sampled from the legal softmax even when greedy."""
         self.model, self.greedy = model, greedy
+        self.stochastic_phases = tuple(stochastic_phases)
         self.heuristic = HeuristicAgent()
         self.seat = None
         self.profile_inference = False
@@ -33,7 +35,8 @@ class PPOAgent:
         features = torch.tensor([encode(obs)], dtype=torch.float32, device=self.device)
         masks = torch.tensor([obs.action_mask], dtype=torch.bool, device=self.device)
         started = perf_counter() if self.profile_inference else None
-        actions, _, _ = self.model.select(features, masks, greedy=self.greedy, generator=self.generator)
+        greedy = self.greedy and obs.phase not in self.stochastic_phases
+        actions, _, _ = self.model.select(features, masks, greedy=greedy, generator=self.generator)
         if started is not None:
             self.neural_inference_seconds += perf_counter() - started
         action = int(actions.item())

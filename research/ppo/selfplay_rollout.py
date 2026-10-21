@@ -21,8 +21,15 @@ _CRITIC_VERSION = None
 
 
 @torch.no_grad()
-def collect_phase_hand(model, seed, episode, learn_phases, pool, critic=None):
+def collect_phase_hand(model, seed, episode, learn_phases, pool, critic=None, current_sha256=None):
     """critic=None keeps the local actor-critic values.
+
+    A pool choice without a frozen spec (self-current, or self-snapshots before
+    any snapshot in an anchor-free run) seats the learner's own rollout snapshot
+    as the opponent partnership: the same fixed weights, its own per-seat action
+    streams, stochastic legal sampling on trainable phases, greedy on frozen
+    ones and heuristic phases unchanged. Its decisions never enter the buffer.
+    current_sha256 identifies that rollout snapshot in the opponent log.
 
     With a centralized critic, the actor still sees only `encode(obs)`; the
     privileged features and the critic's value are stored beside the decision
@@ -31,13 +38,16 @@ def collect_phase_hand(model, seed, episode, learn_phases, pool, critic=None):
     team = (episode + seed) % 2
     label, spec = pool.choose(seed, episode)
     started = perf_counter()
-    key = spec
-    if key not in _FACTORIES:
-        factory = spec.factory()
-        if hasattr(factory, 'prepare'):
-            factory.prepare()
-        _FACTORIES[key] = factory
-    factory = _FACTORIES[key]
+    if spec is None:
+        def factory(seat, agent_seed):
+            return PPOAgent(model, seed=agent_seed, stochastic_phases=learn_phases)
+    else:
+        if spec not in _FACTORIES:
+            created = spec.factory()
+            if hasattr(created, 'prepare'):
+                created.prepare()
+            _FACTORIES[spec] = created
+        factory = _FACTORIES[spec]
     loading = perf_counter() - started
     agents = []
     for seat in range(4):
@@ -91,7 +101,8 @@ def collect_phase_hand(model, seed, episode, learn_phases, pool, critic=None):
     except (OSError, ValueError, IndexError):
         rss = None
     return dict(worker_rss_bytes=rss, episode=episode, paths=tuple(tuple(p) for p in paths.values()),
-                reward=transition.rewards[team], opponent=label, opponent_sha256=spec.sha256,
+                reward=transition.rewards[team], opponent=label,
+                opponent_sha256=current_sha256 if spec is None else spec.sha256,
                 decisions=decisions, points=transition.hand_result.team_points, bidder=transition.hand_result.bidder,
                 inference_seconds=inference, opponent_loading_seconds=loading,
                 neural_inference_seconds=neural_inference + sum(getattr(a, 'neural_inference_seconds', 0.0) for a in agents))
@@ -103,7 +114,7 @@ def phase_chunk(task):
     critic_weights = optional[0] if optional else None
     # Bound process-local opponent caches to the current roster plus anchor.
     from .checkpoint import _FROZEN_MODELS
-    allowed = {pool.anchor, *pool.policies, *pool.snapshots}
+    allowed = {s for s in (pool.anchor, *pool.policies, *pool.snapshots) if s is not None}
     for spec in tuple(_FACTORIES):
         if spec not in allowed:
             del _FACTORIES[spec]
@@ -128,10 +139,10 @@ def phase_chunk(task):
             _CRITIC.eval()
             _CRITIC_VERSION = critic_version
         critic = _CRITIC
-    rows = []
+    rows, current = [], hashlib.sha256(weights).hexdigest()
     for episode in indices:
         try:
-            rows.append(collect_phase_hand(_LEARNER, seed, episode, learn, pool, critic))
+            rows.append(collect_phase_hand(_LEARNER, seed, episode, learn, pool, critic, current))
         except Exception as exc:
             raise RuntimeError(f'Multi-phase episode={episode} worker={os.getpid()}: {exc}') from exc
     return rows, os.getpid()

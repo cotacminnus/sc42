@@ -10,7 +10,12 @@ PHASES = ('bid', 'trump', 'play')
 
 @dataclass(frozen=True)
 class LearnerPhaseSpec:
-    """Resolved initialization provenance and optimizer membership for one phase."""
+    """Resolved initialization provenance and optimizer membership for one phase.
+
+    initialization: 'none' (heuristic), 'trained' (copied trained phase),
+    'representation' (trained trunk, fresh heads) or 'random' (no source: the
+    normal random initialization of trunk, policy and value heads, from-scratch only).
+    """
     state: str
     source: CheckpointIdentity | None = None
     initialization: str = 'trained'
@@ -23,8 +28,10 @@ class LearnerPhaseSpec:
         if self.state == 'heuristic':
             if self.source is not None or self.initialization != 'none':
                 raise ValueError('Heuristic phases have no neural source')
-        elif self.initialization not in ('trained', 'representation'):
+        elif self.initialization not in ('trained', 'representation', 'random'):
             raise ValueError('Unknown phase initialization')
+        elif self.initialization == 'random' and (self.source is not None or self.state != 'neural-train'):
+            raise ValueError('Random initialization has no source and must be neural-train')
         elif self.initialization == 'trained' and self.source is None:
             raise ValueError('A trained neural phase requires a checkpoint source')
         elif self.state == 'neural-frozen' and self.initialization != 'trained':

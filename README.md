@@ -38,6 +38,16 @@ pretrain play, select trainable/frozen phases, train against HHH or frozen histo
 opponents, then run a controlled held-out comparison. The [mechanics guide](docs/multiphase_selfplay.md)
 explains sample counts, rewards, source identities and resume. Use the
 [legacy play-only guide](docs/ppo_training.md) when reproducing version-1 experiments.
+No checkpoint is needed to start: `--from-scratch` trains all phases from random
+weights, including immediate self-play against a frozen copy of the current policy:
+
+```bash
+python -m examples.train_selfplay_ppo --from-scratch --opponent-pool self-current:1 \
+  --eval-opponents HHH,CHH --selection-opponent HHH --total-hands 262144 \
+  --rollout-decisions 4096 --threads 8 --seed 42 --output-dir runs/ppo-scratch-selfplay
+```
+
+See [from-scratch training](docs/command_reference.md#recipe-14-from-scratch-training-and-self-play).
 
 | Topic | Authoritative guide |
 | --- | --- |

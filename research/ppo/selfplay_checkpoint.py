@@ -29,8 +29,15 @@ def validate(data):
     trained = phases(m['trained_phases']) if m['trained_phases'] else ()
     if not set(trained) <= set(neural):
         raise ValueError('Incompatible trained-phase metadata')
-    if m.get('original_play_sha256') != data['config']['anchor']['sha256']:
+    # An absent anchor (from-scratch or anchor-free lineage) is recorded as None,
+    # never as an invented identity; a present anchor must match exactly.
+    anchor = data['config'].get('anchor')
+    if m.get('original_play_sha256') != (anchor['sha256'] if anchor is not None else None):
         raise ValueError('Incompatible original play identity')
+    if m.get('initialization', 'checkpoint') == 'random' and (
+            not data['config'].get('from_scratch') or m.get('initial_checkpoint_sha256') is not None
+            or m.get('initial_checkpoint_path') is not None):
+        raise ValueError('Inconsistent random-initialization provenance')
     if data.get('execution', {}).get('sampling_scheme') != 'multiphase-episode-v1':
         raise ValueError('Incompatible multi-phase sampling scheme')
     if m.get('checkpoint_selection_opponent') != data['config']['primary_opponent']:
@@ -70,7 +77,7 @@ def validate(data):
 def config_from_dict(data):
     from .selfplay_trainer import SelfPlayConfig
     values = dict(data)
-    values['anchor'] = spec_from_dict(values['anchor'])
+    values['anchor'] = spec_from_dict(values['anchor']) if values.get('anchor') is not None else None
     values['opponent_policies'] = tuple(spec_from_dict(s) for s in values['opponent_policies'])
     for name in ('learn_phases', 'evaluation_names', 'eval_opponents'):
         values[name] = tuple(values[name])
@@ -110,6 +117,9 @@ def save(path, trainer):
     data['metadata']['learner_phases'] = [asdict(s) for s in trainer.learner_phases]
     data['metadata']['optimizer_parameters'] = optimizer_parameters(trainer)
     data['metadata']['critic_mode'] = trainer.config.critic_mode
+    # Provenance: random initialization names no checkpoint, path or SHA256.
+    data['metadata']['initialization'] = 'random' if trainer.config.from_scratch else 'checkpoint'
+    data['metadata']['initialization_seed'] = trainer.config.seed if trainer.config.from_scratch else None
     if trainer.critic is not None:
         from .critic import CRITIC_ARCHITECTURE
         from texas42.privileged import PRIVILEGED_LAYOUT_VERSION
@@ -155,7 +165,8 @@ def resume(path, trainer):
     # Ensure every immutable dependency still exists and has its saved identity.
     from .checkpoint import load_frozen
     active = {n for n, _ in trainer.config.opponent_probabilities} | set(trainer.config.evaluation_names)
-    for spec in (trainer.config.anchor, *trainer.config.opponent_policies, *trainer.snapshots):
+    anchor = (trainer.config.anchor,) if trainer.config.anchor is not None else ()
+    for spec in (*anchor, *trainer.config.opponent_policies, *trainer.snapshots):
         for identity in spec.identities():
             load_frozen(identity, verify=True)
         if spec.kind != 'variant' and (spec.name in active or spec in trainer.snapshots or spec == trainer.config.anchor):

@@ -8,7 +8,8 @@ play-only `train_ppo` remains a separate reproducible baseline; see
 This guide explains mechanics and interpretation. The
 [command reference](command_reference.md#multi-phase-trainer-train_selfplay_ppo) owns every flag,
 default, prerequisite and copy-ready recipe. Start with original play training,
-then choose a phase experiment, train against fixed or historical opponents, and
+or [from random weights](#from-scratch-training-and-current-policy-self-play), then
+choose a phase experiment, train against fixed or historical opponents, and
 finish with independent [controlled evaluation](phase_composable_evaluation.md).
 Rules, 387 actor-relative features, 58 global actions, schema-5 data and partnership
 signed-mark rewards remain unchanged. Ordinary actors and critics see only their
@@ -69,6 +70,44 @@ bitwise equality after every collection/update cycle. A mismatch aborts. This is
 recorded in frozen_phases_verified; heuristic phases have no pretrained-network
 verification. A joint frozen playing source can differ from original anchor,
 so nonzero anchor-play KL does not imply frozen weights changed.
+
+## From-scratch training and current-policy self-play
+
+`--from-scratch` ([Recipe 14](command_reference.md#recipe-14-from-scratch-training-and-self-play))
+trains any nonempty subset of bid/trump/play from random weights in the same
+trainer, model and PPO update. Each `neural-train` phase is recorded with the
+learner initialization `random`: no source, no transferred trunk, the normal
+random trunk and heads of the existing `PhaseActorCritic`, created from a named
+`--seed` stream so equal seeds give identical networks. `trained_phases` starts
+empty and a phase becomes trained only after an optimizer step updates it, so a
+scratch checkpoint never claims an untrained policy and snapshots are published
+only once every routed neural phase has trained. There is no anchor: `anchor` is
+never registered (requests fail clearly), the play-forgetting KL is reported as
+unavailable, and the checkpoint records `initialization: random`, the seed, and
+`None` for the initialization checkpoint and original anchor instead of invented
+paths or hashes. Resume, evaluation and later stages never need a play-only file.
+
+Five workflows differ only in initialization and opponents:
+
+| Workflow | Initialization | Opponents during training |
+| --- | --- | --- |
+| Scratch against HHH | Random | Fixed heuristics |
+| Scratch current-policy self-play | Random | `self-current`: a frozen copy of the learner's own rollout weights, refreshed after every PPO update |
+| Historical snapshot self-play | Random or checkpoint | `self-snapshots`: published, immutable earlier learners; before the first publication, the anchor (anchor-based runs) or the current policy (scratch and anchor-free runs) |
+| Checkpoint-initialized PPO | Copied trained phases / representation transfer | Any mixture, including the original anchor |
+| New stage vs exact resume | `--init-checkpoint` copies weights only (fresh Adam, counters, roster); `--resume` continues everything exactly | Unchanged on resume; free to change in a new stage |
+
+`self-current` is synchronized self-play: at the start of each rollout the learner
+weights are snapshotted once; the learning partnership samples its trainable
+decisions from that snapshot as before, and the opposing partnership uses the same
+frozen weights with its own seeded action streams (stochastic on trainable phases,
+greedy on frozen ones, heuristic phases unchanged). Only the learning partnership's
+decisions enter the buffer and receive gradients; the opposing partnership's
+weights cannot change during the rollout and are refreshed for the next one. This
+optimizes one partnership against a frozen copy of itself, not four simultaneously
+updated players. It works from the first hand, when both sides are random. Random
+initialization implies no playing strength, and early self-play can be very weak
+and slow to improve; keep fixed heuristic validation opponents to measure progress.
 
 ## From initialization to the next training stage
 
@@ -252,7 +291,8 @@ agents. Different strategies can alter auction choices, later legal moves and re
 
 A named archive is a fixed policy; self-snapshots is a dynamically growing/bounded
 historical roster. Before the roster has an eligible snapshot, its selection falls
-back to original anchor, not the current stage's initial joint network. Thereafter
+back to original anchor, not the current stage's initial joint network; scratch
+and anchor-free lineages fall back to the frozen current policy instead. Thereafter
 selection is uniform over active members. Snapshots copy the learner at completed
 update boundaries, remain frozen, and do not follow later optimizer changes.
 The original anchor is separate and never evicted. The roster retains at most its
