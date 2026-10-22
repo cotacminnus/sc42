@@ -15,6 +15,8 @@ from examples import run_pipeline as rp
 
 TORCH = importlib.util.find_spec('torch') is not None
 CONFIGS = Path(__file__).resolve().parents[1] / 'configs' / 'pipelines'
+# Tracked examples only; .gitignore leaves other (personal) pipeline files in this directory.
+EXAMPLES = tuple(CONFIGS / name for name in ('template.json', 'progressive_training.json', 'scratch_selfplay.json'))
 
 
 def quiet(function, *args, **kwargs):
@@ -76,15 +78,13 @@ class ParsingTests(PipelineTestCase):
         pipeline = rp.load_config(self.write(self.config()))
         self.assertEqual([s.id for s in pipeline.steps], ['play', 'bidding', 'evaluation'])
         self.assertEqual(pipeline.output_root, self.path / 'out')
-        for path in sorted(CONFIGS.glob('*.json')):
+        for path in EXAMPLES:
             with self.subTest(path=path.name):
                 self.assertTrue(rp.load_config(path).steps)
-        self.assertEqual({p.name for p in CONFIGS.glob('*.json')},
-                         {'template.json', 'progressive_training.json', 'scratch_selfplay.json'})
 
     @unittest.skipUnless(TORCH, 'optional rl extra is not installed')
     def test_example_configurations_pass_command_parsers(self):
-        for path in sorted(CONFIGS.glob('*.json')):
+        for path in EXAMPLES:
             with self.subTest(path=path.name):
                 pipeline = rp.load_config(path)
                 rows = rp.plan(pipeline)  # Each command's own argparse accepts every step.
