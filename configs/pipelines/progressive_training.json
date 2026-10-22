@@ -1,0 +1,109 @@
+{
+  "schema_version": 1,
+  "name": "progressive-v1",
+  "description": "Sequential curriculum from random weights: play, then bidding with frozen play, then trump with frozen bid/play, then joint training with a centralized critic and historical snapshots, then a head-to-head evaluation against the pre-joint model. No pretrained checkpoint or anchor is needed.",
+  "output_root": "runs/pipelines/progressive-v1",
+  "steps": [
+    {
+      "id": "play",
+      "command": "train_selfplay_ppo",
+      "description": "Trick play from random weights; heuristic bidding and trump.",
+      "args": {
+        "from-scratch": true,
+        "learner-bid": "heuristic",
+        "learner-trump": "heuristic",
+        "learner-play": "neural-train",
+        "opponent-pool": "HHH:1",
+        "eval-opponents": "HHH,CHH",
+        "selection-opponent": "HHH",
+        "total-hands": 262144,
+        "rollout-decisions": 4096,
+        "ppo-epochs": 4,
+        "minibatch-size": 512,
+        "learning-rate": 0.0001,
+        "threads": 8,
+        "seed": 42
+      }
+    },
+    {
+      "id": "bidding",
+      "command": "train_selfplay_ppo",
+      "description": "New stage: bidding heads on the trained play trunk; the trained play network stays frozen.",
+      "args": {
+        "init-checkpoint": "${play.best}",
+        "learner-bid": "neural-train",
+        "learner-bid-source": "new",
+        "learner-trump": "heuristic",
+        "learner-play": "neural-frozen",
+        "opponent-pool": "HHH:1",
+        "eval-opponents": "HHH,CHH",
+        "selection-opponent": "HHH",
+        "total-hands": 262144,
+        "rollout-decisions": 4096,
+        "threads": 8,
+        "seed": 42
+      }
+    },
+    {
+      "id": "trump",
+      "command": "train_selfplay_ppo",
+      "description": "New stage: trump heads; trained bidding and play stay frozen.",
+      "args": {
+        "init-checkpoint": "${bidding.best}",
+        "learner-bid": "neural-frozen",
+        "learner-trump": "neural-train",
+        "learner-trump-source": "new",
+        "learner-play": "neural-frozen",
+        "opponent-pool": "HHH:1",
+        "eval-opponents": "HHH,CHH",
+        "selection-opponent": "HHH",
+        "total-hands": 262144,
+        "rollout-decisions": 1024,
+        "max-rollout-hands": 4096,
+        "threads": 8,
+        "seed": 42
+      }
+    },
+    {
+      "id": "joint",
+      "command": "train_selfplay_ppo",
+      "description": "New stage: all three phases trainable, centralized critic, historical snapshot self-play.",
+      "args": {
+        "init-checkpoint": "${trump.best}",
+        "learner-bid": "neural-train",
+        "learner-trump": "neural-train",
+        "learner-play": "neural-train",
+        "critic-mode": "centralized",
+        "return-estimator": "gae",
+        "opponent-pool": "HHH:0.3,self-snapshots:0.7",
+        "eval-opponents": "HHH,CHH",
+        "selection-opponent": "HHH",
+        "snapshot-every-hands": 32768,
+        "snapshot-pool-size": 8,
+        "total-hands": 524288,
+        "rollout-decisions": 4096,
+        "threads": 8,
+        "seed": 42
+      }
+    },
+    {
+      "id": "evaluation",
+      "command": "evaluate_agent_vs_agent",
+      "description": "Duplicate-deal comparison of the joint model with the pre-joint (trump-stage) model.",
+      "args": {
+        "agent-a-checkpoint": "${joint.best}",
+        "agent-a-bid": "neural",
+        "agent-a-trump": "neural",
+        "agent-a-play": "neural",
+        "agent-b-checkpoint": "${trump.best}",
+        "agent-b-bid": "neural",
+        "agent-b-trump": "neural",
+        "agent-b-play": "neural",
+        "deals": 4096,
+        "seed": 7355608,
+        "bootstrap-samples": 2000,
+        "threads": 8
+      }
+    }
+  ]
+}

@@ -13,12 +13,14 @@ from texas42.agents import VARIANTS
 from texas42.parallel import resolve_workers
 
 
-@record_output
-def main(argv=None):
+OPPONENT_FIELDS = ('train_opponents', 'eval_opponents', 'selection_opponent')
+
+
+def build_parser():
+    """The command's argparse definition (also used by examples.run_pipeline to validate)."""
     parser = argparse.ArgumentParser(description=__doc__)
     default = Config()
-    opponent_fields = ('train_opponents', 'eval_opponents', 'selection_opponent')
-    add_config_arguments(parser, default, exclude=opponent_fields)
+    add_config_arguments(parser, default, exclude=OPPONENT_FIELDS)
     training = parser.add_mutually_exclusive_group()
     training.add_argument('--train-opponent', choices=VARIANTS)
     training.add_argument('--train-opponents', help='NAME:WEIGHT,NAME:WEIGHT,...')
@@ -33,6 +35,12 @@ def main(argv=None):
     source.add_argument('--resume', type=Path)
     source.add_argument('--warm-start', type=Path)
     add_output_arguments(parser)
+    return parser
+
+
+@record_output
+def main(argv=None):
+    parser = build_parser()
     args = parser.parse_args(argv)
     try:
         resolve_workers(args.eval_threads, args.eval_deals)
@@ -40,7 +48,7 @@ def main(argv=None):
         eval_names = evaluation_opponents(tuple(n.strip() for n in args.eval_opponents.split(','))
                          if args.eval_opponents is not None else (args.eval_opponent or 'HHH',))
         primary = select_primary(eval_names, args.selection_opponent)
-        config = Config(**{f.name: getattr(args, f.name) for f in fields(Config) if f.name not in opponent_fields},
+        config = Config(**{f.name: getattr(args, f.name) for f in fields(Config) if f.name not in OPPONENT_FIELDS},
                         train_opponents=opponents, eval_opponents=eval_names, selection_opponent=primary)
         trainer = Trainer(config)
         if args.resume:

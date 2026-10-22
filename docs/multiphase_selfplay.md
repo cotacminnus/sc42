@@ -11,6 +11,8 @@ default, prerequisite and copy-ready recipe. Start with original play training,
 or [from random weights](#from-scratch-training-and-current-policy-self-play), then
 choose a phase experiment, train against fixed or historical opponents, and
 finish with independent [controlled evaluation](phase_composable_evaluation.md).
+Multi-stage curricula (for example play → bidding → trump → joint) can be run
+from one JSON file with [experiment pipelines](command_reference.md#experiment-pipelines).
 Rules, 387 actor-relative features, 58 global actions, schema-5 data and partnership
 signed-mark rewards remain unchanged. Ordinary actors and critics see only their
 acting player's immutable observation; neither gets opponent hands.

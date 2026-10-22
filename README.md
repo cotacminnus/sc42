@@ -48,6 +48,14 @@ python -m examples.train_selfplay_ppo --from-scratch --opponent-pool self-curren
 ```
 
 See [from-scratch training](docs/command_reference.md#recipe-14-from-scratch-training-and-self-play).
+Multi-stage experiments can be declared in JSON and run in one command, with
+checkpoint references between stages and resumable progress
+([experiment pipelines](docs/command_reference.md#experiment-pipelines)):
+
+```bash
+python -m examples.run_pipeline --config configs/pipelines/progressive_training.json --dry-run
+python -m examples.run_pipeline --config configs/pipelines/progressive_training.json
+```
 
 | Topic | Authoritative guide |
 | --- | --- |
@@ -82,7 +90,8 @@ See [from-scratch training](docs/command_reference.md#recipe-14-from-scratch-tra
 | `texas42/training.py`, `encoding.py`, `actions.py` | Versioned ID-based views, 387 features and legal global actions |
 | `texas42/openspiel.py` | Optional adapter depending on the native engine |
 | `research/ppo/` | Optional training (local or centralized critic), oracle label datasets, checkpoints and frozen policy composition |
-| `examples/` | Runnable game, training and evaluation commands |
+| `examples/` | Runnable game, training and evaluation commands, including the JSON pipeline runner |
+| `configs/pipelines/` | Example JSON experiment pipelines |
 | `tests/`, `docs/` | Deterministic unittest coverage and technical documentation |
 | `runs/`, `logs/` | Ignored generated checkpoints, results and readable exports |
 

@@ -20,6 +20,7 @@ page owns *how to run things*.
 - [Legacy trainer: train_ppo](#legacy-trainer-train_ppo) — Recipe 1, resume, mixed opponents
 - [Multi-phase trainer: train_selfplay_ppo](#multi-phase-trainer-train_selfplay_ppo) — Recipes 2–11, 13 and 14 (from scratch), arguments, artifacts, troubleshooting
 - [Evaluation](#evaluation) — agent-vs-agent composition (Recipe 12), compatibility commands
+- [Experiment pipelines](#experiment-pipelines) — JSON-defined training/evaluation sequences, references, resume
 - [Performance benchmarks](#performance-benchmarks)
 - [Reproducibility checklist](#reproducibility-checklist)
 
@@ -49,6 +50,7 @@ python -m unittest discover -s tests -v  # verify the checkout
 | Multi-opponent phase evaluation (anchors, archives) | `python -m examples.evaluate_selfplay_ppo` | `rl` | [Compatibility evaluation](#compatibility-evaluation) |
 | Agent API demo (no arguments) | `python -m examples.agent_selfplay` | — | [Self-play examples](#self-play-examples) |
 | OpenSpiel rollouts | `python -m examples.openspiel_selfplay` | `openspiel` | [Self-play examples](#self-play-examples) |
+| Run a JSON-defined sequence of training/evaluation steps | `python -m examples.run_pipeline` | as the steps need | [Experiment pipelines](#experiment-pipelines) |
 | Worker scaling, bootstrap, validation and arena profiles | `python -m examples.parallel_benchmark` and others | varies | [Performance benchmarks](#performance-benchmarks) |
 
 ## Shared conventions
@@ -1488,6 +1490,125 @@ trained check: use files whose routed neural phases are already trained. For exp
 availability validation or any independent phase ablation, use
 `evaluate_agent_vs_agent`. Existing single/multi-opponent JSON envelopes remain
 unchanged; reports are never merged into an unlabeled multi-opponent score.
+
+## Experiment pipelines
+
+`examples.run_pipeline` runs an ordered list of existing commands from one JSON
+file. Each step is a separate child process (`python -m examples.<command>` with an
+explicit argument list, never a shell), so every command's own argparse and
+domain validation stay authoritative and its logs, CSVs and reports are unchanged.
+Steps run one at a time; the first failure stops the pipeline with that step's exit
+status.
+
+```bash
+python -m examples.run_pipeline --config configs/pipelines/progressive_training.json --dry-run
+python -m examples.run_pipeline --config configs/pipelines/progressive_training.json
+python -m examples.run_pipeline --config configs/pipelines/progressive_training.json --resume
+```
+
+| Argument | Meaning |
+| --- | --- |
+| `--config` | Pipeline JSON file (required). |
+| `--dry-run` | Validate the file, every step's arguments (with each command's own parser) and references; print the exact commands, outputs and dependencies. Runs nothing and creates no files; future checkpoints are shown as predicted paths. |
+| `--resume` | Continue from `OUTPUT_ROOT/pipeline_state.json` (see [resume](#pipeline-resume-and-recovery)). |
+
+Examples in `configs/pipelines/`: `template.json` (annotated starting point),
+`progressive_training.json` (play → bidding → trump → joint → evaluation, all from
+random weights) and `scratch_selfplay.json` (scratch `self-current` training, a
+historical-snapshot stage, then fixed-opponent and head-to-head evaluation).
+
+### Pipeline JSON format
+
+```json
+{
+  "schema_version": 1,
+  "name": "progressive-v1",
+  "output_root": "runs/pipelines/progressive-v1",
+  "description": "optional free text",
+  "steps": [
+    {"id": "play", "command": "train_selfplay_ppo", "description": "optional",
+     "args": {"from-scratch": true, "learner-play": "neural-train", "total-hands": 262144, "seed": 42}},
+    {"id": "bidding", "command": "train_selfplay_ppo",
+     "args": {"init-checkpoint": "${play.best}", "learner-bid": "neural-train",
+              "learner-bid-source": "new", "learner-play": "neural-frozen"}}
+  ]
+}
+```
+
+| Field | Rule |
+| --- | --- |
+| `schema_version` | Required; currently `1`. |
+| `name`, `output_root` | Required nonempty strings. Relative paths (here and in arguments) resolve from the **repository root**, not from the JSON file. |
+| `steps` | Nonempty ordered list; order is execution order. |
+| `id` | Unique; letters, digits, `_`, `-`. Names the step directory and references. |
+| `command` | One of `train_ppo`, `train_selfplay_ppo`, `evaluate_ppo`, `evaluate_selfplay_ppo`, `evaluate_agent_vs_agent`, `oracle_labels`. Nothing else is executable. |
+| `args` | The command's normal flags without `--`. A string or number is passed exactly as written; `true` adds a bare flag; `false` omits it; a list repeats the flag (e.g. several `opponent-checkpoint` entries). `null`, objects, empty lists and lists of non-scalars are rejected. |
+
+Unknown fields, duplicate IDs, unsupported commands or versions, malformed JSON
+and invalid argument shapes fail before anything runs.
+
+**Automatic outputs.** Each step owns `OUTPUT_ROOT/<id>/`. Training steps get
+`--output-dir OUTPUT_ROOT/<id>` (checkpoints in `checkpoints/`); evaluation steps get
+`--output OUTPUT_ROOT/<id>/result.json`; `oracle_labels` gets
+`--output OUTPUT_ROOT/<id>/labels.json`; every step gets `--log-dir OUTPUT_ROOT/<id>/logs`.
+Explicit values are respected, but overlapping locations between steps are rejected.
+
+**References.** Strings may contain `${STEP.best}`, `${STEP.latest}` (a training
+step's `checkpoints/best.pt` or `latest.pt`) or `${STEP.output}` (an evaluation report
+or label dataset), also inside values such as `"name=${STEP.best}"`. A reference must
+name an earlier step of the right kind; nothing is evaluated as an expression. The
+file must exist when the dependent step starts (`best.pt` never silently becomes
+`latest.pt`), and its absolute path and SHA256 are recorded. Files named directly
+(for example an external `init-checkpoint`) are verified and hashed the same way.
+
+### Pipeline resume and recovery
+
+`OUTPUT_ROOT/pipeline_state.json` is rewritten atomically at every state change. It
+holds the verbatim configuration and its hash, the git commit and dirty flag, the
+Python executable, and per step: state (`pending`, `running`, `completed`, `failed`),
+the exact command, every attempt with start/finish times, exit status and mode,
+owned locations, produced outputs with SHA256, and resolved dependencies and inputs
+with SHA256. A new run refuses an existing manifest or non-empty step outputs.
+
+`--resume` requires the identical configuration (any change is rejected; use a new
+`output_root` for a changed experiment) and then:
+
+1. Skips completed steps after re-verifying their outputs and dependency hashes; a
+   missing or modified file stops the pipeline.
+2. Continues a failed or interrupted **training** step that has `latest.pt` through
+   the command's own exact resume, in the same output directory:
+   `train_selfplay_ppo --resume latest.pt` plus only `total-hands`, `threads`,
+   `eval-threads`, `device` and the locations (it restores everything else);
+   `train_ppo` repeats the step's original arguments with `--resume` replacing any
+   `--warm-start` (legacy resume requires the saved configuration to be repeated).
+   Progress rows and historical snapshots written after `latest.pt` are first moved to
+   `*.pre-resume-<time>` backups so history is never duplicated; the resumed run
+   recreates them deterministically. This is recorded in the attempt.
+3. Stops with an explanation if a training step has partial outputs but no
+   `latest.pt`; it never restarts training from its initialization on its own.
+4. Reruns a failed evaluation or labeling step completely (labeling reuses its own
+   label cache).
+
+To reproduce a pipeline, rerun the saved configuration (also stored inside the
+manifest) at the recorded commit into a new `output_root`.
+
+### Pipeline semantics
+
+- `init-checkpoint` / `init-play-checkpoint` in a step starts a **new training stage**
+  (fresh optimizer, counters and snapshot roster); only pipeline `--resume` (or a
+  step's own `resume` argument) continues one exactly.
+- `progressive_training.json` is a **sequential curriculum**: each stage starts from
+  the previous stage's `best.pt`, so its stages are not independent ablations. For an
+  ablation, start each variant from the same checkpoint with matched seeds and budgets
+  and compare with [controlled evaluation](#recipe-12-held-out-phase-ablations).
+- `best.pt` is the checkpoint selected on the fixed validation opponents;
+  `latest.pt` is the newest saved state. Reference the one you mean.
+- `self-current` (a frozen copy of the current learner, refreshed each rollout) and
+  `self-snapshots` (published historical learners) are training opponents only;
+  validation and selection use fixed `eval-opponents`
+  ([Recipe 14](#recipe-14-from-scratch-training-and-self-play)).
+- A first step with `"from-scratch": true` needs no existing checkpoint, and later
+  stages of that lineage need no anchor.
 
 ## Performance benchmarks
 
