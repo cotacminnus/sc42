@@ -9,6 +9,7 @@ import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
+import unittest.mock
 
 from examples import run_pipeline as rp
 
@@ -77,11 +78,24 @@ class ParsingTests(PipelineTestCase):
         self.assertEqual(pipeline.output_root, self.path / 'out')
         for path in sorted(CONFIGS.glob('*.json')):
             with self.subTest(path=path.name):
+                self.assertTrue(rp.load_config(path).steps)
+        self.assertEqual({p.name for p in CONFIGS.glob('*.json')},
+                         {'template.json', 'progressive_training.json', 'scratch_selfplay.json'})
+
+    @unittest.skipUnless(TORCH, 'optional rl extra is not installed')
+    def test_example_configurations_pass_command_parsers(self):
+        for path in sorted(CONFIGS.glob('*.json')):
+            with self.subTest(path=path.name):
                 pipeline = rp.load_config(path)
                 rows = rp.plan(pipeline)  # Each command's own argparse accepts every step.
                 self.assertEqual(len(rows), len(pipeline.steps))
-        self.assertEqual({p.name for p in CONFIGS.glob('*.json')},
-                         {'template.json', 'progressive_training.json', 'scratch_selfplay.json'})
+
+    def test_missing_optional_dependency_is_reported(self):
+        config = self.config([dict(id='s', command='train_selfplay_ppo', args={'from-scratch': True})])
+        with unittest.mock.patch.object(rp.importlib, 'import_module',
+                                        side_effect=ModuleNotFoundError("No module named 'torch'", name='torch')):
+            with self.assertRaisesRegex(rp.PipelineError, r"needs an optional dependency .*\(torch\)"):
+                rp.plan(rp.parse_config(config))
 
     def test_rejections(self):
         base = self.config()
@@ -126,6 +140,7 @@ class ArgumentTests(PipelineTestCase):
             with self.subTest(args=args), self.assertRaises(rp.PipelineError):
                 rp.to_argv(self.step(args))
 
+    @unittest.skipUnless(TORCH, 'optional rl extra is not installed')
     def test_authoritative_parser_validation(self):
         for args in ({'no-such-flag': 1}, {'total-hands': 'many'}, {'critic-mode': 'global'},
                      {'from-scratch': 'yes'}, {'from-scratch': True, 'init-checkpoint': 'x.pt'}):
@@ -180,6 +195,7 @@ class ReferenceTests(PipelineTestCase):
                 rp.parse_config(self.config(steps))
 
 
+@unittest.skipUnless(TORCH, 'validating training/evaluation steps imports their PyTorch-based commands')
 class ExecutionTests(PipelineTestCase):
     def run_pipeline(self, config, runner, resume=False):
         return quiet(rp.run, rp.parse_config(config), resume=resume, runner=runner)

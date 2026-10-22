@@ -345,7 +345,11 @@ def command_argv(step, args) -> list:
 
 def validate_with_parser(step, argv):
     """Parse with the command's own argparse definition; nothing is executed."""
-    module = importlib.import_module(step.module)
+    try:
+        module = importlib.import_module(step.module)
+    except ImportError as exc:
+        raise PipelineError(f'Step {step.id}: {step.command} needs an optional dependency that is not installed '
+                            f"({exc.name}); install it, e.g. python -m pip install -e '.[rl]'") from None
     error = io.StringIO()
     try:
         with contextlib.redirect_stderr(error):
