@@ -50,7 +50,7 @@ python -m examples.train_selfplay_ppo --from-scratch --opponent-pool self-curren
 See [from-scratch training](docs/command_reference.md#recipe-14-from-scratch-training-and-self-play).
 Multi-stage experiments can be declared in JSON and run in one command, with
 checkpoint references between stages and resumable progress
-([experiment pipelines](docs/command_reference.md#experiment-pipelines)):
+([experiment pipelines](docs/experiment_pipelines.md)):
 
 ```bash
 python -m examples.run_pipeline --config configs/pipelines/progressive_training.json --dry-run
@@ -60,6 +60,7 @@ python -m examples.run_pipeline --config configs/pipelines/progressive_training.
 | Topic | Authoritative guide |
 | --- | --- |
 | Commands, arguments, JSON/log/CSV paths | [Command reference](docs/command_reference.md) |
+| JSON-defined multi-stage experiments, checkpoint chaining and resume | [Experiment pipelines](docs/experiment_pipelines.md) |
 | Original play-only PPO and version-1 reproduction | [Legacy PPO](docs/ppo_training.md) |
 | Independently train/freeze bidding, trump and play; composed/historical opponents | [Multi-phase PPO](docs/multiphase_selfplay.md) |
 | Independently composed agents and phase ablations | [Phase-composable evaluation](docs/phase_composable_evaluation.md) |

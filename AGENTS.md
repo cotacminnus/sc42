@@ -56,6 +56,7 @@ For larger refactors, give a short before/after map of modules and responsibilit
 - `docs/ppo_training.md`: legacy play-only PPO method, checkpoint continuity, and baseline reproduction.
 - `docs/multiphase_selfplay.md`: current independent-phase training, historical opponents, snapshots, and resume.
 - `docs/phase_composable_evaluation.md`: current agent-vs-agent composition and phase-ablation recipes.
+- `docs/experiment_pipelines.md`: JSON experiment pipelines (`examples.run_pipeline`): format, references, outputs, manifest and resume.
 - `docs/arena.md`: duplicate-deal methodology, metrics, uncertainty, and statistical interpretation.
 - `docs/roadmap.md`: research status, remaining questions, and milestones.
 
