@@ -10,6 +10,9 @@ build/
 *.egg-info/
 logs/
 *.jsonl
-
+configs/pipelines/*.json
+!configs/pipelines/template.json
+!configs/pipelines/progressive_training.json
+!configs/pipelines/scratch_selfplay.json
 runs/
 *.pt
