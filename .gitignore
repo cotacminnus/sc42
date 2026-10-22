@@ -10,6 +10,7 @@ build/
 *.egg-info/
 logs/
 *.jsonl
-
+configs/pipelines/
+!template.json
 runs/
 *.pt
