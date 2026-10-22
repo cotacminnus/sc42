@@ -12,5 +12,7 @@ logs/
 *.jsonl
 configs/pipelines/
 !template.json
+!progressive_training.json
+!scratch_selfplay.json
 runs/
 *.pt
