@@ -9,7 +9,7 @@ training step through that command's own exact-resume mechanism.
 
     python -m examples.run_pipeline --config configs/pipelines/progressive_training.json [--dry-run | --resume]
 
-See docs/command_reference.md#experiment-pipelines for the JSON format.
+See docs/experiment_pipelines.md for the JSON format, references and resume.
 """
 from __future__ import annotations
 

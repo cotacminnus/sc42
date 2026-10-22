@@ -12,7 +12,7 @@ or [from random weights](#from-scratch-training-and-current-policy-self-play), t
 choose a phase experiment, train against fixed or historical opponents, and
 finish with independent [controlled evaluation](phase_composable_evaluation.md).
 Multi-stage curricula (for example play → bidding → trump → joint) can be run
-from one JSON file with [experiment pipelines](command_reference.md#experiment-pipelines).
+from one JSON file with [experiment pipelines](experiment_pipelines.md).
 Rules, 387 actor-relative features, 58 global actions, schema-5 data and partnership
 signed-mark rewards remain unchanged. Ordinary actors and critics see only their
 acting player's immutable observation; neither gets opponent hands.
