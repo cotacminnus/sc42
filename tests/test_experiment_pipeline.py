@@ -16,7 +16,8 @@ from examples import run_pipeline as rp
 TORCH = importlib.util.find_spec('torch') is not None
 CONFIGS = Path(__file__).resolve().parents[1] / 'configs' / 'pipelines'
 # Tracked examples only; .gitignore leaves other (personal) pipeline files in this directory.
-EXAMPLES = tuple(CONFIGS / name for name in ('template.json', 'progressive_training.json', 'scratch_selfplay.json'))
+EXAMPLES = tuple(CONFIGS / name for name in ('template.json', 'progressive_training.json', 'scratch_selfplay.json',
+                                             'critic_comparison.json'))
 
 
 def quiet(function, *args, **kwargs):
@@ -89,6 +90,26 @@ class ParsingTests(PipelineTestCase):
                 pipeline = rp.load_config(path)
                 rows = rp.plan(pipeline)  # Each command's own argparse accepts every step.
                 self.assertEqual(len(rows), len(pipeline.steps))
+
+    @unittest.skipUnless(TORCH, 'optional rl extra is not installed')
+    def test_policy_only_configuration(self):
+        args = {'from-scratch': True, 'learner-bid': 'neural-train', 'learner-trump': 'neural-train',
+                'learner-play': 'neural-train', 'critic-mode': 'none', 'opponent-pool': 'HHH:0.3,self-current:0.7',
+                'eval-opponents': 'HHH,CHH', 'selection-opponent': 'HHH', 'total-hands': 262144,
+                'rollout-decisions': 4096, 'ppo-epochs': 4, 'minibatch-size': 512, 'learning-rate': 0.0001,
+                'threads': 8, 'seed': 42}
+        steps = [dict(id='policy-only', command='train_selfplay_ppo', args=args),
+                 dict(id='evaluation', command='evaluate_selfplay_ppo', args={
+                     'checkpoint': '${policy-only.best}', 'opponents': 'HHH,CHH,HHR', 'deals': 4096,
+                     'seed': 7355608, 'threads': 8})]
+        rows = rp.plan(rp.parse_config(self.config(steps)))
+        argv = rows[0][1]
+        self.assertEqual(argv[argv.index('--critic-mode') + 1], 'none')
+        for mode in ('local', 'centralized'):
+            rp.plan(rp.parse_config(self.config([dict(steps[0], args=dict(args, **{'critic-mode': mode}))])))
+        with self.assertRaises(rp.PipelineError):  # Rejected by the command's own parser.
+            rp.plan(rp.parse_config(self.config([dict(steps[0], args=dict(args, **{'critic-mode': 'value'}))])))
+        rp.plan(rp.parse_config(self.config([dict(id='legacy', command='train_ppo', args={'critic-mode': 'none'})])))
 
     def test_missing_optional_dependency_is_reported(self):
         config = self.config([dict(id='s', command='train_selfplay_ppo', args={'from-scratch': True})])
@@ -424,6 +445,26 @@ class IntegrationTests(PipelineTestCase):
         self.assertEqual(manifest['steps'][5]['dependencies'][0]['reference'], 'labels.output')
         progress = (self.path / 'out/critic/progress.jsonl').read_text()
         self.assertIn('oracle_aux_loss', progress)
+
+    def test_critic_mode_comparison(self):
+        """Three independent equally initialized branches, one per critic mode."""
+        shared = {'from-scratch': True, 'opponent-pool': 'HHH:0.5,self-current:0.5', 'eval-opponents': 'HHH',
+                  'selection-opponent': 'HHH', 'seed': 42}
+        modes = {'none': 'monte-carlo', 'local': 'gae', 'centralized': 'gae'}
+        steps = [self.train(mode, **shared, **{'critic-mode': mode}) for mode in modes]
+        steps += [dict(id='eval-' + mode, command='evaluate_selfplay_ppo',
+                       args={'checkpoint': '${%s.best}' % mode, 'opponents': 'HHH', 'deals': 2, 'seed': 7})
+                  for mode in modes]
+        manifest = self.execute(self.config(steps))
+        self.assertEqual([s['state'] for s in manifest['steps']], ['completed'] * 6)
+        import torch
+        for mode, estimator in modes.items():
+            data = torch.load(self.path / 'out' / mode / 'checkpoints/latest.pt', weights_only=True)
+            self.assertEqual((data['config']['critic_mode'], data['metadata']['return_estimator']), (mode, estimator))
+            self.assertEqual(data['metadata']['critic_optimized'], mode != 'none')
+            self.assertEqual(data['metadata']['initialization'], 'random')
+            row = json.loads((self.path / 'out' / mode / 'progress.jsonl').read_text().splitlines()[0])
+            self.assertEqual(row['metrics']['value_loss'] is None, mode == 'none')
 
     def test_interrupted_legacy_training_repeats_its_configuration(self):
         steps = [dict(id='legacy', command='train_ppo', args={

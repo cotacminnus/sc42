@@ -36,3 +36,10 @@ class ActorCritic(nn.Module):
     def evaluate(self, features, legal_mask, actions):
         distribution, values = self.distribution(features, legal_mask)
         return distribution.log_prob(actions), distribution.entropy(), values
+
+
+def freeze_value_heads(model):
+    """Policy-only PPO: local value heads stay in the state dict (checkpoint
+    compatibility) but receive no gradients and are left out of the optimizer."""
+    for network in (model.networks.values() if hasattr(model, 'networks') else (model,)):
+        network.value.requires_grad_(False)

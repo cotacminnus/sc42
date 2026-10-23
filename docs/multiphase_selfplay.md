@@ -220,9 +220,47 @@ contract success. Advantage normalization is over the merged batch, not per phas
 
 Three independently selectable features let their effects be measured separately
 ([flags](command_reference.md#g-critic-returns-and-oracle-auxiliary),
-[A/B/C recipe](command_reference.md#recipe-13-local-versus-centralized-critic-and-oracle-auxiliary)).
+[A/B/C recipe](command_reference.md#recipe-13-local-versus-centralized-critic-and-oracle-auxiliary),
+[policy-only recipe](command_reference.md#recipe-15-policy-only-ppo-and-a-three-way-critic-comparison)).
 All defaults reproduce the existing local critic and GAE bit for bit (verified by
-comparing progress metrics and weights against the previous code).
+comparing rollout actions, values, progress metrics and weights against the previous code).
+
+`--critic-mode` selects one of three training modes for the same actors:
+
+| Mode | Advantage baseline | Value loss | Extra trainable parameters |
+| --- | --- | --- | --- |
+| `none` (policy-only PPO) | None (zero): advantage = Monte Carlo return | None | None; actor value heads excluded |
+| `local` (default) | Each phase network's own value head | Signed-mark MSE on the value heads | Value heads |
+| `centralized` | Separate privileged critic | Signed-mark MSE on that critic (+ optional oracle head) | `CentralCritic` |
+
+PPO itself does not require a learned critic: the clipped surrogate only needs an
+advantage estimate for each sampled action. A learned value baseline reduces the
+variance of that estimate (and GAE trades a little bias for further variance
+reduction), which typically improves sample efficiency; without one, the gradient
+is unbiased but noisier. Complete-hand Monte Carlo returns can be especially noisy
+here because a hand's single terminal signed-mark reward is credited equally to
+every decision of the seat: the opening bid, the trump choice and all seven plays
+receive the same return, although later plays have much less influence on most
+of the outcome variance than the deal itself. Which mode learns better in SC42 is
+an empirical question; no ranking is claimed before matched experiments.
+
+**Policy-only PPO (`none`).** Collection is unchanged (same actors, legal masks,
+sampling streams and opponents; the actor initialization and the first rollout are
+identical across all three modes for one seed). Each completed seat trajectory
+receives `G_t = Σ_{k≥t} γ^(k−t) r_k`; with the default γ = 1 every decision gets the
+terminal signed marks of that seat's partnership. Stored values are set to exactly
+0.0 when the trajectory enters the buffer, so the advantage is `G_t` (a fixed zero
+baseline), followed by the usual batch normalization. The loss is the clipped PPO
+objective minus the entropy bonus only: there is no value regression and no
+critic, the centralized critic is never constructed, and oracle supervision is
+rejected (it trains the centralized critic). The actors keep their local value-head
+tensors so checkpoints and inference stay compatible, but those heads have
+`requires_grad=False`, receive no gradients and are not in the Adam parameter list;
+they still produce an (ignored) output during the forward pass. `--value-coef` has no
+effect. `none` requires the Monte Carlo estimator and selects it when
+`--return-estimator` is omitted; an explicit `gae` is rejected. Progress rows report
+`value_loss`, `*_value_loss`, `explained_variance` and `value_mean` as `null`
+(unavailable, not zero); return and advantage statistics per phase remain.
 
 **Return audit.** The existing per-seat trajectories already satisfy the reference-
 team requirements: both learners belong to one partnership, each trajectory holds
@@ -277,9 +315,14 @@ and no search runs during training. Labels come from late-hand positions by
 default because they are cheap to prove exactly; one open-hand deal is not a
 realistic bidding success probability, so no bid-phase targets are produced.
 
-Checkpoints record `critic_mode`, the critic weights and architecture, the
+Checkpoints record `critic_mode`, `return_estimator`, `critic_optimized` (false for
+`none`), `initial_critic_mode` (the initialization checkpoint's mode; null from
+scratch), the Adam parameter names, the critic weights and architecture, the
 privileged layout version and how the critic was initialized; local and older
-checkpoints load unchanged. Actor-only inference (`load_model`, evaluation,
+checkpoints (which record no mode) load unchanged as the local critic with GAE.
+Exact resume rejects a different critic mode or effective estimator; a new stage
+may change the mode, always with a fresh optimizer, and copies a centralized critic
+only from a centralized source. Actor-only inference (`load_model`, evaluation,
 console) never needs the critic, a dataset or the oracle.
 
 ## Opponent pools, archives and historical self-play

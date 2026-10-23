@@ -40,6 +40,10 @@ def capture(trainer):
                          cuda=torch.cuda.get_rng_state_all() if torch.cuda.is_available() else [],
                          sampling=trainer.sampling.get_state(), shuffle=trainer.shuffle.get_state()),
                 sampling_device=trainer.device.type)
+    # Older checkpoints lack these fields and mean the local actor-critic with GAE.
+    data['metadata'].update(critic_mode=trainer.config.critic_mode,
+                            return_estimator=trainer.config.return_estimator,
+                            critic_optimized=trainer.config.critic_mode != 'none')
     return data
 
 
@@ -154,6 +158,9 @@ def resume(path, trainer):
                          'use --warm-start for a new experiment, or --sampling-scheme ' + scheme)
     if scheme == 'legacy-v1' and trainer.config.threads != 1:
         raise ValueError('Legacy exact resume requires threads=1')
+    # Checkpoints from before critic modes trained the local actor-critic with GAE.
+    saved.setdefault('critic_mode', 'local')
+    saved.setdefault('return_estimator', 'gae')
     for key, value in saved.items():
         if key not in ('total_hands', 'device', 'threads', 'sampling_scheme') and current[key] != value:
             raise ValueError(f'Resume configuration mismatch: {key}; use --warm-start for a new experiment')

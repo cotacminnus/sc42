@@ -1,0 +1,107 @@
+{
+  "schema_version": 1,
+  "name": "critic-comparison-v1",
+  "description": "Three independent from-scratch branches that differ only in --critic-mode (none, local, centralized): same seed (hence identical initial actor weights), budget, PPO settings and opponent mixture; no branch starts from another's actor. Each mode uses its default return estimator (monte-carlo for none, gae otherwise); add \"return-estimator\": \"monte-carlo\" to the critic branches to isolate the baseline from the estimator. Every branch is then evaluated on the same held-out deals.",
+  "output_root": "runs/pipelines/critic-comparison-v1",
+  "steps": [
+    {
+      "id": "no-critic",
+      "command": "train_selfplay_ppo",
+      "description": "Policy-only PPO: Monte Carlo returns as advantages (zero baseline), no value loss.",
+      "args": {
+        "from-scratch": true,
+        "learner-bid": "neural-train",
+        "learner-trump": "neural-train",
+        "learner-play": "neural-train",
+        "opponent-pool": "HHH:0.3,self-current:0.7",
+        "eval-opponents": "HHH,CHH",
+        "selection-opponent": "HHH",
+        "total-hands": 262144,
+        "rollout-decisions": 4096,
+        "ppo-epochs": 4,
+        "minibatch-size": 512,
+        "learning-rate": 0.0001,
+        "threads": 8,
+        "seed": 42,
+        "critic-mode": "none"
+      }
+    },
+    {
+      "id": "local-critic",
+      "command": "train_selfplay_ppo",
+      "description": "Actor-critic PPO with each phase network's own value head (GAE).",
+      "args": {
+        "from-scratch": true,
+        "learner-bid": "neural-train",
+        "learner-trump": "neural-train",
+        "learner-play": "neural-train",
+        "opponent-pool": "HHH:0.3,self-current:0.7",
+        "eval-opponents": "HHH,CHH",
+        "selection-opponent": "HHH",
+        "total-hands": 262144,
+        "rollout-decisions": 4096,
+        "ppo-epochs": 4,
+        "minibatch-size": 512,
+        "learning-rate": 0.0001,
+        "threads": 8,
+        "seed": 42,
+        "critic-mode": "local"
+      }
+    },
+    {
+      "id": "centralized-critic",
+      "command": "train_selfplay_ppo",
+      "description": "Actor-critic PPO with the separate privileged centralized critic (GAE).",
+      "args": {
+        "from-scratch": true,
+        "learner-bid": "neural-train",
+        "learner-trump": "neural-train",
+        "learner-play": "neural-train",
+        "opponent-pool": "HHH:0.3,self-current:0.7",
+        "eval-opponents": "HHH,CHH",
+        "selection-opponent": "HHH",
+        "total-hands": 262144,
+        "rollout-decisions": 4096,
+        "ppo-epochs": 4,
+        "minibatch-size": 512,
+        "learning-rate": 0.0001,
+        "threads": 8,
+        "seed": 42,
+        "critic-mode": "centralized"
+      }
+    },
+    {
+      "id": "evaluate-no-critic",
+      "command": "evaluate_selfplay_ppo",
+      "args": {
+        "checkpoint": "${no-critic.best}",
+        "opponents": "HHH,CHH,HHR",
+        "deals": 4096,
+        "seed": 7355608,
+        "threads": 8
+      }
+    },
+    {
+      "id": "evaluate-local-critic",
+      "command": "evaluate_selfplay_ppo",
+      "args": {
+        "checkpoint": "${local-critic.best}",
+        "opponents": "HHH,CHH,HHR",
+        "deals": 4096,
+        "seed": 7355608,
+        "threads": 8
+      }
+    },
+    {
+      "id": "evaluate-centralized-critic",
+      "command": "evaluate_selfplay_ppo",
+      "args": {
+        "checkpoint": "${centralized-critic.best}",
+        "opponents": "HHH,CHH,HHR",
+        "deals": 4096,
+        "seed": 7355608,
+        "threads": 8
+      }
+    }
+  ]
+}
