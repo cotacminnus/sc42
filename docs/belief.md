@@ -475,14 +475,30 @@ The modes compared are uniform, heuristic-likelihood and model-likelihood
 beliefs; and heuristic rollouts, model rollouts and model rollouts with a value
 leaf. Measured results are in [Model-guided results](#model-guided-results).
 
+`--rank-check` adds a **move-ranking** comparison. Calibration for the move
+actually played does not show whether a search orders the *alternatives*
+correctly, and that ordering is what chooses moves and what training on search
+advantages would learn from. The check stores every legal move's estimate in
+every mode and adds full rollouts scored in points. For each position it then
+compares a candidate mode with a reference mode on the same worlds and seeds:
+pairwise order concordance, top-1 agreement, Spearman rank correlation, and
+**ranking regret**, the reference's value of its own best move minus its value
+of the candidate's best move. `--partner-model` makes a paired-partner pair the
+guide.
+
 ### Limitations
 
 - **Imperfect guides:** a weak model is a weak guide. Model-guided search
   inherits its policy and value errors.
 - **Cost:** model rollouts cost several times more than heuristic ones, even with
   the fast path. The value leaf recovers most of the difference.
-- **Remaining PIMC flaws:** strategy fusion remains (section 7). The value leaf
-  is an information-set value, so it does not add perfect-information bias.
+- **Remaining PIMC flaws:** policy rollouts avoid the strongest form of strategy
+  fusion (section 7). The value leaf is an information-set value, so it adds no
+  perfect-information bias. But it is the **acting** seat's value, not the
+  searcher's: whenever another seat acts at the leaf, it ignores the searcher's
+  private hand ([leaf viewpoint](search_training.md#46-bias-of-the-search-target-term-by-term)).
+  The [ranking check](#move-ranking-across-guide-models) measures the combined
+  effect.
 - **Run-level settings:** leaf and likelihood apply to every model-guided agent in
   a run. To compare two leaf settings, use separate runs against a common
   baseline.
@@ -571,12 +587,36 @@ What the strength results show:
   - **Caveat:** the intervals overlap, so this split is indicative, not conclusive.
 - **Practical guidance:**
   - For decision quality, use full model rollouts with the points objective.
-  - Before relying on the value leaf to rank moves, measure leaf-vs-full-rollout
-    rank agreement across all legal moves. That is a planned addition to
-    `search_accuracy`.
+  - Do not rely on the value leaf to rank moves (next section).
   - The value leaf's present strength is cheap value estimation;
     [search in training](search_training.md) discusses what this means for
     training-time search.
+
+#### Move ranking across guide models
+
+`search_accuracy --rank-check` compares how search modes order **all** legal
+moves. It was run on the same 150 heuristic-table positions with three guides:
+play-only base, shared bid+play, and the paired-partner pair (`--partner-model`).
+The full tables, noise scale and bootstrap intervals are in
+[the ranking gate](search_training.md#6-evidence-the-move-ranking-gate). In short:
+
+- **The leaf ranks moves poorly, for every guide.** Value-leaf search picks the
+  same best move as full model rollouts (points) in only 44–50% of positions.
+  Plain heuristic rollouts manage 53–57%. The leaf's regret is also higher:
+  0.92–1.19 vs 0.78–0.89 points, where a random legal move would cost about
+  1.95.
+- **Truncation, not the objective, is the main cause.** With both scored in
+  marks, the leaf matches full model rollouts on the best move only 37–42% of
+  the time.
+- **The leaf's error is systematic, not sampling noise.** Two independent
+  full-rollout searches agree on the best move in only 58–66% of positions at
+  16 worlds. The leaf falls well below that, even though it shares the
+  reference's worlds.
+- **The guide's training doesn't change the picture.** The paired pair is
+  slightly better and the base model worst, within noise. The likely structural
+  cause is that the leaf scores positions from the acting seat's viewpoint, not
+  the searcher's
+  ([leaf viewpoint](search_training.md#46-bias-of-the-search-target-term-by-term)).
 
 ## Choosing settings
 

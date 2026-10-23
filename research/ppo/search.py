@@ -40,7 +40,8 @@ from dataclasses import dataclass
 
 from texas42.selfplay import observation_from_view
 
-from .composition import CompositeAgentFactory, CompositePolicySpec, PhasePolicySpec, PHASES, phase_network
+from .composition import (CompositeAgentFactory, CompositePolicySpec, PairedAgentFactory, PhasePolicySpec,
+                          PHASES, partner_index, phase_network)
 from .opponents import CheckpointIdentity
 
 
@@ -66,7 +67,8 @@ def model_policy_spec(identity: CheckpointIdentity, name: str = 'model') -> Comp
                                        else PhasePolicySpec('heuristic') for p in PHASES))
 
 
-def model_factories(identity: CheckpointIdentity, *, greedy: bool = True) -> tuple:
+def model_factories(identity: CheckpointIdentity, *, greedy: bool = True,
+                    partner: CheckpointIdentity | None = None) -> tuple:
     """Four seat factories playing the model, for rollouts and/or likelihoods.
 
     greedy=True: rollouts follow each player's most likely move (low variance).
@@ -74,9 +76,17 @@ def model_factories(identity: CheckpointIdentity, *, greedy: bool = True) -> tup
     seat-local streams (the model's full behaviour, more variance).
     Likelihood weighting always uses the full softmax (action_probabilities),
     whichever mode the rollouts use.
+
+    partner: a paired-partner run's second network. Each partnership's first
+    seat (0/1) then plays `identity` and its second seat (2/3) plays `partner`,
+    the same seat rule used in paired training and evaluation
+    (composition.partner_index). Both teams are modelled as the pair.
     """
     factory = CompositeAgentFactory(model_policy_spec(identity), greedy)
-    return (factory,) * 4
+    if partner is None:
+        return (factory,) * 4
+    second = CompositeAgentFactory(model_policy_spec(partner, 'model partner'), greedy)
+    return (PairedAgentFactory(factory, second),) * 4
 
 
 # Process-local network cache for value leaves: (identity, phase) -> network.
@@ -100,19 +110,26 @@ class ValueLeaf:
     The phase must be one the checkpoint trained. A value head for an untrained
     phase was never fitted. With until='trick', every stop happens in the play
     phase (or the hand has ended, and then no leaf is needed).
+
+    partner (optional, paired-partner runs): the acting seat's own network
+    answers, i.e. `identity` for a team's first seat (0/1) and `partner` for its
+    second seat (2/3), matching model_factories(partner=...).
     """
 
     identity: CheckpointIdentity
+    partner: CheckpointIdentity | None = None
 
     def __call__(self, state, observer: int) -> float:
         import torch
         from texas42.encoding import encode
         obs = observation_from_view(state.view(), ruleset_id=state.ruleset_id)
-        key = (self.identity, str(obs.phase))
+        identity = (self.identity if self.partner is None or partner_index(obs.seat) == 0
+                    else self.partner)
+        key = (identity, str(obs.phase))
         if key not in _VALUE_NETWORKS:
-            if obs.phase not in trained_phases(self.identity):
-                raise ValueError(f'Value leaf needs a trained {obs.phase} network in {self.identity.path}')
-            _VALUE_NETWORKS[key] = phase_network(PhasePolicySpec('neural', self.identity), obs.phase)
+            if obs.phase not in trained_phases(identity):
+                raise ValueError(f'Value leaf needs a trained {obs.phase} network in {identity.path}')
+            _VALUE_NETWORKS[key] = phase_network(PhasePolicySpec('neural', identity), obs.phase)
         with torch.inference_mode():
             _, value = _VALUE_NETWORKS[key](torch.tensor([encode(obs)], dtype=torch.float32))
         value = float(value.item())

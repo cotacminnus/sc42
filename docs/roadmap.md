@@ -22,7 +22,7 @@ Step numbers match the team's live planning document.
 | 4 | Common agent interface | Done | `agents/`: protocols, RandomAgent, AgentPlayer |
 | 5 | Baseline agents | V1 baselines done | HeuristicAgent, RandomAgent, ConservativeRandomAgent, HybridAgent; [phase ablations](policy_ablation.md) |
 | 6 | Self-play training | Play-only and multi-phase historical PPO implemented | [legacy baseline](ppo_training.md), [current training](multiphase_selfplay.md) |
-| 7 | Hidden-information reasoning | Belief toolkit, PIMC agent and model-guided PIMC (model rollouts, model likelihoods, value leaf) implemented, with an accuracy experiment | [belief modelling](belief.md); [search in training](search_training.md) assessed, not implemented |
+| 7 | Hidden-information reasoning | Belief toolkit, PIMC agent and model-guided PIMC (model rollouts, model likelihoods, value leaf) implemented, with an accuracy experiment | [belief modelling](belief.md); [search in training](search_training.md): theory and plan, ranking gate measured, not implemented |
 | 8 | Partnership behavior | Paired-partner training and two-spec team evaluation implemented; studies not started | [paired partners](multiphase_selfplay.md#paired-partner-training) |
 | 9 | Bidding | Neural bid-only/joint PPO and counterfactual tools implemented; strength to evaluate | [multi-phase PPO](multiphase_selfplay.md), [counterfactuals](counterfactual_bidding.md) |
 | 10 | Special contracts (Nello) | IDs reserved | `actions.py` IDs 55–57 |
@@ -123,10 +123,13 @@ Next experiments:
 - Study opponent-pool curricula and cross-play partners before introducing live
   self-play, recurrent policies or match-level PPO.
 - Deep Monte Carlo remains an alternative algorithm to compare under equal budgets.
-- Search inside training (Monte Carlo search as a policy-improvement signal) is
-  assessed in the [search-in-training feasibility study](search_training.md):
-  recommended design, collapse safeguards, measured compute and an experiment
-  protocol. Not implemented yet.
+- Search inside training (Monte Carlo search as a policy-improvement signal) has a
+  [theory, evidence and plan document](search_training.md): the theoretical case
+  (policy improvement, performance difference, all-action variance reduction,
+  regularized improvement), related methods, measured compute and an enumerated
+  plan (P0–P6). Its first gate, move ranking, has been measured for the base,
+  shared and paired guides: the current value leaf fails it, so training-time
+  search must start with full rollouts or a new leaf (P2). Not implemented yet.
 
 Short smoke tests establish mechanics, not competitive gains or generalization.
 

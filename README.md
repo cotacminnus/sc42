@@ -70,7 +70,7 @@ python -m examples.run_pipeline --config configs/pipelines/progressive_training.
 | Bid-versus-pass replay experiments | [Counterfactual bidding](docs/counterfactual_bidding.md) |
 | Exact open-hand contract/point endgames and complete-deal bid benchmarks | [Endgame oracle](docs/endgame_oracle.md) |
 | Hidden-deal beliefs, world counting/sampling, rollouts, PIMC action values, model-guided PIMC | [Belief modelling](docs/belief.md) |
-| Whether and how to use Monte Carlo search inside training (assessment, not implemented) | [Search in training](docs/search_training.md) |
+| Whether and how to use Monte Carlo search inside training (theory, ranking gate and plan; not implemented) | [Search in training](docs/search_training.md) |
 | Observations, public history and training-data validation | [Encoding](docs/encoding.md) |
 | Permanent global actions and reserved contracts | [Action space](docs/action-space.md) |
 | Process workers and evaluation profiling | [Parallel execution](docs/parallel_execution.md), [evaluation performance](docs/evaluation_performance.md) |

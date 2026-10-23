@@ -210,6 +210,79 @@ class ModelGuidedPIMCTests(unittest.TestCase):
         for row in data['rows']:
             for scores in row['beliefs'].values():
                 self.assertTrue(0.0 <= scores['p_true'] <= 1.0)
+        # Without --rank-check the output is unchanged: no per-move estimates, no ranking block.
+        self.assertNotIn('ranking', summary)
+        self.assertFalse(any('q' in mode for row in data['rows'] for mode in row['values'].values()))
+
+    def test_ranking_metrics(self):
+        from examples.search_accuracy import best_action, ranking
+        reference = {3: 1.0, 5: 3.0, 9: 2.0}
+        same = ranking({3: 10.0, 5: 30.0, 9: 20.0}, reference)  # Same order, different scale.
+        self.assertEqual((same['agree'], same['ordered'], same['top1'], same['regret']), (3, 3, 1.0, 0.0))
+        self.assertAlmostEqual(same['spearman'], 1.0)
+        reverse = ranking({3: 3.0, 5: 1.0, 9: 2.0}, reference)
+        self.assertEqual((reverse['agree'], reverse['ordered'], reverse['top1']), (0, 3, 0.0))
+        self.assertAlmostEqual(reverse['spearman'], -1.0)
+        self.assertAlmostEqual(reverse['regret'], 2.0)  # Reference loses 3.0 - 1.0 by trusting it.
+        # Pairs tied by either search carry no order information; ties go to the lowest action ID.
+        tied = ranking({3: 1.0, 5: 1.0, 9: 0.0}, reference)
+        self.assertEqual((tied['agree'], tied['ordered']), (1, 2))
+        self.assertEqual(best_action({3: 1.0, 5: 1.0, 9: 0.0}), 3)
+        self.assertAlmostEqual(tied['regret'], 2.0)
+        two = ranking({1: 0.0, 2: 1.0}, {1: 0.5, 2: 0.0})  # Spearman is undefined below 3 moves.
+        self.assertIsNone(two['spearman'])
+        self.assertAlmostEqual(two['regret'], 0.5)
+        constant = ranking({3: 0.0, 5: 0.0, 9: 0.0}, reference)  # A constant ranking has no order.
+        self.assertIsNone(constant['spearman'])
+        self.assertEqual(constant['ordered'], 0)
+
+    def test_search_accuracy_rank_check_with_pair_guide(self):
+        from examples.search_accuracy import POINTS_MODES, RANK_PAIRS, main
+        with tempfile.TemporaryDirectory() as directory, contextlib.redirect_stdout(io.StringIO()):
+            output = Path(directory) / 'rank.json'
+            main(['--model', str(self.joint), '--partner-model', str(self.legacy), '--table', 'heuristic',
+                  '--games', '2', '--positions-per-game', '1', '--samples', '2', '--rank-check',
+                  '--output', str(output), '--log-dir', str(Path(directory) / 'log')])
+            data = json.loads(output.read_text())
+        self.assertTrue(data['rank_check'])
+        self.assertEqual(data['partner_model']['sha256'], self.legacy_identity.sha256)
+        summary = data['summary']
+        self.assertEqual(set(summary['values']),  # Points modes never enter the marks accuracy table.
+                         {'heuristic-rollouts', 'model-rollouts', 'model-rollouts+value-leaf'})
+        self.assertEqual(list(summary['ranking']), [name for name, _, _ in RANK_PAIRS])
+        for s in summary['ranking'].values():
+            self.assertTrue(s['concordance'] is None or 0.0 <= s['concordance'] <= 1.0)
+            self.assertTrue(0.0 <= s['top1'] <= 1.0)
+            self.assertGreaterEqual(s['regret'], 0.0)
+        for row in data['rows']:
+            self.assertTrue(set(POINTS_MODES) <= set(row['values']))
+            moves = {action for action, _ in row['values']['model-rollouts']['q']}
+            self.assertIn(row['action_id'], moves)
+            for mode in row['values'].values():  # Every mode estimates the same legal moves.
+                self.assertEqual({action for action, _ in mode['q']}, moves)
+
+    def test_pair_aware_guide_routes_by_partner_seat(self):
+        plays = observations(8, lambda o: o.phase == 'play' and len(o.legal_action_ids) > 1)
+        pair = model_factories(self.identity, partner=self.legacy_identity)
+        first = CompositeAgentFactory(model_policy_spec(self.identity))
+        second = CompositeAgentFactory(model_policy_spec(self.legacy_identity))
+        pair_leaf, leaves = ValueLeaf(self.identity, self.legacy_identity), {}
+        seats = set()
+
+        def probabilities(factory, obs):
+            agent = factory(obs.seat, 0)
+            agent.reset(obs.seat)
+            return agent.action_probabilities(obs)
+
+        for obs in plays:
+            expected = first if obs.seat in (0, 1) else second
+            self.assertEqual(probabilities(pair[obs.seat], obs), probabilities(expected, obs))
+            state = world_state(obs, sample_world(hidden_constraints(obs), random.Random(0)))
+            identity = self.identity if obs.seat in (0, 1) else self.legacy_identity
+            single = leaves.setdefault(identity, ValueLeaf(identity))
+            self.assertAlmostEqual(pair_leaf(state, obs.seat), single(state, obs.seat), places=6)
+            seats.add(obs.seat)
+        self.assertEqual(seats, {0, 1, 2, 3})
 
 
 if __name__ == '__main__':

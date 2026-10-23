@@ -1429,6 +1429,12 @@ python -m examples.evaluate_agent_vs_agent \
 python -m examples.search_accuracy --model runs/ppo-joint-v1/checkpoints/best.pt \
   --table model --games 100 --positions-per-game 2 --samples 16 \
   --output runs/search-accuracy/model-table.json
+# Move-ranking gate: do cheap search modes rank ALL legal moves like full rollouts?
+# A paired-partner pair guides search as a pair (seats 0/1 partner-1, 2/3 partner-2)
+python -m examples.search_accuracy --model runs/study-paired/checkpoints/partner-1/best.pt \
+  --partner-model runs/study-paired/checkpoints/partner-2/best.pt \
+  --table heuristic --games 75 --positions-per-game 2 --samples 16 --rank-check \
+  --output runs/model-guided/rank-paired.json
 ```
 
 `--pimc-leaf` and `--pimc-likelihood` affect only `pimc` phases that have a
@@ -1441,7 +1447,9 @@ outcomes. It plays hands with the model (`--table model`) or Heuristic V1
 | `search_accuracy` argument | Default | Meaning |
 | --- | --- | --- |
 | `--model` | required | Trained checkpoint guiding search (trained phases neural, others heuristic) |
-| `--table` | `model` | Policy at all four seats in the evaluated hands: `model` or `heuristic` |
+| `--partner-model` | unset | Paired-partner second network: seats 0/1 play `--model`, seats 2/3 play this one, in rollouts, likelihoods and the value leaf |
+| `--rank-check` | off | Also run points-objective full rollouts (plus a replicate with independent worlds for the noise scale), store every legal move's estimate (`q`), and compare move rankings between modes: concordance, top-1, Spearman, ranking regret. See [the ranking gate](search_training.md#6-evidence-the-move-ranking-gate) |
+| `--table` | `model` | Policy at all four seats in the evaluated hands: `model` or `heuristic`. With `--partner-model`, `model` means the pair |
 | `--games`, `--positions-per-game` | `50`, `2` | Hands played and play decisions sampled from each |
 | `--samples` | `16` | Sampled deals per belief and per search |
 | `--seed` | `20261022` | Deals, table seats, position sampling and search streams |
