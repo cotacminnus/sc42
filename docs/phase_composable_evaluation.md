@@ -20,8 +20,22 @@ move in each with Heuristic V1 rollouts, and picks the best expected points; see
 is a poor objective. `--pimc-samples` (default 32) sets sampled deals per decision;
 it is recorded in the JSON `composition` block only when PIMC is used, and is a
 run setting rather than part of the stored policy identity. PIMC costs roughly
-0.1�2 s per decision, so prefer `--deals 64`�`128` with `--threads` rather than the
+0.1–2 s per decision, so prefer `--deals 64`–`128` with `--threads` rather than the
 2048-deal default.
+
+**Model-guided PIMC.** `--agent-X-pimc-model PATH` gives that agent's `pimc`
+phases a trained checkpoint to guide the search. The model plays the simulated
+continuations for every seat, with its trained phases neural and the rest
+heuristic. Two run-level options apply to model-guided phases only; plain `pimc`
+phases ignore them:
+- `--pimc-likelihood model` weights hidden deals by the model's move probabilities.
+- `--pimc-leaf value` stops rollouts after the next trick and scores the rest with
+  the model's value head, using signed marks as the objective.
+
+The guide is stored as that phase's checkpoint in the composition JSON, and the
+run options as `pimc_leaf`, `pimc_likelihood` and `pimc_epsilon`. A default
+`--agent-X-checkpoint` never turns plain PIMC into model-guided PIMC. Method,
+costs and measured accuracy are in [belief modelling](belief.md#model-guided-pimc).
 
 Neural phases use `--agent-a-PHASE-checkpoint` before `--agent-a-checkpoint` (and
 likewise for B). Missing sources fail clearly. A phase override for a non-neural

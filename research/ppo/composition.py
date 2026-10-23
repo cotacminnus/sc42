@@ -5,6 +5,7 @@ from time import perf_counter
 
 from texas42.agents import HeuristicAgent, RandomAgent, ConservativeRandomAgent
 from texas42.agents.pimc import DEFAULT_PIMC_SAMPLES, PIMCAgent
+from texas42.belief import DEFAULT_EPSILON
 from .seeds import stream_seed
 from .opponents import CheckpointIdentity
 
@@ -59,8 +60,10 @@ class PhasePolicySpec:
             raise ValueError(f'{phase}: unsupported strategy {self.strategy!r}')
         if self.strategy == 'neural' and self.checkpoint is None:
             raise ValueError(f'Neural {phase} requires a phase checkpoint or agent default checkpoint')
-        if self.strategy != 'neural' and self.checkpoint is not None:
-            raise ValueError(f'{phase}: checkpoints apply only to neural strategies')
+        # A 'pimc' checkpoint means model-guided search (research.ppo.search);
+        # without one, PIMC keeps its Heuristic V1 rollouts.
+        if self.strategy not in ('neural', 'pimc') and self.checkpoint is not None:
+            raise ValueError(f'{phase}: checkpoints apply only to neural strategies and model-guided pimc')
 
 
 @dataclass(frozen=True)
@@ -84,8 +87,13 @@ class CompositePolicySpec:
         return '[' + ' | '.join(f'{strategy_label(s.strategy)} {p.title()}' for p, s in self.items()) + ']'
 
 
-def resolve_policy_spec(name, strategies, checkpoint=None, phase_checkpoints=None):
-    """Resolve CLI phase overrides once for both console and arena composition."""
+def resolve_policy_spec(name, strategies, checkpoint=None, phase_checkpoints=None, pimc_checkpoint=None):
+    """Resolve CLI phase overrides once for both console and arena composition.
+
+    pimc_checkpoint (optional) is the model guiding every 'pimc' phase of this
+    agent. It is separate from the neural sources so that adding a default
+    --agent-X-checkpoint never silently changes how PIMC phases search.
+    """
     overrides = (None,) * 3 if phase_checkpoints is None else phase_checkpoints
     if len(strategies) != 3 or len(overrides) != 3:
         raise ValueError('Specify bid, trump and play policies in that order')
@@ -96,7 +104,9 @@ def resolve_policy_spec(name, strategies, checkpoint=None, phase_checkpoints=Non
             raise ValueError(f'{name} {phase}: checkpoint override requires neural strategy')
         path = override or checkpoint
         identity = None
-        if strategy == 'neural' and path is not None:
+        if strategy == 'pimc':
+            path = pimc_checkpoint
+        if strategy in ('neural', 'pimc') and path is not None:
             if path not in identities:
                 identities[path] = CheckpointIdentity.from_path(path)
             identity = identities[path]
@@ -117,7 +127,16 @@ def phase_network(spec, phase):
 
 
 class _NeuralPolicy:
-    """A single frozen phase network with a seat-local sampling stream."""
+    """A single frozen phase network with a seat-local sampling stream.
+
+    Greedy decisions take the masked argmax of the policy logits directly.
+    This is the same choice as ActorCritic.select(greedy=True), whose
+    Categorical logits are those logits minus a constant (log-normalization),
+    so the argmax is unchanged. Skipping the distribution object makes a
+    decision several times faster, which matters when the policy runs inside
+    Monte Carlo search (thousands of calls per decision). Stochastic decisions
+    still use select() and this seat's generator, exactly as before.
+    """
     def __init__(self, network, seed, greedy):
         import torch
         self.network, self.greedy = network, greedy
@@ -126,25 +145,53 @@ class _NeuralPolicy:
     def reset(self, seat):
         self.seat = seat
 
-    def act(self, obs):
+    def _masked_logits(self, obs):
+        """(features, legal mask, legal-masked policy logits) for one observation."""
         import torch
         from texas42.encoding import encode
+        features = torch.tensor([encode(obs)], dtype=torch.float32)
+        mask = torch.tensor([obs.action_mask], dtype=torch.bool)
+        logits, _ = self.network(features)
+        return features, mask, logits.masked_fill(~mask, -torch.inf)
+
+    def act(self, obs):
+        import torch
         if obs.seat != self.seat:
             raise RuntimeError('Reset for the acting seat before use')
         with torch.inference_mode():
-            features = torch.tensor([encode(obs)], dtype=torch.float32)
-            mask = torch.tensor([obs.action_mask], dtype=torch.bool)
-            actions, _, _ = self.network.select(features, mask, greedy=self.greedy, generator=self.generator)
+            features, mask, logits = self._masked_logits(obs)
+            if self.greedy:
+                return int(logits.argmax(-1).item())
+            actions, _, _ = self.network.select(features, mask, greedy=False, generator=self.generator)
         return int(actions.item())
+
+    def action_probabilities(self, obs):
+        """Pure ActionProbabilities query: the legal softmax of the policy logits.
+
+        This is the distribution stochastic act() samples from, regardless of
+        the greedy setting, so belief weighting sees the model's full
+        preference rather than only its top choice. It consumes no RNG and
+        changes no state (agents.base.ActionProbabilities contract).
+        """
+        import torch
+        if obs.seat != self.seat:
+            raise RuntimeError('Reset for the acting seat before use')
+        with torch.inference_mode():
+            _, _, logits = self._masked_logits(obs)
+            # Double precision so the legal probabilities sum to 1 within 1e-12.
+            probabilities = torch.softmax(logits.double(), -1)[0]
+        return {action_id: float(probabilities[action_id]) for action_id in obs.legal_action_ids}
 
 
 class CompositeAgent:
     """Independent delegate memory per seat and phase; reset does not rewind RNGs.
 
-    pimc_samples configures PIMC delegates only. It is a factory/agent setting,
-    not part of CompositePolicySpec, so stored composite identities are unchanged.
+    The pimc_* settings configure PIMC delegates only (see _pimc_delegate). They
+    are factory/agent settings, not part of CompositePolicySpec, so stored
+    composite identities are unchanged.
     """
-    def __init__(self, spec, seed, *, greedy=True, pimc_samples=DEFAULT_PIMC_SAMPLES):
+    def __init__(self, spec, seed, *, greedy=True, pimc_samples=DEFAULT_PIMC_SAMPLES,
+                 pimc_leaf='none', pimc_likelihood='uniform', pimc_epsilon=DEFAULT_EPSILON):
         self.spec, self.seat = spec, None
         self.delegates = {}
         # Match HybridAgent's documented streams for existing non-neural variants.
@@ -159,7 +206,8 @@ class CompositeAgent:
             elif policy.strategy == 'conservative':
                 delegate = ConservativeRandomAgent(phase_seed)
             elif policy.strategy == 'pimc':
-                delegate = PIMCAgent(phase_seed, samples=pimc_samples)
+                delegate = _pimc_delegate(policy, phase_seed, greedy, pimc_samples, pimc_leaf,
+                                          pimc_likelihood, pimc_epsilon)
             else:
                 delegate = RandomAgent(phase_seed)
             self.delegates[phase] = delegate
@@ -177,6 +225,20 @@ class CompositeAgent:
             raise ValueError(f'{self.spec.name} selected an illegal {obs.phase} action: {action!r}')
         return action
 
+    def action_probabilities(self, obs):
+        """Pure ActionProbabilities query, answered by the acting phase's delegate.
+
+        Neural, heuristic, random and conservative delegates implement it; a
+        PIMC delegate does not (its decisions consume RNG), so a composition
+        with PIMC phases cannot serve as a belief likelihood model.
+        """
+        if obs.seat != self.seat:
+            raise RuntimeError('Reset for the acting seat before use')
+        query = getattr(self.delegates[obs.phase], 'action_probabilities', None)
+        if query is None:
+            raise TypeError(f'{self.spec.name} {obs.phase} policy does not provide action probabilities')
+        return query(obs)
+
     def would_pass_if_allowed(self, obs):
         if obs.phase != 'bid':
             raise ValueError('Expected a bidding observation')
@@ -184,14 +246,60 @@ class CompositeAgent:
         return diagnostic(obs) if diagnostic is not None else None
 
 
+PIMC_LEAVES = ('none', 'value')
+PIMC_LIKELIHOODS = ('uniform', 'model')
+
+
+def _pimc_delegate(policy, seed, greedy, samples, leaf, likelihood, epsilon):
+    """Build one PIMC phase delegate (texas42.agents.pimc.PIMCAgent).
+
+    Without a checkpoint: the original heuristic-guided PIMC (Heuristic V1
+    rollouts, uniform belief, expected points). The leaf/likelihood settings
+    apply only to model-guided PIMC and are ignored here, so one run can compare
+    model-guided and plain PIMC agents.
+
+    With a checkpoint (research.ppo.search):
+      rollouts    the model plays every seat's continuation (greedy unless the
+                  evaluation runs with --stochastic-neural);
+      likelihood  'model': hidden deals weighted by the model's move
+                  probabilities; 'uniform': all consistent deals equal;
+      leaf        'value': rollouts stop after the next trick and the model's
+                  value head scores the rest, so the objective becomes signed
+                  marks; 'none': full-hand rollouts, expected points.
+    """
+    if policy.checkpoint is None:
+        return PIMCAgent(seed, samples=samples)
+    from .search import ValueLeaf, model_factories
+    models = model_factories(policy.checkpoint, greedy=greedy)
+    value = leaf == 'value'
+    return PIMCAgent(seed, samples=samples, rollout_policies=models,
+                     likelihood_policies=models if likelihood == 'model' else None, epsilon=epsilon,
+                     until='trick' if value else 'hand',
+                     leaf_evaluator=ValueLeaf(policy.checkpoint) if value else None,
+                     objective='marks' if value else 'points')
+
+
 @dataclass(frozen=True)
 class CompositeAgentFactory:
     spec: CompositePolicySpec
     greedy: bool = True
     pimc_samples: int = DEFAULT_PIMC_SAMPLES
+    pimc_leaf: str = 'none'
+    pimc_likelihood: str = 'uniform'
+    pimc_epsilon: float = DEFAULT_EPSILON
+
+    def __post_init__(self):
+        if self.pimc_leaf not in PIMC_LEAVES:
+            raise ValueError(f'pimc_leaf must be one of {PIMC_LEAVES}')
+        if self.pimc_likelihood not in PIMC_LIKELIHOODS:
+            raise ValueError(f'pimc_likelihood must be one of {PIMC_LIKELIHOODS}')
+        if not 0.0 <= self.pimc_epsilon <= 1.0:
+            raise ValueError('pimc_epsilon must be between 0 and 1')
 
     def prepare(self):
-        identities = {s.checkpoint for _, s in self.spec.items() if s.strategy == 'neural'}
+        # Every checkpoint this agent loads: neural phases and PIMC guide models.
+        identities = {s.checkpoint for _, s in self.spec.items()
+                      if s.strategy in ('neural', 'pimc') and s.checkpoint is not None}
         if identities:
             import torch
             # Numerical inference threads are independent of arena process workers.
@@ -204,9 +312,16 @@ class CompositeAgentFactory:
         for phase, policy in self.spec.items():
             if policy.strategy == 'neural':
                 phase_network(policy, phase)
+            elif policy.strategy == 'pimc' and policy.checkpoint is not None:
+                from .search import model_policy_spec, trained_phases
+                model_policy_spec(policy.checkpoint)  # The guide must have a trained phase.
+                if self.pimc_leaf == 'value' and 'play' not in trained_phases(policy.checkpoint):
+                    raise ValueError(f'Value leaf needs a trained play network in {policy.checkpoint.path}')
 
     def __call__(self, seat, seed):
-        return CompositeAgent(self.spec, seed, greedy=self.greedy, pimc_samples=self.pimc_samples)
+        return CompositeAgent(self.spec, seed, greedy=self.greedy, pimc_samples=self.pimc_samples,
+                              pimc_leaf=self.pimc_leaf, pimc_likelihood=self.pimc_likelihood,
+                              pimc_epsilon=self.pimc_epsilon)
 
 
 def comparison_metadata(a, b):
@@ -255,7 +370,8 @@ def evaluate_matchups(factory, opponents, *, neural=False, performance=None, **k
 
 
 def evaluate_composed(a, b, *, a_partner=None, b_partner=None, stochastic=False,
-                      pimc_samples=DEFAULT_PIMC_SAMPLES, performance=None, **kwargs):
+                      pimc_samples=DEFAULT_PIMC_SAMPLES, pimc_leaf='none', pimc_likelihood='uniform',
+                      pimc_epsilon=DEFAULT_EPSILON, performance=None, **kwargs):
     """Canonical two-agent composition API, backed by the paired arena.
 
     a_partner/b_partner optionally give that team's second seat (2 or 3) its own
@@ -263,13 +379,17 @@ def evaluate_composed(a, b, *, a_partner=None, b_partner=None, stochastic=False,
     None keeps the original mirrored team: one specification for both seats.
     """
     specs = tuple(s for s in (a, b, a_partner, b_partner) if s is not None)
-    neural = any(s.strategy == 'neural' for spec in specs for _, s in spec.items())
+    # Neural inference (including model-guided PIMC) pins PyTorch threads.
+    neural = any(s.strategy == 'neural' or (s.strategy == 'pimc' and s.checkpoint is not None)
+                 for spec in specs for _, s in spec.items())
+    settings = dict(pimc_samples=pimc_samples, pimc_leaf=pimc_leaf, pimc_likelihood=pimc_likelihood,
+                    pimc_epsilon=pimc_epsilon)
 
     def team(spec, partner):
-        first = CompositeAgentFactory(spec, not stochastic, pimc_samples)
+        first = CompositeAgentFactory(spec, not stochastic, **settings)
         if partner is None:
             return first
-        return PairedAgentFactory(first, CompositeAgentFactory(partner, not stochastic, pimc_samples))
+        return PairedAgentFactory(first, CompositeAgentFactory(partner, not stochastic, **settings))
 
     telemetry = {}
     report = evaluate_matchups(team(a, a_partner), ((b.name, team(b, b_partner)),), neural=neural,

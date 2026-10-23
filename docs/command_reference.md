@@ -1415,6 +1415,38 @@ A PIMC decision takes roughly 0.1–2 s, and one team makes about 14 per hand, s
 start with small `--deals` and raise `--pimc-samples` only when time allows. See
 [belief modelling](belief.md) for the method and its limitations.
 
+#### Model-guided PIMC
+
+```bash
+# A trained model plays the rollouts; value leaf + model-weighted beliefs; vs plain PIMC
+python -m examples.evaluate_agent_vs_agent \
+  --agent-a-trump pimc --agent-a-play pimc \
+  --agent-a-pimc-model runs/ppo-joint-v1/checkpoints/best.pt \
+  --pimc-leaf value --pimc-likelihood model \
+  --agent-b-trump pimc --agent-b-play pimc \
+  --pimc-samples 16 --deals 128 --threads 0
+# Estimation accuracy and cost of each search mode (beliefs, values, timing)
+python -m examples.search_accuracy --model runs/ppo-joint-v1/checkpoints/best.pt \
+  --table model --games 100 --positions-per-game 2 --samples 16 \
+  --output runs/search-accuracy/model-table.json
+```
+
+`--pimc-leaf` and `--pimc-likelihood` affect only `pimc` phases that have a
+`--agent-X-pimc-model`; agent B above stays plain PIMC. `search_accuracy` scores
+model-guided and heuristic search against the true hidden hands and the realized
+outcomes. It plays hands with the model (`--table model`) or Heuristic V1
+(`--table heuristic`) at every seat. See
+[model-guided PIMC](belief.md#model-guided-pimc).
+
+| `search_accuracy` argument | Default | Meaning |
+| --- | --- | --- |
+| `--model` | required | Trained checkpoint guiding search (trained phases neural, others heuristic) |
+| `--table` | `model` | Policy at all four seats in the evaluated hands: `model` or `heuristic` |
+| `--games`, `--positions-per-game` | `50`, `2` | Hands played and play decisions sampled from each |
+| `--samples` | `16` | Sampled deals per belief and per search |
+| `--seed` | `20261022` | Deals, table seats, position sampling and search streams |
+| `--output` | unset | JSON with per-position rows and the summary; `--log-dir` also gets a per-position CSV |
+
 #### Recipe 12: held-out phase ablations
 
 Prerequisites: the trained checkpoints in each comparison, including all requested
@@ -1480,6 +1512,10 @@ optimizer/device or trainability flag here.
 | `--agent-{a,b}-partner-{bid,trump,play}` | Same choices as the first seat | First seat's strategy | Second-seat (2/3) strategy. Any partner flag turns on a two-spec team; without them both seats use one spec, as before. |
 | `--agent-{a,b}-partner-checkpoint`, `--agent-{a,b}-partner-{phase}-checkpoint` | Checkpoint path | First seat's sources | Second-seat neural sources, e.g. partner-2 of a paired run. Partner phase override, then partner default, then (only if neither is given) the first seat's sources. |
 | `--pimc-samples` | Integer > 0 | `32` | Sampled hidden deals per PIMC decision (every deal when few remain). Cost grows linearly; recorded in JSON only when PIMC is used. |
+| `--agent-{a,b}-pimc-model` | Checkpoint path | Unset | Model guiding that agent's `pimc` phases: it plays every seat's rollouts (trained phases neural, others heuristic). Partner seats inherit it. Separate from `--agent-X-checkpoint` on purpose. |
+| `--pimc-leaf` | `none`, `value` | `none` | Model-guided `pimc` only: `value` stops rollouts after the next trick and scores the rest with the model's value head (signed-marks objective). |
+| `--pimc-likelihood` | `uniform`, `model` | `uniform` | Model-guided `pimc` only: `model` weights hidden deals by the model's probabilities for the observed moves. |
+| `--pimc-epsilon` | Float in [0, 1] | `0.1` | Likelihood softening for unexpected moves (with `--pimc-likelihood model`). |
 | `--deals` | Integer > 0 | `2048` | Complete duplicate groups; two games/group. |
 | `--seed` | Integer | `42` | Arena deal/agent seed; choose independent final seeds. |
 | `--bootstrap-seed` | Integer | `0` | Separate resampling seed. |

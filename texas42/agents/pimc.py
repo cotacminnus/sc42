@@ -25,7 +25,8 @@ from __future__ import annotations
 
 import random
 
-from ..belief import DEFAULT_ENUMERATE_BELOW, ActionEvaluation, evaluate_actions
+from ..belief import (DEFAULT_ENUMERATE_BELOW, DEFAULT_EPSILON, STOP_CONDITIONS, ActionEvaluation,
+                      evaluate_actions)
 from ..phases import Phase
 from ..selfplay import Observation
 from .hybrid import variant_factory
@@ -49,10 +50,29 @@ class PIMCAgent:
     `last_evaluation` keeps the most recent texas42.belief.ActionEvaluation (or
     None) for diagnostics: per-move expected points, standard errors, world
     counts. It is informational only and never affects later decisions.
+
+    Model-guided search (optional; all default to the original heuristic agent):
+      rollout_policies     four arena factories that play the simulated
+                           continuations. None = Heuristic V1 for every seat.
+                           A trained model here makes rollouts predict how that
+                           model would actually continue (policy evaluation).
+      likelihood_policies  four factories whose ActionProbabilities weight the
+                           hidden deals by how well they explain the observed
+                           bids and plays (texas42.belief.policy_likelihood).
+                           None = all consistent deals equally likely.
+      epsilon              likelihood softening for unexpected moves.
+      until, leaf_evaluator, objective
+                           truncated search: stop each rollout early ("trick")
+                           and let leaf_evaluator estimate the rest, in the
+                           objective's units (see evaluate_actions).
+    texas42 stays dependency-free: neural factories and value leaves are
+    injected by research.ppo.composition / research.ppo.search.
     """
 
     def __init__(self, seed: int | None = None, *, samples: int = DEFAULT_PIMC_SAMPLES,
-                 enumerate_below: int = DEFAULT_ENUMERATE_BELOW):
+                 enumerate_below: int = DEFAULT_ENUMERATE_BELOW, rollout_policies=None,
+                 likelihood_policies=None, epsilon: float = DEFAULT_EPSILON, until: str = 'hand',
+                 leaf_evaluator=None, objective: str = 'points'):
         if type(samples) is not int or samples < 1:
             raise ValueError('samples must be a positive integer')
         if type(enumerate_below) is not int or enumerate_below < 0:
@@ -61,9 +81,21 @@ class PIMCAgent:
         self.enumerate_below = enumerate_below
         self._rng = random.Random(seed)
         self._heuristic = HeuristicAgent()
-        # Rollout continuations: picklable arena factories, Heuristic V1 in all
-        # phases and seats. Fresh agents are built inside every rollout.
-        self._rollout_policies = (variant_factory('HHH'),) * 4
+        if until not in STOP_CONDITIONS:
+            raise ValueError(f'until must be one of {STOP_CONDITIONS}')
+        if objective not in ('points', 'marks'):
+            raise ValueError("objective must be 'points' or 'marks'")
+        if objective == 'marks' and until != 'hand' and leaf_evaluator is None:
+            raise ValueError('Stopping rollouts early with the marks objective needs a leaf_evaluator')
+        for policies in (rollout_policies, likelihood_policies):
+            if policies is not None and len(policies) != 4:
+                raise ValueError('Provide one policy factory per seat')
+        # Rollout continuations: picklable arena factories. Default Heuristic V1
+        # in all phases and seats. Fresh agents are built inside every rollout.
+        self._rollout_policies = tuple(rollout_policies) if rollout_policies else (variant_factory('HHH'),) * 4
+        self._likelihood_policies = tuple(likelihood_policies) if likelihood_policies else None
+        self.epsilon, self.until, self.objective = epsilon, until, objective
+        self._leaf_evaluator = leaf_evaluator
         self.seat: int | None = None
         self.last_evaluation: ActionEvaluation | None = None
 
@@ -86,7 +118,10 @@ class PIMCAgent:
             self.last_evaluation = None
             return obs.legal_action_ids[0]
         evaluation = evaluate_actions(obs, rng=self._rng, rollout_policies=self._rollout_policies,
-                                      samples=self.samples, enumerate_below=self.enumerate_below)
+                                      samples=self.samples, enumerate_below=self.enumerate_below,
+                                      likelihood_policies=self._likelihood_policies, epsilon=self.epsilon,
+                                      until=self.until, leaf_evaluator=self._leaf_evaluator,
+                                      objective=self.objective)
         self.last_evaluation = evaluation
         return evaluation.best_action_id
 

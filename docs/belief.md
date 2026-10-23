@@ -31,6 +31,7 @@ tools. No learning code is involved.
 - [The ActionProbabilities agent query](#the-actionprobabilities-agent-query)
 - [Measured behaviour](#measured-behaviour)
 - [The PIMC agent](#the-pimc-agent)
+- [Model-guided PIMC](#model-guided-pimc)
 - [Choosing settings](#choosing-settings)
 - [Limitations and next steps](#limitations-and-next-steps)
 - [Research background](#research-background)
@@ -391,6 +392,191 @@ To compare it with heuristic or trained policies, use the `pimc` trump/play
 strategy of `examples.evaluate_agent_vs_agent` ([composition](phase_composable_evaluation.md),
 [commands](command_reference.md#belief-based-pimc-trump-and-play)), with
 `--pimc-samples` and modest `--deals`. Expect a few seconds per hand.
+
+## Model-guided PIMC
+
+Plain PIMC models every player as Heuristic V1. Its estimates are only as good
+as that assumption. A trained checkpoint can replace the heuristic in three
+independent places (`research/ppo/search.py`, wired through the `pimc`
+composition strategy):
+
+| Option | What the model does | Theory | Flag |
+| --- | --- | --- | --- |
+| Rollout policy | Plays every seat's simulated continuation | The estimate becomes Q<sub>π</sub>(s, a) for the model's policy π: "play a, then everyone plays like the model". Choosing the best such action is one step of policy improvement (Tesauro & Galperin 1996; Furtak & Buro 2013). | `--agent-X-pimc-model PATH` |
+| Likelihood model | Weights hidden deals by P(observed move \| that player's view in the deal) | Policy-Based Inference (Rebstock et al. 2019) with a learned, stochastic policy | `--pimc-likelihood model` |
+| Value leaf | Rollouts stop after the next trick; the value head estimates the rest | AlphaZero-style truncated search: a learned evaluation replaces the long tail of each rollout | `--pimc-leaf value` |
+
+### Data flow
+
+```text
+Observation ── build_belief(likelihood = model softmax, optional) ──> weighted worlds
+  for each world, each legal move a (same rollout seed for every a):
+    world_state ──> simulate(choices=(a,), policies = model at all four seats,
+                             until = 'hand' | 'trick')
+      hand finished ──> value = signed marks (or points)
+      stopped early ──> value = ValueLeaf(state, observer)
+          = value head of the acting seat's network on ITS observation,
+            sign-flipped if that seat is on the other team
+  estimate(a) = belief-weighted mean; best move = argmax
+```
+
+- **Model as a player:** `search.model_policy_spec` turns a checkpoint into a full
+  player. Trained phases are neural; the rest are Heuristic V1. For example, the
+  study's shared model plays neural bid and play and heuristic trump, exactly as
+  in training.
+- **Rollout determinism:** model rollouts are greedy by default, which gives low
+  variance. With `--stochastic-neural` they sample the model's softmax from
+  seeded, seat-local streams.
+- **Likelihood uses the full distribution:** belief weighting always uses the
+  model's full softmax (`action_probabilities`), whichever rollout mode is set.
+
+### Objective
+
+- **Without a value leaf:** expected points, as in plain PIMC.
+- **With `--pimc-leaf value`:** signed marks (`evaluate_actions(objective='marks')`).
+  - PPO value heads predict the acting team's final signed marks, so the leaf
+    and the rollout outcomes share units.
+  - Marks also suit trump decisions better than points, because they include
+    whether the contract is made.
+
+### Privacy
+
+The value leaf builds another seat's `Observation` inside a hypothetical world.
+That is a guess derived from public information, not the real hand, which keeps
+the search honest. It is also exactly the input the network saw in training, so
+the value is an information-set value rather than a perfect-information one.
+
+### Inference speed and validity
+
+- **Fast greedy path:** greedy neural decisions now take the masked argmax of the
+  logits directly instead of building a `Categorical` distribution. This
+  measured about 6× faster (≈160 µs vs ≈960 µs per call on one CPU thread), with
+  identical actions on 4,800 real observations and in the regression test.
+  Stochastic decisions are unchanged.
+- **Probabilities in double precision:** `action_probabilities` computes the
+  softmax in 64-bit precision.
+- **Relaxed validity check:** `policy_likelihood`'s check now allows a 1e-6
+  rounding tolerance, appropriate for learned policies.
+
+### Measuring estimation accuracy
+
+`python -m examples.search_accuracy --model PATH` plays hands with a fixed table
+(the model at all seats, or `--table heuristic`) and samples play decisions. For
+each one it scores:
+
+- **Belief accuracy:** the probability on the true owner of each unseen domino.
+  Hidden hands come from the documented privileged label channel and are never
+  passed to search.
+- **Value accuracy:** the estimate for the move actually played vs. the realized
+  signed marks.
+- **Cost:** per-search time.
+
+The modes compared are uniform, heuristic-likelihood and model-likelihood
+beliefs; and heuristic rollouts, model rollouts and model rollouts with a value
+leaf. Measured results are in [Model-guided results](#model-guided-results).
+
+### Limitations
+
+- **Imperfect guides:** a weak model is a weak guide. Model-guided search
+  inherits its policy and value errors.
+- **Cost:** model rollouts cost several times more than heuristic ones, even with
+  the fast path. The value leaf recovers most of the difference.
+- **Remaining PIMC flaws:** strategy fusion remains (section 7). The value leaf
+  is an information-set value, so it does not add perfect-information bias.
+- **Run-level settings:** leaf and likelihood apply to every model-guided agent in
+  a run. To compare two leaf settings, use separate runs against a common
+  baseline.
+
+### Model-guided results
+
+**Setup:**
+- Guide model: the shared bid+play study model (`runs/study-shared`, neural bid
+  and play, heuristic trump, 262,144 training hands, one seed).
+- 16 sampled worlds per search.
+- Measured on one Windows machine.
+- These are single-model, single-seed results. Treat them as evidence about this
+  checkpoint, not general claims.
+
+**Estimation accuracy** (`examples.search_accuracy`): 200 play decisions from 100
+hands per table.
+
+*Belief accuracy*: P(true owner) is the mean probability on each unseen domino's
+true owner (higher is better). Log-loss uses 1% uniform smoothing.
+
+| Belief | P(true owner), model table | Log-loss | ESS | P(true owner), heuristic table | Log-loss | ESS |
+| --- | --- | --- | --- | --- | --- | --- |
+| Uniform (exact) | 0.403 | **0.965** | – | 0.377 | **1.016** | – |
+| Heuristic likelihood | 0.459 | 1.474 | 4.6 | **0.497** | 1.272 | 7.0 |
+| Model likelihood | **0.551** | 1.079 | 4.8 | 0.429 | 1.474 | 5.5 |
+
+*Value estimates*: for the move actually played, vs. the realized signed marks.
+Correlation is the comparable column; RMSE includes outcome noise.
+
+| Rollouts | Corr. (model table) | RMSE | s/search | Corr. (heuristic table) | RMSE | s/search |
+| --- | --- | --- | --- | --- | --- | --- |
+| Heuristic, full hand | 0.584 | 0.817 | 0.148 | **0.625** | 0.799 | 0.160 |
+| Model, full hand | 0.588 | 0.814 | 0.576 | 0.607 | 0.815 | 0.630 |
+| Model + value leaf | **0.597** | 0.803 | **0.123** | 0.542 | 0.862 | 0.145 |
+
+Readings:
+- **A matching likelihood model is what makes beliefs more accurate.** Each
+  weighted belief is most accurate when its likelihood model matches the table:
+  model likelihood for the model table, heuristic likelihood for the heuristic
+  table.
+- **Weighted beliefs are overconfident at 16 samples.** With an effective sample
+  size of about 5, they put more mass on the truth on average but sometimes miss
+  it entirely. That is why uniform has the best log-loss. More samples or softer
+  likelihoods (higher ε) would help.
+- **Value accuracy also follows the table:** model rollouts and the value leaf
+  are best on the model table, heuristic rollouts on the heuristic table.
+- **The value leaf is fast and calibrated:** it is about 4.7× faster than full
+  model rollouts, with similar calibration on the model table.
+
+**Playing strength** (`evaluate_agent_vs_agent`): 128 duplicate deals (256 games)
+per row, seed 20261022, heuristic bidding for every PIMC agent; A's signed
+marks/hand with 95% paired bootstrap CI.
+
+| A | B | A marks/hand | A win rate |
+| --- | --- | --- | --- |
+| Model-guided PIMC (full rollouts) | Plain PIMC | +0.094 [−0.016, +0.203] | 54.7% |
+| Model-guided PIMC + value leaf | Plain PIMC | **−0.141** [−0.250, −0.031] | 43.4% |
+| Model-guided PIMC + value leaf + model likelihood | Plain PIMC | **−0.133** [−0.234, −0.031] | 43.8% |
+| Model-guided PIMC (full rollouts) | Shared model | **+0.340** [+0.234, +0.449] | 66.8% |
+| Model-guided PIMC + value leaf | Shared model | +0.059 [−0.059, +0.176] | 53.1% |
+| Plain PIMC | Shared model | **+0.160** [+0.047, +0.266] | 57.8% |
+
+What the strength results show:
+- **Full model rollouts are the strongest configuration.**
+  - They beat the guide model itself by +0.34 marks/hand, about twice plain
+    PIMC's margin over the same model (+0.16).
+  - Head-to-head they lead plain PIMC by +0.094, but that interval includes 0 at
+    128 deals.
+- **The value leaf loses strength, despite accurate value estimates for the
+  move actually played.** An objective ablation (64 deals, scratch script
+  recorded in `runs/model-guided/objective-ablation.json`) separates the two
+  changes the leaf mode makes:
+
+  | Model-guided PIMC vs plain PIMC | Marks/hand |
+  | --- | --- |
+  | Full rollouts, points objective | +0.094 [−0.016, +0.203] (128 deals) |
+  | Full rollouts, **marks** objective | +0.031 [−0.125, +0.188] (64 deals) |
+  | Value leaf, marks objective | −0.141 [−0.250, −0.031] (128 deals) |
+
+  - **Objective:** the point estimates suggest switching to marks costs a little.
+    Marks mostly reflect whether the contract is made, so they separate play moves
+    less sharply than points.
+  - **Leaf:** truncating with the value head costs more. A value head can be
+    calibrated on average yet rank *alternative* moves poorly. It was trained
+    only as PPO's baseline on the moves the policy actually takes.
+  - **Caveat:** the intervals overlap, so this split is indicative, not conclusive.
+- **Practical guidance:**
+  - For decision quality, use full model rollouts with the points objective.
+  - Before relying on the value leaf to rank moves, measure leaf-vs-full-rollout
+    rank agreement across all legal moves. That is a planned addition to
+    `search_accuracy`.
+  - The value leaf's present strength is cheap value estimation;
+    [search in training](search_training.md) discusses what this means for
+    training-time search.
 
 ## Choosing settings
 

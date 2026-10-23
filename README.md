@@ -69,7 +69,8 @@ python -m examples.run_pipeline --config configs/pipelines/progressive_training.
 | Frozen heuristic and random/conservative variants | [Heuristic V1](docs/simpleheuristic.md), [policy ablations](docs/policy_ablation.md) |
 | Bid-versus-pass replay experiments | [Counterfactual bidding](docs/counterfactual_bidding.md) |
 | Exact open-hand contract/point endgames and complete-deal bid benchmarks | [Endgame oracle](docs/endgame_oracle.md) |
-| Hidden-deal beliefs, world counting/sampling, rollouts, PIMC action values | [Belief modelling](docs/belief.md) |
+| Hidden-deal beliefs, world counting/sampling, rollouts, PIMC action values, model-guided PIMC | [Belief modelling](docs/belief.md) |
+| Whether and how to use Monte Carlo search inside training (assessment, not implemented) | [Search in training](docs/search_training.md) |
 | Observations, public history and training-data validation | [Encoding](docs/encoding.md) |
 | Permanent global actions and reserved contracts | [Action space](docs/action-space.md) |
 | Process workers and evaluation profiling | [Parallel execution](docs/parallel_execution.md), [evaluation performance](docs/evaluation_performance.md) |
@@ -90,7 +91,7 @@ python -m examples.run_pipeline --config configs/pipelines/progressive_training.
 | `texas42/belief.py` | Hidden-deal constraints, exact counting/sampling, rollouts and expected action values |
 | `texas42/training.py`, `encoding.py`, `actions.py` | Versioned ID-based views, 387 features and legal global actions |
 | `texas42/openspiel.py` | Optional adapter depending on the native engine |
-| `research/ppo/` | Optional training (local or centralized critic), oracle label datasets, checkpoints and frozen policy composition |
+| `research/ppo/` | Optional training (local or centralized critic), oracle label datasets, checkpoints, frozen policy composition and model-guided search (`search.py`) |
 | `examples/` | Runnable game, training and evaluation commands, including the JSON pipeline runner |
 | `configs/pipelines/` | Example JSON experiment pipelines |
 | `tests/`, `docs/` | Deterministic unittest coverage and technical documentation |
