@@ -129,6 +129,16 @@ class SelfPlayEnv:
         state = self._session.hand
         return observation_from_view(state.view(), ruleset_id=self.ruleset_id)
 
+    def remaining_hands(self) -> tuple[tuple[int, ...], ...]:
+        """PRIVILEGED: every seat's remaining domino IDs, for critic/label runners only.
+
+        Never pass this to an Agent or into an Observation. Ordinary policies,
+        AgentPlayer and the arena do not call it.
+        """
+        if self._session is None or self._session.terminated:
+            raise RuntimeError("Call reset() before reading privileged state")
+        return tuple(tuple(sorted(d.id for d in hand)) for hand in self._session.hand.hands)
+
     def step(self, action_id: int) -> StepResult:
         """Apply one legal global ID. Invalid actions leave state unchanged."""
         if self._collection_failed:

@@ -57,8 +57,8 @@ def team_label(spec, partner):
     return spec.label() if partner is None else f'{spec.label()} + partner {partner.label()}'
 
 
-@record_output
-def main(argv=None):
+def build_parser():
+    """The command's argparse definition (also used by examples.run_pipeline to validate)."""
     p = argparse.ArgumentParser(description=__doc__)
     for agent in ('a', 'b'):
         p.add_argument(f'--agent-{agent}-checkpoint', type=Path)
@@ -78,6 +78,12 @@ def main(argv=None):
                         'cost grows linearly, so pair large values with few --deals')
     p.add_argument('--episode', choices=('hand', 'match'), default='hand')
     p.add_argument('--target-marks', type=int, default=7)
+    return p
+
+
+@record_output
+def main(argv=None):
+    p = build_parser()
     args = p.parse_args(argv)
     started = perf_counter()
     if args.pimc_samples < 1:

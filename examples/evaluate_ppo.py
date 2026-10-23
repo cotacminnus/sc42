@@ -15,14 +15,20 @@ from research.ppo.opponents import evaluation_opponents
 from texas42.agents import VARIANTS
 
 
-@record_output
-def main(argv=None):
+def build_parser():
+    """The command's argparse definition (also used by examples.run_pipeline to validate)."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--checkpoint', required=True, type=Path)
     opponents = parser.add_mutually_exclusive_group()
     opponents.add_argument('--opponent', choices=VARIANTS)
     opponents.add_argument('--opponents', help='Comma-separated validation variants')
     add_evaluation_arguments(parser)
+    return parser
+
+
+@record_output
+def main(argv=None):
+    parser = build_parser()
     args = parser.parse_args(argv)
     try:
         resolve_workers(args.threads, args.deals)

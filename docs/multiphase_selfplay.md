@@ -6,10 +6,13 @@ play-only `train_ppo` remains a separate reproducible baseline; see
 [legacy PPO](ppo_training.md). Neither command trains multi-hand matches.
 
 This guide explains mechanics and interpretation. The
-[command reference](command_reference.md#multi-phase-ppo-commands) owns every flag,
+[command reference](command_reference.md#multi-phase-trainer-train_selfplay_ppo) owns every flag,
 default, prerequisite and copy-ready recipe. Start with original play training,
-then choose a phase experiment, train against fixed or historical opponents, and
+or [from random weights](#from-scratch-training-and-current-policy-self-play), then
+choose a phase experiment, train against fixed or historical opponents, and
 finish with independent [controlled evaluation](phase_composable_evaluation.md).
+Multi-stage curricula (for example play → bidding → trump → joint) can be run
+from one JSON file with [experiment pipelines](experiment_pipelines.md).
 Rules, 387 actor-relative features, 58 global actions, schema-5 data and partnership
 signed-mark rewards remain unchanged. Ordinary actors and critics see only their
 acting player's immutable observation; neither gets opponent hands.
@@ -69,6 +72,44 @@ bitwise equality after every collection/update cycle. A mismatch aborts. This is
 recorded in frozen_phases_verified; heuristic phases have no pretrained-network
 verification. A joint frozen playing source can differ from original anchor,
 so nonzero anchor-play KL does not imply frozen weights changed.
+
+## From-scratch training and current-policy self-play
+
+`--from-scratch` ([Recipe 14](command_reference.md#recipe-14-from-scratch-training-and-self-play))
+trains any nonempty subset of bid/trump/play from random weights in the same
+trainer, model and PPO update. Each `neural-train` phase is recorded with the
+learner initialization `random`: no source, no transferred trunk, the normal
+random trunk and heads of the existing `PhaseActorCritic`, created from a named
+`--seed` stream so equal seeds give identical networks. `trained_phases` starts
+empty and a phase becomes trained only after an optimizer step updates it, so a
+scratch checkpoint never claims an untrained policy and snapshots are published
+only once every routed neural phase has trained. There is no anchor: `anchor` is
+never registered (requests fail clearly), the play-forgetting KL is reported as
+unavailable, and the checkpoint records `initialization: random`, the seed, and
+`None` for the initialization checkpoint and original anchor instead of invented
+paths or hashes. Resume, evaluation and later stages never need a play-only file.
+
+Five workflows differ only in initialization and opponents:
+
+| Workflow | Initialization | Opponents during training |
+| --- | --- | --- |
+| Scratch against HHH | Random | Fixed heuristics |
+| Scratch current-policy self-play | Random | `self-current`: a frozen copy of the learner's own rollout weights, refreshed after every PPO update |
+| Historical snapshot self-play | Random or checkpoint | `self-snapshots`: published, immutable earlier learners; before the first publication, the anchor (anchor-based runs) or the current policy (scratch and anchor-free runs) |
+| Checkpoint-initialized PPO | Copied trained phases / representation transfer | Any mixture, including the original anchor |
+| New stage vs exact resume | `--init-checkpoint` copies weights only (fresh Adam, counters, roster); `--resume` continues everything exactly | Unchanged on resume; free to change in a new stage |
+
+`self-current` is synchronized self-play: at the start of each rollout the learner
+weights are snapshotted once; the learning partnership samples its trainable
+decisions from that snapshot as before, and the opposing partnership uses the same
+frozen weights with its own seeded action streams (stochastic on trainable phases,
+greedy on frozen ones, heuristic phases unchanged). Only the learning partnership's
+decisions enter the buffer and receive gradients; the opposing partnership's
+weights cannot change during the rollout and are refreshed for the next one. This
+optimizes one partnership against a frozen copy of itself, not four simultaneously
+updated players. It works from the first hand, when both sides are random. Random
+initialization implies no playing strength, and early self-play can be very weak
+and slow to improve; keep fixed heuristic validation opponents to measure progress.
 
 ## From initialization to the next training stage
 
@@ -175,6 +216,72 @@ gamma below one, changing enabled phases changes the number of discount steps.
 The value target is advantage plus old value, predicting signed marks, not merely
 contract success. Advantage normalization is over the merged batch, not per phase.
 
+## Critic modes, returns and oracle auxiliary supervision
+
+Three independently selectable features let their effects be measured separately
+([flags](command_reference.md#g-critic-returns-and-oracle-auxiliary),
+[A/B/C recipe](command_reference.md#recipe-13-local-versus-centralized-critic-and-oracle-auxiliary)).
+All defaults reproduce the existing local critic and GAE bit for bit (verified by
+comparing progress metrics and weights against the previous code).
+
+**Return audit.** The existing per-seat trajectories already satisfy the reference-
+team requirements: both learners belong to one partnership, each trajectory holds
+one seat's decisions in one hand, the terminal reward is that seat's team signed
+marks (partners equal, opponents opposite), and GAE never crosses seats, hands or
+teams. Opponent turns and frozen/heuristic decisions are skipped rather than
+discounted, and bid → trump → play are ordinary steps of one seat trajectory, so
+a bid value bootstraps from the same seat's (same team's) next value. Hands always
+complete inside a rollout, so no trajectory is truncated in training; `gae` and
+`monte_carlo` nevertheless accept a same-team `bootstrap_value` for truncated
+trajectories, and the buffer requires it whenever the last decision is not terminal.
+`gamma` stays 1 by default for undiscounted hand-level signed marks.
+
+**Return estimators.** `gae` is unchanged. `monte-carlo` assigns every decision the
+complete discounted hand return (the final signed marks when gamma = 1), with
+advantage = return − value: GAE with λ = 1, kept as a diagnostic baseline.
+
+**Centralized critic.** `--critic-mode centralized` adds a separate `CentralCritic`
+(`research/ppo/critic.py`): the same two-layer MLP width as the actor, a signed-mark
+value head and a separate oracle head. Its input is
+`texas42.privileged.encode_privileged` (509 features, layout version 1): the
+acting seat's ordinary 387-feature vector (own hand, public bidding and play
+history, contract, trump, scores, phase, voids, relative seats), plus all four
+remaining hands by relative seat, the relative trick leader and next player, and
+an explicit perspective field (the actor's team is always the reference). With the
+public record of who played what, the remaining hands determine the full initial
+deal, so the critic sees every input the non-recurrent seat policies have seen.
+Approximations: opponent identity is not encoded, so values average over the
+training opponent mixture; there are no recurrent policies, so no recurrent state
+needs privileged isolation.
+
+Actors are unchanged: one shared actor per phase across both learner seats,
+separate bid/trump/play networks and all freezing controls. Privileged features are
+computed beside each learner decision in the rollout (from
+`SelfPlayEnv.remaining_hands()`, a privileged accessor that agents never receive)
+and enter only the critic. The actor's own value heads are left untouched in this
+mode. The critic predicts expected final signed marks **under the rollout
+policies** from actual returns, not a perfect-information value. It has its own
+initialization seed stream (actor initialization and rollouts stay matched across
+modes), joins the Adam optimizer after the trainable actor parameters, and has its
+gradient clipped separately so a large value gradient never rescales the actor's.
+
+**Oracle auxiliary head (optional, off by default).** With `--oracle-aux-coef c > 0`
+and an [offline label dataset](command_reference.md#oracle-training-labels), each
+optimizer step also samples a batch of labelled positions (separate seed stream)
+and adds `c · mean(relu(L − v)² + relu(v − U)²)`, where `v` is the oracle head's
+prediction and `[L, U]` the certified double-dummy final-point bounds for the
+acting team, all divided by 42. When `L = U` this is squared error. The loss
+shapes the shared critic trunk only: main value targets remain actual rollout
+returns, advantages are unchanged, no reward shaping or actor imitation is added,
+and no search runs during training. Labels come from late-hand positions by
+default because they are cheap to prove exactly; one open-hand deal is not a
+realistic bidding success probability, so no bid-phase targets are produced.
+
+Checkpoints record `critic_mode`, the critic weights and architecture, the
+privileged layout version and how the critic was initialized; local and older
+checkpoints load unchanged. Actor-only inference (`load_model`, evaluation,
+console) never needs the critic, a dataset or the oracle.
+
 ## Opponent pools, archives and historical self-play
 
 [Opponent arguments and recipes](command_reference.md#d-training-opponents-and-historical-snapshots)
@@ -186,14 +293,15 @@ agents. Different strategies can alter auction choices, later legal moves and re
 
 A named archive is a fixed policy; self-snapshots is a dynamically growing/bounded
 historical roster. Before the roster has an eligible snapshot, its selection falls
-back to original anchor, not the current stage's initial joint network. Thereafter
+back to original anchor, not the current stage's initial joint network; scratch
+and anchor-free lineages fall back to the frozen current policy instead. Thereafter
 selection is uniform over active members. Snapshots copy the learner at completed
 update boundaries, remain frozen, and do not follow later optimizer changes.
 The original anchor is separate and never evicted. The roster retains at most its
 configured capacity; evicted files remain on disk because old resumes may need them.
 Publication may overshoot its threshold and can occur even in HHH-only training.
 
-Starting a [new historical stage](command_reference.md#stage-b-joint-training-with-historical-opponents)
+Starting a [new historical stage](command_reference.md#recipe-6-joint-training-with-historical-opponents)
 from an HHH-trained checkpoint copies its trained phase weights, not its historical
 roster or Adam state. Using the same root seed is a new experiment, not an exact
 continuation; counters and episode streams start again. Retain fixed validation
@@ -242,7 +350,7 @@ exact snapshot roster, selection opponent and all game/encoder compatibility
 versions. Loading uses CPU mapping and weights_only=True with strict dimensions.
 Original checkpoint files are never rewritten by evaluation or stage initialization.
 
-[Resume recipes](command_reference.md#resume-and-multi-opponent-validation) distinguish
+[Resume recipes](command_reference.md#recipe-7-resume-and-multi-opponent-validation) distinguish
 an exact stage continuation from fresh initialization. Omitted modern settings
 restore saved values; explicit changes undergo compatibility checks. Budget extension
 and worker-count changes are permitted within the same sampling/numerical scheme.
@@ -259,7 +367,7 @@ one primary opponent's mean signed marks/hand. Training always validates the
 current in-memory weights without creating a temporary checkpoint. latest.pt is
 most recent periodically saved progress, not necessarily highest performance.
 An interruption can lose work since that save; progress/log records alone cannot
-restore optimizer state. See [artifact/metric reference](command_reference.md#f-execution-diagnostics-and-files).
+restore optimizer state. See [artifact/metric reference](command_reference.md#training-artifacts-and-metrics).
 
 Final evaluation uses held-out deal seeds and the
 [phase-composable interface](phase_composable_evaluation.md), including actual
@@ -296,7 +404,7 @@ not optimal bidding. Its temporary Adam optimizer is discarded before PPO.
   which model becomes best.pt. Repeated selection can overfit that schedule; report
   independent final results and avoid retroactively selecting from held-out tests.
 
-For controlled experiments, [hold continuation networks constant](command_reference.md#held-out-phase-ablations)
+For controlled experiments, [hold continuation networks constant](command_reference.md#recipe-12-held-out-phase-ablations)
 and check actual tensor equality for neural-vs-neural phases. Compare multiple
 training seeds, sample counts, contracts/roles and uncertainty. Performance against
 HHH or historical snapshots is an empirical result under those opponents, not a
@@ -364,7 +472,8 @@ habits. Shared mode remains the default and is unchanged.
 | Validation and best.pt | The pair validates as one team (seat-aware factory). `best.pt` is chosen by the pair's score and saved for both partners. |
 | Files | `checkpoints/partner-1/{latest,best}.pt` and `partner-2/...`: ordinary version-2 checkpoints tagged `metadata.pairing`. Each loads alone wherever a checkpoint is accepted. |
 | Resume | `--resume` with either partner file restores both after checking they belong together. `partner_mode` is part of the config and cannot change on resume. |
-| Not yet supported | Historical self-snapshots (`self-snapshots` is rejected; no snapshots are published). Bidding imitation, frozen-phase verification and anchor KL run per partner; progress rows add a `partners` block. |
+| Not yet supported | Historical self-snapshots (`self-snapshots` is rejected; no snapshots are published) and `--critic-mode centralized` (the collector sends one critic, but each partner trainer would own and optimize its own). Bidding imitation, frozen-phase verification and anchor KL run per partner; progress rows add a `partners` block with per-partner value diagnostics. |
+| Supported with main's additions | `self-current` opponents: the current pair plays the opponent team, routed by the same seat rule. `--from-scratch`: both partners draw the same seeded random initialization. `--return-estimator monte-carlo` applies per partner buffer. |
 
 Implementation: `PairedSelfPlayTrainer` in `selfplay_trainer.py` (partner 2 is
 an ordinary `SelfPlayTrainer`); `save_pair`, `pair_paths` and `resume_pair` in

@@ -75,6 +75,35 @@ class PairedSelfPlayTests(unittest.TestCase):
         legacy.pop('partner_mode')
         self.assertEqual(config_from_dict(legacy).partner_mode, 'shared')
 
+    def test_integration_with_scratch_self_current_and_critic(self):
+        # Combinations introduced by main: from-scratch initialization and the
+        # self-current opponent work in paired mode; the centralized critic is rejected.
+        from research.ppo.multiphase import LearnerPhaseSpec, PHASES
+        specs = tuple(LearnerPhaseSpec('heuristic', initialization='none') if p == 'trump'
+                      else LearnerPhaseSpec('neural-train', None, 'random') for p in PHASES)
+        config = SelfPlayConfig(total_hands=4, hidden_size=8, device='cpu', seed=42, from_scratch=True,
+            learner_phases=specs, learn_phases=('bid', 'play'), rollout_decisions=8, ppo_epochs=1,
+            minibatch_size=4, anchor=None, opponent_policies=tuple(PolicySpec(n) for n in VARIANTS),
+            opponent_probabilities=(('self-current', '1'),), evaluation_names=('HHH',),
+            primary_opponent='HHH', eval_deals=2, bootstrap_samples=5, forgetting_hands=1,
+            partner_mode='paired')
+        t = PairedSelfPlayTrainer(config)
+        self.addCleanup(t.close)
+        self.assertTrue(same(parameters(t.model), parameters(t.partner.model)))  # Same seeded init.
+        # With equal weights, paired routing (including the self-current opponent
+        # pair) reproduces the shared collection exactly.
+        pool = t.opponent_pool()
+        for episode in range(2):
+            shared = collect_phase_hand(t.model, 42, episode, ('bid', 'play'), pool)
+            paired = collect_phase_hand((t.model, t.partner.model), 42, episode, ('bid', 'play'), pool)
+            self.assertEqual(shared['paths'], paired['paths'])
+            self.assertEqual(shared['opponent'], 'self-current')
+        buffers, _ = t.collect()
+        t.update(buffers)
+        self.assertEqual({label for _, label, _ in t.opponent_assignments}, {'self-current'})
+        with self.assertRaisesRegex(ValueError, 'centralized critic'):
+            replace(config, critic_mode='centralized')
+
     def test_identical_start_and_seat_routing(self):
         t = self.trainer()
         self.assertTrue(same(parameters(t.model), parameters(t.partner.model)))

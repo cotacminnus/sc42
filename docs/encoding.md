@@ -149,6 +149,15 @@ the observation. To reconstruct the final hand, append the terminal record's
 policy observation. Context such as shaker, marks and target remains in the
 record/observation, rather than being duplicated in each event.
 
+## Privileged critic features
+
+`texas42.privileged.encode_privileged(obs, hands)` is a separate, training-only
+vector for a centralized critic: this 387-feature actor vector followed by all four
+remaining hands (relative seats), the trick leader, the next player and a
+perspective field, 509 floats in total (`PRIVILEGED_LAYOUT_VERSION = 1`). The actor
+encoder above is unchanged and never receives these fields. See
+[critic modes](multiphase_selfplay.md#critic-modes-returns-and-oracle-auxiliary-supervision).
+
 ## Privileged collection
 
 `TrainingCollector` streams schema-5 transition dictionaries to a caller-owned

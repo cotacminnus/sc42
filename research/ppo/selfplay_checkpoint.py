@@ -29,8 +29,15 @@ def validate(data):
     trained = phases(m['trained_phases']) if m['trained_phases'] else ()
     if not set(trained) <= set(neural):
         raise ValueError('Incompatible trained-phase metadata')
-    if m.get('original_play_sha256') != data['config']['anchor']['sha256']:
+    # An absent anchor (from-scratch or anchor-free lineage) is recorded as None,
+    # never as an invented identity; a present anchor must match exactly.
+    anchor = data['config'].get('anchor')
+    if m.get('original_play_sha256') != (anchor['sha256'] if anchor is not None else None):
         raise ValueError('Incompatible original play identity')
+    if m.get('initialization', 'checkpoint') == 'random' and (
+            not data['config'].get('from_scratch') or m.get('initial_checkpoint_sha256') is not None
+            or m.get('initial_checkpoint_path') is not None):
+        raise ValueError('Inconsistent random-initialization provenance')
     if data.get('execution', {}).get('sampling_scheme') != 'multiphase-episode-v1':
         raise ValueError('Incompatible multi-phase sampling scheme')
     if m.get('checkpoint_selection_opponent') != data['config']['primary_opponent']:
@@ -56,16 +63,33 @@ def validate(data):
             raise ValueError('Incompatible learner source provenance')
     for spec in data['snapshots']:
         spec_from_dict(spec)
+    # Older checkpoints predate critic modes; their configuration defaults to local.
+    if config.critic_mode == 'centralized':
+        from .critic import CRITIC_ARCHITECTURE
+        from texas42.privileged import PRIVILEGED_LAYOUT_VERSION
+        if ('critic' not in data or m.get('critic_architecture') != CRITIC_ARCHITECTURE
+                or m.get('privileged_layout_version') != PRIVILEGED_LAYOUT_VERSION):
+            raise ValueError('Incompatible centralized critic state or privileged feature layout')
+    elif data.get('critic') is not None:
+        raise ValueError('A local-critic checkpoint must not contain centralized critic weights')
 
 
 def config_from_dict(data):
     from .selfplay_trainer import SelfPlayConfig
     values = dict(data)
-    values['anchor'] = spec_from_dict(values['anchor'])
+    values['anchor'] = spec_from_dict(values['anchor']) if values.get('anchor') is not None else None
     values['opponent_policies'] = tuple(spec_from_dict(s) for s in values['opponent_policies'])
     for name in ('learn_phases', 'evaluation_names', 'eval_opponents'):
         values[name] = tuple(values[name])
     return SelfPlayConfig(**values)
+
+
+def optimizer_parameters(trainer):
+    """Adam membership in optimizer order: trainable actor phases, then the critic."""
+    names = [name for name, p in trainer.model.named_parameters() if p.requires_grad]
+    if trainer.critic is not None:
+        names += ['critic.' + name for name, _ in trainer.critic.named_parameters()]
+    return names
 
 
 def save(path, trainer):
@@ -91,7 +115,20 @@ def save(path, trainer):
     data['progress']['last_snapshot'] = trainer.last_snapshot
     data['bc_metrics'] = trainer.bc_metrics
     data['metadata']['learner_phases'] = [asdict(s) for s in trainer.learner_phases]
-    data['metadata']['optimizer_parameters'] = [name for name, p in trainer.model.named_parameters() if p.requires_grad]
+    data['metadata']['optimizer_parameters'] = optimizer_parameters(trainer)
+    data['metadata']['critic_mode'] = trainer.config.critic_mode
+    # Provenance: random initialization names no checkpoint, path or SHA256.
+    data['metadata']['initialization'] = 'random' if trainer.config.from_scratch else 'checkpoint'
+    data['metadata']['initialization_seed'] = trainer.config.seed if trainer.config.from_scratch else None
+    if trainer.critic is not None:
+        from .critic import CRITIC_ARCHITECTURE
+        from texas42.privileged import PRIVILEGED_LAYOUT_VERSION
+        data['critic'] = trainer.critic.state_dict()
+        data['metadata'].update(critic_architecture=CRITIC_ARCHITECTURE,
+                                privileged_layout_version=PRIVILEGED_LAYOUT_VERSION,
+                                critic_initialization=trainer.critic_initialization)
+    if trainer.oracle_shuffle is not None:
+        data['rng']['oracle'] = trainer.oracle_shuffle.get_state()
     if getattr(trainer, 'pairing', None):
         # Paired-partner provenance only. The file stays an ordinary version-2
         # checkpoint: evaluation, opponents and stage initialization load it alone.
@@ -117,17 +154,23 @@ def resume(path, trainer):
         raise ValueError('Exact resume requires the same optimizer device type')
     if trainer.config.total_hands < data['progress']['hands']:
         raise ValueError('total_hands precedes saved progress')
-    membership = [name for name, p in trainer.model.named_parameters() if p.requires_grad]
+    membership = optimizer_parameters(trainer)
     if data['metadata'].get('optimizer_parameters', membership) != membership:
         raise ValueError('Exact resume optimizer phase membership mismatch')
     trainer.model.load_state_dict(data['model'], strict=True)
+    if trainer.critic is not None:
+        trainer.critic.load_state_dict(data['critic'], strict=True)
+        trainer.critic_initialization = data['metadata'].get('critic_initialization')
+    if trainer.oracle_shuffle is not None:
+        trainer.oracle_shuffle.set_state(data['rng']['oracle'])
     trainer.model.trained_phases = tuple(data['metadata']['trained_phases'])
     trainer.optimizer.load_state_dict(data['optimizer'])
     trainer.snapshots = [spec_from_dict(s) for s in data['snapshots']]
     # Ensure every immutable dependency still exists and has its saved identity.
     from .checkpoint import load_frozen
     active = {n for n, _ in trainer.config.opponent_probabilities} | set(trainer.config.evaluation_names)
-    for spec in (trainer.config.anchor, *trainer.config.opponent_policies, *trainer.snapshots):
+    anchor = (trainer.config.anchor,) if trainer.config.anchor is not None else ()
+    for spec in (*anchor, *trainer.config.opponent_policies, *trainer.snapshots):
         for identity in spec.identities():
             load_frozen(identity, verify=True)
         if spec.kind != 'variant' and (spec.name in active or spec in trainer.snapshots or spec == trainer.config.anchor):

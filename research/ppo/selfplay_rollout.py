@@ -6,6 +6,7 @@ from time import perf_counter
 import torch
 from texas42.agents import HeuristicAgent
 from texas42.encoding import encode
+from texas42.privileged import encode_privileged
 from texas42.selfplay import SelfPlayEnv
 from .agent import PPOAgent
 from .buffer import Experience
@@ -16,16 +17,33 @@ from .seeds import stream_seed
 _FACTORIES = {}
 _LEARNER = None
 _VERSION = None
+_CRITIC = None
+_CRITIC_VERSION = None
 
 
 @torch.no_grad()
-def collect_phase_hand(models, seed, episode, learn_phases, pool):
+def collect_phase_hand(models, seed, episode, learn_phases, pool, critic=None, current_sha256=None):
     """One complete hand; `models` is one shared learner or a (partner 1, partner 2) pair.
 
     Shared mode passes a single model (or a 1-tuple) and keeps the original
     records and random streams. Paired mode passes two models: each learner seat
     acts and records with its own partner's network. The per-hand sampling
     generator is shared, so draws interleave in decision order in both modes.
+
+    critic=None keeps the local actor-critic values.
+
+    A pool choice without a frozen spec (self-current, or self-snapshots before
+    any snapshot in an anchor-free run) seats the learner's own rollout snapshot
+    as the opponent partnership: the same fixed weights, its own per-seat action
+    streams, stochastic legal sampling on trainable phases, greedy on frozen
+    ones and heuristic phases unchanged. Its decisions never enter the buffer.
+    In paired mode that opponent partnership is the current pair, routed by the
+    same partner rule (first seat -> partner 1, second seat -> partner 2).
+    current_sha256 identifies that rollout snapshot in the opponent log.
+
+    With a centralized critic, the actor still sees only `encode(obs)`; the
+    privileged features and the critic's value are stored beside the decision
+    for the update and never enter action selection.
     """
     models = models if isinstance(models, tuple) else (models,)
     if len(models) not in (1, 2):
@@ -37,13 +55,16 @@ def collect_phase_hand(models, seed, episode, learn_phases, pool):
     team = (episode + seed) % 2
     label, spec = pool.choose(seed, episode)
     started = perf_counter()
-    key = spec
-    if key not in _FACTORIES:
-        factory = spec.factory()
-        if hasattr(factory, 'prepare'):
-            factory.prepare()
-        _FACTORIES[key] = factory
-    factory = _FACTORIES[key]
+    if spec is None:
+        def factory(seat, agent_seed):
+            return PPOAgent(learner(seat), seed=agent_seed, stochastic_phases=learn_phases)
+    else:
+        if spec not in _FACTORIES:
+            created = spec.factory()
+            if hasattr(created, 'prepare'):
+                created.prepare()
+            _FACTORIES[spec] = created
+        factory = _FACTORIES[spec]
     loading = perf_counter() - started
     agents = []
     for seat in range(4):
@@ -66,10 +87,15 @@ def collect_phase_hand(models, seed, episode, learn_phases, pool):
             mask = torch.tensor([obs.action_mask], dtype=torch.bool)
             neural_started = perf_counter()
             action, logp, value = learner(obs.seat).select(x, mask, generator=generator)
+            critic_features = None
+            if critic is not None:
+                critic_features = tuple(encode_privileged(obs, env.remaining_hands()))
+                value = critic(torch.tensor([critic_features], dtype=torch.float32))
             neural_inference += perf_counter() - neural_started
             action = int(action.item())
             paths[obs.seat].append(Experience(features, obs.action_mask, action,
-                float(logp.item()), float(value.item()), 0.0, False, obs.seat, episode))
+                float(logp.item()), float(value.item()), 0.0, False, obs.seat, episode,
+                critic_features))
         else:
             action = agents[obs.seat].act(obs)
         inference += perf_counter() - started
@@ -92,18 +118,20 @@ def collect_phase_hand(models, seed, episode, learn_phases, pool):
     except (OSError, ValueError, IndexError):
         rss = None
     return dict(worker_rss_bytes=rss, episode=episode, paths=tuple(tuple(p) for p in paths.values()),
-                reward=transition.rewards[team], opponent=label, opponent_sha256=spec.sha256,
+                reward=transition.rewards[team], opponent=label,
+                opponent_sha256=current_sha256 if spec is None else spec.sha256,
                 decisions=decisions, points=transition.hand_result.team_points, bidder=transition.hand_result.bidder,
                 inference_seconds=inference, opponent_loading_seconds=loading,
                 neural_inference_seconds=neural_inference + sum(getattr(a, 'neural_inference_seconds', 0.0) for a in agents))
 
 
 def phase_chunk(task):
-    global _LEARNER, _VERSION
-    weights, hidden, neural, learn, seed, indices, pool = task
+    global _LEARNER, _VERSION, _CRITIC, _CRITIC_VERSION
+    weights, hidden, neural, learn, seed, indices, pool, *optional = task
+    critic_weights = optional[0] if optional else None
     # Bound process-local opponent caches to the current roster plus anchor.
     from .checkpoint import _FROZEN_MODELS
-    allowed = {pool.anchor, *pool.policies, *pool.snapshots}
+    allowed = {s for s in (pool.anchor, *pool.policies, *pool.snapshots) if s is not None}
     for spec in tuple(_FACTORIES):
         if spec not in allowed:
             del _FACTORIES[spec]
@@ -122,10 +150,24 @@ def phase_chunk(task):
             factory.prepare()
             learners.append(factory.model)
         _LEARNER, _VERSION = tuple(learners), version
-    rows = []
+    critic = None
+    if critic_weights is not None:
+        critic_version = (hashlib.sha256(critic_weights).digest(), hidden)
+        if critic_version != _CRITIC_VERSION:
+            from .critic import CentralCritic
+            from io import BytesIO
+            with torch.random.fork_rng(devices=[]):
+                _CRITIC = CentralCritic(hidden)
+            _CRITIC.load_state_dict(torch.load(BytesIO(critic_weights), map_location='cpu', weights_only=True))
+            _CRITIC.eval()
+            _CRITIC_VERSION = critic_version
+        critic = _CRITIC
+    # Identity of the learner snapshot(s) for self-current opponent logs; a
+    # single payload hashes exactly as before pairing existed.
+    rows, current = [], hashlib.sha256(b''.join(payloads)).hexdigest()
     for episode in indices:
         try:
-            rows.append(collect_phase_hand(_LEARNER, seed, episode, learn, pool))
+            rows.append(collect_phase_hand(_LEARNER, seed, episode, learn, pool, critic, current))
         except Exception as exc:
             raise RuntimeError(f'Multi-phase episode={episode} worker={os.getpid()}: {exc}') from exc
     return rows, os.getpid()

@@ -38,10 +38,29 @@ pretrain play, select trainable/frozen phases, train against HHH or frozen histo
 opponents, then run a controlled held-out comparison. The [mechanics guide](docs/multiphase_selfplay.md)
 explains sample counts, rewards, source identities and resume. Use the
 [legacy play-only guide](docs/ppo_training.md) when reproducing version-1 experiments.
+No checkpoint is needed to start: `--from-scratch` trains all phases from random
+weights, including immediate self-play against a frozen copy of the current policy:
+
+```bash
+python -m examples.train_selfplay_ppo --from-scratch --opponent-pool self-current:1 \
+  --eval-opponents HHH,CHH --selection-opponent HHH --total-hands 262144 \
+  --rollout-decisions 4096 --threads 8 --seed 42 --output-dir runs/ppo-scratch-selfplay
+```
+
+See [from-scratch training](docs/command_reference.md#recipe-14-from-scratch-training-and-self-play).
+Multi-stage experiments can be declared in JSON and run in one command, with
+checkpoint references between stages and resumable progress
+([experiment pipelines](docs/experiment_pipelines.md)):
+
+```bash
+python -m examples.run_pipeline --config configs/pipelines/progressive_training.json --dry-run
+python -m examples.run_pipeline --config configs/pipelines/progressive_training.json
+```
 
 | Topic | Authoritative guide |
 | --- | --- |
 | Commands, arguments, JSON/log/CSV paths | [Command reference](docs/command_reference.md) |
+| JSON-defined multi-stage experiments, checkpoint chaining and resume | [Experiment pipelines](docs/experiment_pipelines.md) |
 | Original play-only PPO and version-1 reproduction | [Legacy PPO](docs/ppo_training.md) |
 | Independently train/freeze bidding, trump and play; composed/historical opponents | [Multi-phase PPO](docs/multiphase_selfplay.md) |
 | Two separately trained partner networks; pair and cross-play evaluation | [Paired partners](docs/multiphase_selfplay.md#paired-partner-training) |
@@ -49,6 +68,7 @@ explains sample counts, rewards, source identities and resume. Use the
 | Duplicate deals, metrics, bootstrap uncertainty | [Arena methodology](docs/arena.md) |
 | Frozen heuristic and random/conservative variants | [Heuristic V1](docs/simpleheuristic.md), [policy ablations](docs/policy_ablation.md) |
 | Bid-versus-pass replay experiments | [Counterfactual bidding](docs/counterfactual_bidding.md) |
+| Exact open-hand contract/point endgames and complete-deal bid benchmarks | [Endgame oracle](docs/endgame_oracle.md) |
 | Hidden-deal beliefs, world counting/sampling, rollouts, PIMC action values | [Belief modelling](docs/belief.md) |
 | Observations, public history and training-data validation | [Encoding](docs/encoding.md) |
 | Permanent global actions and reserved contracts | [Action space](docs/action-space.md) |
@@ -65,11 +85,14 @@ explains sample counts, rewards, source identities and resume. Use the
 | `texas42/engine.py`, `players.py`, `cli.py` | Console runner and object-based player decisions |
 | `texas42/agents/` | Common protocol, built-in agents and Player adapter |
 | `texas42/arena.py`, `parallel.py` | Paired evaluation, metrics and ordered process workers |
+| `texas42/oracle.py` | Shared perfect-information contract/point search, arbitrary-position bounds, complete-deal analysis and exhaustive reference |
+| `texas42/privileged.py` | Training-only centralized-critic features (all remaining hands); never an actor input |
 | `texas42/belief.py` | Hidden-deal constraints, exact counting/sampling, rollouts and expected action values |
 | `texas42/training.py`, `encoding.py`, `actions.py` | Versioned ID-based views, 387 features and legal global actions |
 | `texas42/openspiel.py` | Optional adapter depending on the native engine |
-| `research/ppo/` | Optional training, checkpoints and frozen policy composition |
-| `examples/` | Runnable game, training and evaluation commands |
+| `research/ppo/` | Optional training (local or centralized critic), oracle label datasets, checkpoints and frozen policy composition |
+| `examples/` | Runnable game, training and evaluation commands, including the JSON pipeline runner |
+| `configs/pipelines/` | Example JSON experiment pipelines |
 | `tests/`, `docs/` | Deterministic unittest coverage and technical documentation |
 | `runs/`, `logs/` | Ignored generated checkpoints, results and readable exports |
 
@@ -141,8 +164,10 @@ marks or deal RNG. Direct adapter callers must reset before requesting decisions
 Native runners own their agents and reset them once after `env.reset()`, preserving
 memory between hands of a match. Construct fresh agents to restart RNG streams.
 
-`PrivilegedAgent.act_privileged(obs, state)` is a separate future oracle interface.
-Ordinary adapters never supply `PrivilegedState` or hidden-hand labels.
+`PrivilegedAgent.act_privileged(obs, state)` remains a separate protocol for future
+privileged runners. The standalone [endgame oracle](docs/endgame_oracle.md) accepts
+a full `HandState` explicitly; ordinary adapters never supply `PrivilegedState`
+or hidden-hand labels.
 
 Agents may also implement the optional pure query
 `action_probabilities(obs) -> {action_id: probability}`, the distribution `act`
