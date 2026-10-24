@@ -1,11 +1,13 @@
 """Synchronized hand-level PPO; the policy is fixed throughout each rollout."""
 from dataclasses import dataclass
 import math
+from typing import ClassVar
 import random
 import numpy as np
 import torch
 from .buffer import RolloutBuffer
-from .model import ActorCritic
+from .critic import RETURN_ESTIMATORS
+from .model import ActorCritic, freeze_value_heads
 from .opponents import DEFAULT_OPPONENTS, OpponentPool, evaluation_opponents, select_primary
 from .rollout import stream_seed, collect_episode, collect_chunk, initialize_worker, snapshot, from_snapshot
 from texas42.parallel import OrderedPool, resolve_workers
@@ -40,6 +42,11 @@ class Config:
     train_opponents: tuple = DEFAULT_OPPONENTS
     eval_opponents: tuple = ('HHH',)
     selection_opponent: str | None = None
+    # local keeps the historical actor-critic; none is policy-only PPO. An
+    # omitted estimator resolves to gae (local, centralized) or monte-carlo (none).
+    critic_mode: str = 'local'
+    return_estimator: str | None = None
+    critic_modes: ClassVar[tuple] = ('none', 'local')  # The play-only trainer has no centralized critic.
 
     def __post_init__(self):
         object.__setattr__(self, 'train_opponents', OpponentPool(self.train_opponents).probabilities)
@@ -71,6 +78,15 @@ class Config:
             raise ValueError('seed must be an integer in [0, 2**63)')
         if self.device not in ('auto', 'cpu', 'cuda'):
             raise ValueError('device must be auto, cpu or cuda')
+        if self.critic_mode not in self.critic_modes:
+            raise ValueError('critic_mode must be ' + ', '.join(self.critic_modes))
+        if self.return_estimator is None:
+            object.__setattr__(self, 'return_estimator', 'monte-carlo' if self.critic_mode == 'none' else 'gae')
+        if self.return_estimator not in RETURN_ESTIMATORS:
+            raise ValueError('return_estimator must be gae or monte-carlo')
+        if self.critic_mode == 'none' and self.return_estimator != 'monte-carlo':
+            raise ValueError('critic_mode none has no learned value function to bootstrap GAE; '
+                             'use return_estimator monte-carlo (its default)')
 
 
 def clipped_objective(log_probs, old_log_probs, advantages, epsilon):
@@ -96,7 +112,11 @@ class Trainer:
         # Strict CPU tests; GPU reproducibility remains build/hardware dependent.
         torch.use_deterministic_algorithms(device == 'cpu')
         self.model = ActorCritic(config.hidden_size).to(self.device)
-        self.optimizer = torch.optim.Adam(self.model.parameters(), lr=config.learning_rate)
+        if config.critic_mode == 'none':
+            freeze_value_heads(self.model)
+        # Same parameter order as before; policy-only PPO omits the value head.
+        self.optimizer = torch.optim.Adam([p for p in self.model.parameters() if p.requires_grad],
+                                          lr=config.learning_rate)
         self.sampling = torch.Generator(device=self.device).manual_seed(stream_seed(config.seed, 'actions'))
         self.shuffle = torch.Generator().manual_seed(stream_seed(config.seed, 'minibatches'))
         self.hands = self.samples = self.updates = self.optimizer_steps = 0
@@ -182,7 +202,8 @@ class Trainer:
                                     for key in ('assignment_seconds', 'agent_construction_seconds', 'simulation_seconds')}
         for _, paths, reward, opponent, _ in results:
             for path in paths:
-                buffer.add_trajectory(path, c.gamma, c.gae_lambda)
+                buffer.add_trajectory(path, c.gamma, c.gae_lambda, estimator=c.return_estimator,
+                                      baseline=c.critic_mode != 'none')
             rewards.append(reward)
             stats = self.opponent_metrics[opponent]
             stats['hands'] += 1
@@ -215,6 +236,8 @@ class Trainer:
         critic = getattr(self, 'critic', None)
         if critic is not None:
             critic.train()
+        # Policy-only PPO: value outputs are ignored and no value loss exists.
+        policy_only = c.critic_mode == 'none'
         totals, weight = {}, 0
         phase_totals, phase_weights = {}, {}
         stop = False
@@ -230,8 +253,11 @@ class Trainer:
                     stop = True
                     break
                 policy = clipped_objective(logp, batch['old_log_probs'], batch['advantages'], c.clip_epsilon)
-                value = (values - batch['returns']).square().mean()
-                loss = policy + c.value_coef * value - c.entropy_coef * entropy.mean()
+                if policy_only:
+                    loss = policy - c.entropy_coef * entropy.mean()
+                else:
+                    value = (values - batch['returns']).square().mean()
+                    loss = policy + c.value_coef * value - c.entropy_coef * entropy.mean()
                 auxiliary = self.auxiliary_loss() if critic is not None else None
                 if auxiliary is not None:
                     loss = loss + auxiliary[0]
@@ -246,9 +272,11 @@ class Trainer:
                                                                  error_if_nonfinite=True)
                 self.optimizer.step()
                 self.optimizer_steps += 1
-                metrics = dict(policy_loss=policy.item(), value_loss=value.item(), entropy=entropy.mean().item(),
+                metrics = dict(policy_loss=policy.item(), entropy=entropy.mean().item(),
                                approx_kl=kl.item(), clip_fraction=((delta.exp() - 1).abs() > c.clip_epsilon).float().mean().item(),
                                gradient_norm=norm.item())
+                if not policy_only:
+                    metrics['value_loss'] = value.item()
                 if critic is not None:
                     metrics['critic_gradient_norm'] = critic_norm.item()
                 if auxiliary is not None:
@@ -263,10 +291,11 @@ class Trainer:
                         phase_values = dict(
                             policy_loss=clipped_objective(logp[selected], batch['old_log_probs'][selected],
                                 batch['advantages'][selected], c.clip_epsilon).item(),
-                            value_loss=(values[selected] - batch['returns'][selected]).square().mean().item(),
                             entropy=entropy[selected].mean().item(),
                             approx_kl=((d.exp() - 1) - d).mean().item(),
                             clip_fraction=((d.exp() - 1).abs() > c.clip_epsilon).float().mean().item())
+                        if not policy_only:
+                            phase_values['value_loss'] = (values[selected] - batch['returns'][selected]).square().mean().item()
                         phase_weights[phase] = phase_weights.get(phase, 0) + count
                         for key, v in phase_values.items():
                             name = phase + '_' + key
@@ -287,4 +316,7 @@ class Trainer:
         self.optimization_seconds = perf_counter() - started
         result = {k: v / weight for k, v in totals.items()}
         result.update({k: v / phase_weights[k.split('_')[0]] for k, v in phase_totals.items()})
+        if policy_only:
+            # Unavailable, not zero: no value function was fitted.
+            result.update({key: None for key in ('value_loss', *(p + '_value_loss' for p in phase_weights))})
         return result

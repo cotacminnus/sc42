@@ -45,6 +45,7 @@ anything starts.
 | `template.json` | Annotated starting point: a scratch stage, a second stage that also trains against the first as a named opponent, and an evaluation. |
 | `progressive_training.json` | Curriculum from random weights: play → bidding (play frozen) → trump (bid/play frozen) → joint with a centralized critic and historical snapshots → head-to-head evaluation against the pre-joint model. No pretrained checkpoint or anchor. |
 | `scratch_selfplay.json` | All phases from random weights against `HHH:0.3,self-current:0.7`, a second stage adding historical snapshots, then fixed-opponent and head-to-head evaluations. |
+| `critic_comparison.json` | Three independent from-scratch branches that differ only in `critic-mode` (`none`, `local`, `centralized`), each evaluated on the same held-out deals. |
 
 These examples use full-size budgets (hundreds of thousands of hands, 8 workers).
 For a quick trial, copy one and shrink `total-hands`, `rollout-decisions`,
@@ -341,6 +342,36 @@ each rollout) and/or `self-snapshots` (published earlier learners) in
 **Train against an earlier stage.** Register it with
 `"opponent-checkpoint": ["stage1=${stage1.best}"]` and use `stage1` in
 `opponent-pool` or `eval-opponents`. See `template.json`.
+
+**Choose the critic.** `"critic-mode"` takes `"none"` (policy-only PPO with Monte
+Carlo returns and no value loss), `"local"` (the default; omit the key to keep it)
+or `"centralized"` (`train_selfplay_ppo` only). Omit `"return-estimator"` to use
+each mode's default; `none` with `"return-estimator": "gae"` fails when the step
+starts. A pipeline step resumed after an interruption keeps its mode. For example:
+
+```json
+{
+  "id": "policy-only",
+  "command": "train_selfplay_ppo",
+  "args": {
+    "from-scratch": true,
+    "critic-mode": "none",
+    "opponent-pool": "HHH:0.3,self-current:0.7",
+    "eval-opponents": "HHH,CHH",
+    "selection-opponent": "HHH",
+    "total-hands": 262144,
+    "rollout-decisions": 4096,
+    "threads": 8,
+    "seed": 42
+  }
+}
+```
+
+**Compare critic modes.** Give each mode its own training step with identical
+arguments and seed and no reference to another treatment, so the branches are
+independent and start from identical actor weights; then evaluate each with the
+same opponents, deals and seed. See `critic_comparison.json` and
+[policy-only PPO](command_reference.md#recipe-15-policy-only-ppo-and-a-three-way-critic-comparison).
 
 **Centralized critic with oracle supervision.** Add an `oracle_labels` step, then
 `"critic-mode": "centralized"`, `"oracle-aux-coef": 0.5` and

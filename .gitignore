@@ -14,5 +14,6 @@ configs/pipelines/*.json
 !configs/pipelines/template.json
 !configs/pipelines/progressive_training.json
 !configs/pipelines/scratch_selfplay.json
+!configs/pipelines/critic_comparison.json
 runs/
 *.pt

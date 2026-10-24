@@ -9,7 +9,9 @@ import torch
 from torch import nn
 from texas42.privileged import PRIVILEGED_SIZE
 
-CRITIC_MODES = ('local', 'centralized')
+# none: policy-only PPO (Monte Carlo returns, zero baseline, no value loss);
+# local: per-network value heads; centralized: the privileged critic below.
+CRITIC_MODES = ('none', 'local', 'centralized')
 RETURN_ESTIMATORS = ('gae', 'monte-carlo')
 CRITIC_ARCHITECTURE = 'central-critic-v1'
 ORACLE_POINT_SCALE = 42.0

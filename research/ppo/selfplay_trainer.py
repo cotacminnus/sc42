@@ -10,7 +10,8 @@ from .opponents import DYNAMIC_OPPONENTS, NO_ANCHOR, HistoricalPool, PolicySpec
 from .buffer import RolloutBuffer
 from .rollout import initialize_worker, snapshot
 from .selfplay_rollout import phase_chunk
-from .critic import CRITIC_MODES, RETURN_ESTIMATORS, ORACLE_POINT_SCALE, interval_loss, new_critic
+from .critic import CRITIC_MODES, ORACLE_POINT_SCALE, interval_loss, new_critic
+from .model import freeze_value_heads
 from .seeds import stream_seed
 
 
@@ -29,9 +30,9 @@ class SelfPlayConfig(Config):
     forgetting_hands: int = 8
     learner_phases: tuple = ()  # Empty migrates the legacy initialization path.
     max_rollout_hands: int = 4096  # Bounds zero-sample trump-only collection.
-    # Defaults reproduce the existing local actor-critic with GAE exactly.
-    critic_mode: str = 'local'
-    return_estimator: str = 'gae'
+    # critic_mode and return_estimator are inherited; defaults reproduce the
+    # existing local actor-critic with GAE exactly.
+    critic_modes = CRITIC_MODES
     oracle_aux_coef: float = 0.0
     oracle_dataset: str | None = None
     oracle_dataset_sha256: str | None = None
@@ -88,15 +89,12 @@ class SelfPlayConfig(Config):
             raise ValueError('bid_bc_hands must be nonnegative')
         if self.sampling_scheme not in ('auto', 'episode-v1'):
             raise ValueError('Multi-phase training uses episode-seeded streams only')
-        if self.critic_mode not in CRITIC_MODES:
-            raise ValueError('critic_mode must be local or centralized')
-        if self.return_estimator not in RETURN_ESTIMATORS:
-            raise ValueError('return_estimator must be gae or monte-carlo')
         if not math.isfinite(self.oracle_aux_coef) or self.oracle_aux_coef < 0:
             raise ValueError('oracle_aux_coef must be finite and nonnegative')
         if self.oracle_aux_coef > 0:
             if self.critic_mode != 'centralized':
-                raise ValueError('Oracle auxiliary supervision requires the centralized critic')
+                raise ValueError('Oracle auxiliary supervision trains the centralized critic; '
+                                 f'it is unavailable with critic_mode {self.critic_mode}')
             if not self.oracle_dataset or not self.oracle_dataset_sha256:
                 raise ValueError('Oracle auxiliary supervision requires an oracle dataset identity')
         elif self.oracle_dataset is not None or self.oracle_dataset_sha256 is not None:
@@ -164,8 +162,13 @@ class SelfPlayTrainer(Trainer):
         if not config.learner_phases and not config.from_scratch:
             model.trained_phases = tuple(getattr(initial, 'trained_phases', ('play',)))
         model.configure_learning(config.learn_phases)
+        if config.critic_mode == 'none':
+            freeze_value_heads(model)  # After configure_learning, which enables whole phases.
         self.model = model.to(self.device)
         self.critic, self.critic_initialization = None, None
+        # Critic mode of the initialization checkpoint (provenance of a mode change
+        # between stages); None for random initialization. Set by the caller.
+        self.initial_critic_mode = None
         if config.critic_mode == 'centralized':
             # Separate weights and seed stream: actor initialization stays matched across modes.
             critic = new_critic(config.hidden_size, config.seed)
@@ -278,7 +281,8 @@ class SelfPlayTrainer(Trainer):
             for path in row['paths']:
                 if not path:
                     continue  # A defending learner has no trump action/reward trajectory.
-                buffer.add_trajectory(path, c.gamma, c.gae_lambda, estimator=c.return_estimator)
+                buffer.add_trajectory(path, c.gamma, c.gae_lambda, estimator=c.return_estimator,
+                                      baseline=c.critic_mode != 'none')
                 for record in path:
                     phase = ('bid', 'trump', 'play')[record.observation_features[:3].index(1.0)]
                     self.phase_counts[phase] = self.phase_counts.get(phase, 0) + 1
@@ -324,13 +328,18 @@ class SelfPlayTrainer(Trainer):
                                  * ORACLE_POINT_SCALE).item(), positions=len(lower))
 
     def return_diagnostics(self, buffer):
-        """Value-target statistics by phase, before advantage normalization."""
+        """Value-target statistics by phase, before advantage normalization.
+
+        Policy-only PPO has no value predictions: explained variance and value
+        means are reported as unavailable rather than computed from the zero baseline.
+        """
         from statistics import fmean, pvariance
         records = buffer.records
+        learned = self.config.critic_mode != 'none'
         returns, values = buffer.returns, [r.old_state_value for r in records]
         variance = pvariance(returns) if len(returns) > 1 else 0.0
         residual = pvariance([g - v for g, v in zip(returns, values)]) if len(returns) > 1 else 0.0
-        result = dict(explained_variance=1 - residual / variance if variance > 0 else None)
+        result = dict(explained_variance=1 - residual / variance if variance > 0 and learned else None)
         for index, phase in enumerate(PHASES):
             rows = [i for i, r in enumerate(records) if r.observation_features[index] == 1.0]
             if not rows:
@@ -339,7 +348,7 @@ class SelfPlayTrainer(Trainer):
             a = [buffer.advantages[i] for i in rows]
             result[phase] = dict(samples=len(rows), return_mean=fmean(g), return_std=pvariance(g) ** .5,
                                  advantage_mean=fmean(a), advantage_std=pvariance(a) ** .5,
-                                 value_mean=fmean(values[i] for i in rows))
+                                 value_mean=fmean(values[i] for i in rows) if learned else None)
         return result
 
     def update(self, buffer):

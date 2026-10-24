@@ -6,7 +6,7 @@ bootstrap ever crosses from one team's value to the other's. Other players'
 turns are skipped rather than discounted, and phase changes (bid -> trump ->
 play) are ordinary steps of the same seat trajectory.
 """
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import torch
 
 
@@ -71,9 +71,18 @@ class RolloutBuffer:
         return len(self.records)
 
     def add_trajectory(self, trajectory, gamma=1.0, gae_lambda=0.95, *, estimator='gae',
-                       bootstrap_value=None):
-        """bootstrap_value=None requires a terminal last decision; a float marks truncation."""
+                       bootstrap_value=None, baseline=True):
+        """bootstrap_value=None requires a terminal last decision; a float marks truncation.
+
+        baseline=False is policy-only PPO (critic mode none): no learned value
+        exists, so stored values are set to exactly 0.0 and Monte Carlo returns
+        are the advantages (a fixed zero baseline).
+        """
         trajectory = tuple(trajectory)
+        if not baseline:
+            if estimator != 'monte-carlo' or bootstrap_value is not None:
+                raise ValueError('Policy-only PPO needs complete trajectories and Monte Carlo returns')
+            trajectory = tuple(replace(r, old_state_value=0.0) for r in trajectory)
         if not trajectory:
             raise ValueError('Empty trajectory')
         key = (trajectory[0].episode_id, trajectory[0].seat)
