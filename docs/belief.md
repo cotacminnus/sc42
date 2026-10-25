@@ -479,7 +479,9 @@ leaf. Measured results are in [Model-guided results](#model-guided-results).
 actually played does not show whether a search orders the *alternatives*
 correctly, and that ordering is what chooses moves and what training on search
 advantages would learn from. The check stores every legal move's estimate in
-every mode and adds full rollouts scored in points. For each position it then
+every mode and adds full rollouts scored in points, a replicate of them with
+independent worlds (the noise scale) and the own-turn value leaf. For each
+position it then
 compares a candidate mode with a reference mode on the same worlds and seeds:
 pairwise order concordance, top-1 agreement, Spearman rank correlation, and
 **ranking regret**, the reference's value of its own best move minus its value
@@ -613,10 +615,14 @@ The full tables, noise scale and bootstrap intervals are in
   16 worlds. The leaf falls well below that, even though it shares the
   reference's worlds.
 - **The guide's training doesn't change the picture.** The paired pair is
-  slightly better and the base model worst, within noise. The likely structural
-  cause is that the leaf scores positions from the acting seat's viewpoint, not
-  the searcher's
+  slightly better and the base model worst, within noise.
+- **The leaf's viewpoint is only a minor cause.** The leaf scores positions from
+  the acting seat's viewpoint, not the searcher's
   ([leaf viewpoint](search_training.md#46-bias-of-the-search-target-term-by-term)).
+  The own-turn leaf (`until='turn'`, `--pimc-leaf value-turn`) removes that bias
+  and ranks only a little better: its best-move agreement with full rollouts is
+  42–46%. It still fails the gate, so the value head's own error dominates
+  ([own-turn results](search_training.md#61-the-own-turn-leaf-p2a)).
 
 ## Choosing settings
 

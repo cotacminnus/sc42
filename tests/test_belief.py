@@ -251,6 +251,34 @@ class SimulationTests(unittest.TestCase):
         self.assertEqual(simulate(self.state, rng=random.Random(4), policies=HHH, until='trick').action_ids,
                          simulate(self.state, rng=random.Random(4), policies=HHH, until='trick').action_ids)
 
+    def test_turn_stops_at_the_starting_seats_next_decision(self):
+        start = self.state.seat
+        stops = set()
+        for seed in range(12):
+            rollout = simulate(self.state, rng=random.Random(seed), choices=(seed % len(self.obs.legal_action_ids),),
+                               policies=HHH, until='turn')
+            stops.add(rollout.stop_reason)
+            # Replay the path: the starting seat acts first, then never again until the stop.
+            replay = _copy_state(self.state)
+            for step, action_id in enumerate(rollout.action_ids):
+                self.assertEqual(replay.seat == start, step == 0)
+                replay.apply(action_id)
+            if rollout.stop_reason == 'turn':
+                self.assertEqual(rollout.final_state.seat, start)
+                self.assertIsNone(rollout.hand_result)
+            again = simulate(self.state, rng=random.Random(seed), choices=(seed % len(self.obs.legal_action_ids),),
+                             policies=HHH, until='turn')
+            self.assertEqual(again.action_ids, rollout.action_ids)
+        self.assertIn('turn', stops)
+        self.assertLessEqual(stops, {'turn', 'hand'})
+        # In the last trick the starting seat never acts again: the hand ends first.
+        env, last = play_until(10, at_trick(6))
+        final = simulate(world_state(last, true_world(env)), rng=random.Random(0), policies=HHH, until='turn')
+        self.assertEqual(final.stop_reason, 'hand')
+        self.assertIsNotNone(final.hand_result)
+        with self.assertRaises(ValueError):  # At most 7 plays reach the next own decision.
+            simulate(self.state, rng=random.Random(0), choices=(0,) * 8, until='turn')
+
     def test_invalid_choices_are_rejected(self):
         with self.assertRaises(ValueError):
             simulate(self.state, rng=random.Random(0), choices=(99,))

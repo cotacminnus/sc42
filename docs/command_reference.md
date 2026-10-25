@@ -1448,7 +1448,7 @@ outcomes. It plays hands with the model (`--table model`) or Heuristic V1
 | --- | --- | --- |
 | `--model` | required | Trained checkpoint guiding search (trained phases neural, others heuristic) |
 | `--partner-model` | unset | Paired-partner second network: seats 0/1 play `--model`, seats 2/3 play this one, in rollouts, likelihoods and the value leaf |
-| `--rank-check` | off | Also run points-objective full rollouts (plus a replicate with independent worlds for the noise scale), store every legal move's estimate (`q`), and compare move rankings between modes: concordance, top-1, Spearman, ranking regret. See [the ranking gate](search_training.md#6-evidence-the-move-ranking-gate) |
+| `--rank-check` | off | Also run points-objective full rollouts (plus a replicate with independent worlds for the noise scale) and the own-turn value leaf, store every legal move's estimate (`q`), and compare move rankings between modes: concordance, top-1, Spearman, ranking regret. See [the ranking gate](search_training.md#6-evidence-the-move-ranking-gate) |
 | `--table` | `model` | Policy at all four seats in the evaluated hands: `model` or `heuristic`. With `--partner-model`, `model` means the pair |
 | `--games`, `--positions-per-game` | `50`, `2` | Hands played and play decisions sampled from each |
 | `--samples` | `16` | Sampled deals per belief and per search |
@@ -1521,7 +1521,7 @@ optimizer/device or trainability flag here.
 | `--agent-{a,b}-partner-checkpoint`, `--agent-{a,b}-partner-{phase}-checkpoint` | Checkpoint path | First seat's sources | Second-seat neural sources, e.g. partner-2 of a paired run. Partner phase override, then partner default, then (only if neither is given) the first seat's sources. |
 | `--pimc-samples` | Integer > 0 | `32` | Sampled hidden deals per PIMC decision (every deal when few remain). Cost grows linearly; recorded in JSON only when PIMC is used. |
 | `--agent-{a,b}-pimc-model` | Checkpoint path | Unset | Model guiding that agent's `pimc` phases: it plays every seat's rollouts (trained phases neural, others heuristic). Partner seats inherit it. Separate from `--agent-X-checkpoint` on purpose. |
-| `--pimc-leaf` | `none`, `value` | `none` | Model-guided `pimc` only: `value` stops rollouts after the next trick and scores the rest with the model's value head (signed-marks objective). |
+| `--pimc-leaf` | `none`, `value`, `value-turn` | `none` | Model-guided `pimc` only: `value` stops rollouts after the next trick and scores the rest with the model's value head (signed-marks objective). `value-turn` stops at the searcher's own next decision instead, so the value head scores from the searcher's viewpoint ([leaf viewpoint](search_training.md#46-bias-of-the-search-target-term-by-term)). |
 | `--pimc-likelihood` | `uniform`, `model` | `uniform` | Model-guided `pimc` only: `model` weights hidden deals by the model's probabilities for the observed moves. |
 | `--pimc-epsilon` | Float in [0, 1] | `0.1` | Likelihood softening for unexpected moves (with `--pimc-likelihood model`). |
 | `--deals` | Integer > 0 | `2048` | Complete duplicate groups; two games/group. |

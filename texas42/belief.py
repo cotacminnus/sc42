@@ -74,7 +74,7 @@ if TYPE_CHECKING:
     from .arena import AgentFactory
 
 SEATS = (0, 1, 2, 3)
-STOP_CONDITIONS = ('trick', 'phase', 'hand')
+STOP_CONDITIONS = ('trick', 'phase', 'hand', 'turn')
 
 # At or below this many consistent worlds, build_belief lists every world
 # (exact expectations) instead of sampling. Cost grows linearly with worlds:
@@ -678,7 +678,7 @@ class Rollout:
                          are interventions ("what if I play X"), not chance
                          events, so they contribute no factor.
     start_points/end_points  team points (team 0, team 1) before and after.
-    stop_reason          "trick", "phase" or "hand": the condition that ended it.
+    stop_reason          "trick", "phase", "turn" or "hand": the condition that ended it.
     hand_result          engine HandResult if the hand finished, else None.
     final_state          the private HandState where simulation stopped (for
                          a leaf evaluator). Mutating it affects nothing else.
@@ -725,6 +725,15 @@ def simulate(state: HandState, *, rng: random.Random, choices: Sequence[int] = (
                 "phase": stop when the bid/trump/play phase changes, or the
                          hand ends (for play this is the end of the hand).
                 "hand":  play to the end of the hand.
+                "turn":  stop when the seat that acted first is to act again
+                         (or the hand ends). In evaluate_actions that seat is
+                         the searcher, so a leaf evaluator then scores the
+                         searcher's OWN later information state. By perfect
+                         recall that refines the root information, so an
+                         information-set value leaf is unbiased there (tower
+                         property; docs/search_training.md, section 4.6). After
+                         "trick", whoever won the trick acts, and its value
+                         ignores the searcher's private hand.
       track_probability  compute rollout_probability. Policy steps then call
                 ActionProbabilities in addition to act (about twice the policy
                 cost). Pass False when only the outcome matters, as
@@ -742,7 +751,7 @@ def simulate(state: HandState, *, rng: random.Random, choices: Sequence[int] = (
         for seat, agent in enumerate(agents):
             agent.reset(seat)
     start_points = tuple(state.points)
-    start_phase, start_tricks = state.phase, len(state.completed)
+    start_phase, start_tricks, start_seat = state.phase, len(state.completed), state.seat
     applied: list[int] = []
     probability: float | None = 1.0 if track_probability else None
     stop_reason = 'hand'
@@ -790,6 +799,9 @@ def simulate(state: HandState, *, rng: random.Random, choices: Sequence[int] = (
             break
         if until == 'phase' and state.phase != start_phase:
             stop_reason = 'phase'
+            break
+        if until == 'turn' and state.seat == start_seat:
+            stop_reason = 'turn'
             break
     if len(choices) > len(applied):
         raise ValueError('choices extend past the stopping point')
@@ -909,7 +921,8 @@ def evaluate_actions(obs: Observation, *, rng: random.Random, belief: Belief | N
                         hybrid.variant_factory("HHH") for each seat). None
                         means uniformly random continuations, which are
                         unbiased but weak, so expect noisy, pessimistic values.
-      until             where each rollout stops ("trick", "phase", "hand").
+      until             where each rollout stops ("trick", "phase", "hand", or
+                        "turn": the observer's own next decision; see simulate).
       leaf_evaluator    optional f(state, observer_seat) -> the observer team's
                         remaining value from the stopping state, in objective
                         units: ADDITIONAL points (objective='points') or the

@@ -86,7 +86,9 @@ def build_parser():
                         'cost grows linearly, so pair large values with few --deals')
     p.add_argument('--pimc-leaf', choices=PIMC_LEAVES, default='none',
                    help='model-guided pimc only: "value" stops rollouts after the next trick and scores '
-                        'the rest with the model value head (signed-marks objective, much faster)')
+                        'the rest with the model value head (signed-marks objective, much faster); '
+                        '"value-turn" stops at the searcher\'s own next decision instead, so the value '
+                        'head takes the searcher\'s viewpoint')
     p.add_argument('--pimc-likelihood', choices=PIMC_LIKELIHOODS, default='uniform',
                    help='model-guided pimc only: "model" weights hidden deals by the model\'s move '
                         'probabilities for the observed bids and plays')
@@ -150,8 +152,10 @@ def main(argv=None):
               'see docs/belief.md)')
         print('  Plain pimc phases: Heuristic V1 rollouts, uniform belief, expected points')
         if guided:
-            leaf = ('rollouts stop after the next trick, model value head scores the rest (signed marks)'
-                    if args.pimc_leaf == 'value' else 'full-hand rollouts (expected points)')
+            leaf = {'value': 'rollouts stop after the next trick, model value head scores the rest (signed marks)',
+                    'value-turn': "rollouts stop at the searcher's next decision, model value head scores "
+                                  'the rest from its own view (signed marks)'}.get(
+                args.pimc_leaf, 'full-hand rollouts (expected points)')
             belief = (f'model-weighted belief (epsilon {args.pimc_epsilon})'
                       if args.pimc_likelihood == 'model' else 'uniform belief')
             print(f'  Model-guided pimc phases: model rollouts; {leaf}; {belief}')

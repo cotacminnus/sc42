@@ -170,6 +170,13 @@ class ModelGuidedPIMCTests(unittest.TestCase):
         self.assertEqual((guided.until, guided.objective), ('trick', 'marks'))
         self.assertIsInstance(guided._leaf_evaluator, ValueLeaf)
         self.assertIsNotNone(guided._likelihood_policies)
+        # The own-turn leaf: same value head, rollouts stop at the searcher's next decision.
+        turn = _pimc_delegate(PhasePolicySpec('pimc', self.identity), 1, True, 2, 'value-turn', 'uniform', 0.1)
+        self.assertEqual((turn.until, turn.objective), ('turn', 'marks'))
+        self.assertIsInstance(turn._leaf_evaluator, ValueLeaf)
+        self.assertIsNone(turn._likelihood_policies)
+        full = _pimc_delegate(PhasePolicySpec('pimc', self.identity), 1, True, 2, 'none', 'uniform', 0.1)
+        self.assertEqual((full.until, full.objective, full._leaf_evaluator), ('hand', 'points', None))
         # A default neural checkpoint never turns plain PIMC into model-guided PIMC.
         spec = resolve_policy_spec('A', ('neural', 'pimc', 'pimc'), self.joint)
         self.assertIsNone(spec.trump.checkpoint)
@@ -237,7 +244,7 @@ class ModelGuidedPIMCTests(unittest.TestCase):
         self.assertEqual(constant['ordered'], 0)
 
     def test_search_accuracy_rank_check_with_pair_guide(self):
-        from examples.search_accuracy import POINTS_MODES, RANK_PAIRS, main
+        from examples.search_accuracy import RANK_MODES, RANK_PAIRS, main
         with tempfile.TemporaryDirectory() as directory, contextlib.redirect_stdout(io.StringIO()):
             output = Path(directory) / 'rank.json'
             main(['--model', str(self.joint), '--partner-model', str(self.legacy), '--table', 'heuristic',
@@ -255,7 +262,7 @@ class ModelGuidedPIMCTests(unittest.TestCase):
             self.assertTrue(0.0 <= s['top1'] <= 1.0)
             self.assertGreaterEqual(s['regret'], 0.0)
         for row in data['rows']:
-            self.assertTrue(set(POINTS_MODES) <= set(row['values']))
+            self.assertTrue(set(RANK_MODES) <= set(row['values']))
             moves = {action for action, _ in row['values']['model-rollouts']['q']}
             self.assertIn(row['action_id'], moves)
             for mode in row['values'].values():  # Every mode estimates the same legal moves.

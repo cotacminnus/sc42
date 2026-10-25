@@ -246,7 +246,7 @@ class CompositeAgent:
         return diagnostic(obs) if diagnostic is not None else None
 
 
-PIMC_LEAVES = ('none', 'value')
+PIMC_LEAVES = ('none', 'value', 'value-turn')
 PIMC_LIKELIHOODS = ('uniform', 'model')
 
 
@@ -265,16 +265,20 @@ def _pimc_delegate(policy, seed, greedy, samples, leaf, likelihood, epsilon):
                   probabilities; 'uniform': all consistent deals equal;
       leaf        'value': rollouts stop after the next trick and the model's
                   value head scores the rest, so the objective becomes signed
-                  marks; 'none': full-hand rollouts, expected points.
+                  marks; 'value-turn': the same, but rollouts stop at the
+                  searcher's own next decision, so the leaf takes the
+                  searcher's viewpoint rather than the trick winner's
+                  (docs/search_training.md, section 4.6); 'none': full-hand
+                  rollouts, expected points.
     """
     if policy.checkpoint is None:
         return PIMCAgent(seed, samples=samples)
     from .search import ValueLeaf, model_factories
     models = model_factories(policy.checkpoint, greedy=greedy)
-    value = leaf == 'value'
+    value = leaf in ('value', 'value-turn')
     return PIMCAgent(seed, samples=samples, rollout_policies=models,
                      likelihood_policies=models if likelihood == 'model' else None, epsilon=epsilon,
-                     until='trick' if value else 'hand',
+                     until={'value': 'trick', 'value-turn': 'turn'}.get(leaf, 'hand'),
                      leaf_evaluator=ValueLeaf(policy.checkpoint) if value else None,
                      objective='marks' if value else 'points')
 
@@ -315,7 +319,7 @@ class CompositeAgentFactory:
             elif policy.strategy == 'pimc' and policy.checkpoint is not None:
                 from .search import model_policy_spec, trained_phases
                 model_policy_spec(policy.checkpoint)  # The guide must have a trained phase.
-                if self.pimc_leaf == 'value' and 'play' not in trained_phases(policy.checkpoint):
+                if self.pimc_leaf != 'none' and 'play' not in trained_phases(policy.checkpoint):
                     raise ValueError(f'Value leaf needs a trained play network in {policy.checkpoint.path}')
 
     def __call__(self, seat, seed):

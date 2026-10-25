@@ -39,6 +39,9 @@ Ranking check (--rank-check): a search that is calibrated on average can still
   candidate), the reference-measured cost of trusting the candidate. A
   replicate of the reference with independent worlds and seeds gives the noise
   scale: how much two estimates of the same quantity disagree at --samples.
+  The own-turn leaf (until='turn': rollouts stop at the searcher's next
+  decision, so the value head takes the searcher's viewpoint) is compared
+  with the same references as the trick leaf.
   --partner-model makes the guide a paired-partner PAIR (first seats play
   --model, second seats --partner-model; the value leaf uses the acting seat's
   own network).
@@ -79,14 +82,21 @@ SMOOTHING = 0.01  # Uniform mixture weight in the belief log-loss.
 #   noise:      the reference again with independent worlds and seeds. Not a
 #               strict ceiling: the other candidates share the reference's
 #               worlds (common random numbers), the replicate does not.
+#   turn-*:     the own-turn leaf (rollouts stop at the searcher's next
+#               decision, so the value head takes the searcher's viewpoint)
+#               against the same references as truncation and total.
 REPLICATE_MODE = 'model-rollouts:points:replicate'
+TURN_MODE = 'model-rollouts+turn-leaf'
 POINTS_MODES = ('heuristic-rollouts:points', 'model-rollouts:points', REPLICATE_MODE)
+RANK_MODES = POINTS_MODES + (TURN_MODE,)
 RANK_PAIRS = (
     ('noise', REPLICATE_MODE, 'model-rollouts:points'),
     ('truncation', 'model-rollouts+value-leaf', 'model-rollouts'),
     ('objective', 'model-rollouts', 'model-rollouts:points'),
     ('total', 'model-rollouts+value-leaf', 'model-rollouts:points'),
     ('guide', 'heuristic-rollouts:points', 'model-rollouts:points'),
+    ('turn-truncation', TURN_MODE, 'model-rollouts'),
+    ('turn-total', TURN_MODE, 'model-rollouts:points'),
 )
 
 
@@ -163,6 +173,7 @@ def value_scores(position, factories, leaf, samples, seed, replicate_seed=None):
         settings['heuristic-rollouts:points'] = dict(rollout_policies=factories['heuristic'])
         settings['model-rollouts:points'] = dict(rollout_policies=factories['model'])
         settings[REPLICATE_MODE] = dict(rollout_policies=factories['model'])
+        settings[TURN_MODE] = dict(rollout_policies=factories['model'], until='turn', leaf_evaluator=leaf)
     for mode, options in settings.items():
         objective = 'points' if ':points' in mode else 'marks'
         rng = random.Random(replicate_seed if mode == REPLICATE_MODE else seed)
@@ -250,7 +261,7 @@ def summarize(rows):
                             mean_seconds=mean(r['values'][mode]['seconds'] for r in rows),
                             max_seconds=max(r['values'][mode]['seconds'] for r in rows))
     summary = dict(positions=len(rows), beliefs=beliefs, values=values)
-    if rows and all(mode in rows[0]['values'] for mode in POINTS_MODES):
+    if rows and all(mode in rows[0]['values'] for mode in RANK_MODES):
         summary['ranking'] = {}
         for name, candidate, reference in RANK_PAIRS:
             results = [ranking(dict(r['values'][candidate]['q']), dict(r['values'][reference]['q']))

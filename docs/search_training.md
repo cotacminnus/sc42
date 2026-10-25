@@ -23,17 +23,25 @@ already exist; see [belief modelling](belief.md#model-guided-pimc).
   - It should beat training without search followed by one test-time search, but
     only if the search **ranks moves correctly**. Errors in its ranking are what
     iteration compounds.
-- **Evidence (section 6).** The cheap value-leaf search does not rank moves well
-  enough for any of the three guides measured (play-only, shared bid+play,
-  paired). It agrees with full rollouts on the best move less often than plain
-  heuristic rollouts do.
-  - Section 4.6 identifies a structural cause: the leaf takes the acting seat's
-    viewpoint, not the searcher's.
-  - It also gives two replacements that are unbiased in principle.
+- **Evidence (section 6).**
+  - **Cheap leaves fail the ranking gate.** The value-leaf search does not rank
+    moves well enough for any of the three guides measured (play-only, shared
+    bid+play, paired). It agrees with full rollouts on the best move less often
+    than plain heuristic rollouts do.
+  - **The viewpoint is a minor cause.** Section 4.6 predicts a bias from the
+    leaf taking the trick winner's viewpoint. Stopping at the searcher's own turn
+    instead removes that bias and helps only a little; it still fails the gate
+    (section 6.1). The value head's own error dominates.
+  - **One offline distillation step is a weak positive** (section 6.2): +0.009
+    [+0.001, +0.018] marks/hand against the source model for the larger step, and
+    no change against HHH.
 - **Plan (section 10).**
   - Build in-memory search guides (P1).
-  - Then either train with full model rollouts on about 0.5% of play decisions
-    (about 1.7× current cost), or first build a leaf that passes the gate (P2).
+  - Then train with full model rollouts on about 0.5–1% of play decisions (about
+    1.4–1.8× current cost, section 9). A cheap leaf needs a better value
+    estimate first (P2 option 3).
+  - A second offline distillation round is the cheapest test of whether the
+    gains compound.
 - **Decision-time search is already strong.** Model-guided search with full
   rollouts is the strongest agent measured: +0.34 marks/hand over its own guide
   model.
@@ -506,7 +514,10 @@ hypothetical worlds drawn from the searcher's own belief:
 - **(a) Own-turn leaf.** Stop each rollout at the searcher's own next decision and
   use the searcher's value head there. The searcher's later information refines
   I, so E[V<sup>π</sup>(I'<sub>own</sub>) | I, a] = E[V<sup>π</sup>(w, h') | I, a].
-  Cost: about one trick, like `until='trick'`. Not yet implemented (P2).
+  Cost: about one trick, like `until='trick'`. Implemented as `until='turn'`
+  (`--pimc-leaf value-turn`). Measured: it ranks only a little better than the
+  trick leaf and still fails the gate, because unbiased in principle is not
+  accurate in practice: the value head's own error dominates (section 6.1).
 - **(b) World-value leaf.** The centralized critic's main head
   (`research/ppo/critic.py`, `CentralCritic.forward`) predicts the actor team's
   signed marks from privileged world features (`texas42.privileged.encode_privileged`)
@@ -677,9 +688,149 @@ analysis of the per-position `q` rows in the JSON outputs, not part of the CLI:
 
 **Gate decision (P0).** The acting-seat value leaf (`ValueLeaf` with
 `until='trick'`) must **not** supply training advantages. Training-time search
-starts with full model rollouts and the points objective at *p* ≈ 0.5%
-(section 9), or after a P2 leaf passes this same gate. Full model rollouts
+starts with full model rollouts and the points objective at *p* ≈ 0.5–1%
+(1.4–1.8× current cost, section 9), or after a P2 leaf passes this same gate. Full model rollouts
 remain the reference and the recommended decision-time search.
+
+### 6.1 The own-turn leaf (P2a)
+
+**Question.** Section 4.6 predicts that the leaf ranks poorly partly because it
+takes the trick winner's viewpoint. Does stopping at the searcher's **own** next
+decision, where the value head sees the searcher's own information, fix the
+ranking?
+
+**Setup.** As above: `--rank-check` now adds `model-rollouts+turn-leaf`, the same
+value head with `until='turn'`, on the same positions, worlds and seeds. The
+existing rows reproduced exactly.
+
+| Guide | Candidate (vs reference) | Concordance | Top-1 | Spearman | Regret |
+| --- | --- | --- | --- | --- | --- |
+| base | Trick leaf vs full rollouts (marks) | 65.5% | 42.0% | 0.334 | 0.100 marks |
+| base | **Own-turn leaf** vs full rollouts (marks) | 64.5% | 41.3% | 0.326 | 0.092 marks |
+| base | **Own-turn leaf** vs full rollouts (points) | 63.2% | 44.0% | 0.288 | 0.942 |
+| shared | Trick leaf vs full rollouts (marks) | 61.8% | 37.3% | 0.263 | 0.114 marks |
+| shared | **Own-turn leaf** vs full rollouts (marks) | 63.8% | 40.0% | 0.314 | 0.078 marks |
+| shared | **Own-turn leaf** vs full rollouts (points) | 65.1% | 46.0% | 0.368 | 0.887 |
+| paired | Trick leaf vs full rollouts (marks) | 64.2% | 40.0% | 0.381 | 0.095 marks |
+| paired | **Own-turn leaf** vs full rollouts (marks) | 68.9% | 42.7% | 0.405 | 0.082 marks |
+| paired | **Own-turn leaf** vs full rollouts (points) | 65.9% | 42.0% | 0.375 | 0.981 |
+
+For comparison, against the points reference heuristic rollouts score top-1
+52.7%, 57.3% and 53.3%, with regret 0.891, 0.777 and 0.807 points (table above).
+
+**Paired bootstrap** over positions (5,000 resamples, 95% intervals; post-hoc
+analysis of the `q` rows):
+
+| Guide | Own-turn − trick regret (marks) | Own-turn − heuristic regret (points) | Own-turn − heuristic top-1 |
+| --- | --- | --- | --- |
+| base | −0.008 [−0.038, +0.023] | +0.05 [−0.24, +0.36] | −8.7 pp [−18.7, +1.3] |
+| shared | −0.036 [−0.062, −0.012] | +0.11 [−0.19, +0.44] | −11.3 pp [−22.0, −1.3] |
+| paired | −0.013 [−0.044, +0.014] | +0.17 [−0.13, +0.50] | −11.3 pp [−20.0, −2.7] |
+
+**Readings:**
+
+- **The viewpoint matters, but only a little.** With the objective held fixed
+  (marks), the own-turn leaf has lower regret than the trick leaf for every guide,
+  by 8–32%. Only the shared guide's difference excludes zero.
+- **It still fails the gate.** Against the best-playing search it picks the
+  same best move less often than plain heuristic rollouts do (42–46% vs 53–57%;
+  the interval excludes zero for two guides), and its regret is higher for every
+  guide.
+- **So the value head's own error dominates.** A head trained only as PPO's
+  baseline, on the moves the policy actually takes, does not separate the
+  alternatives well from either viewpoint. Section 4.6's bias is real but
+  secondary.
+- **Cost.** In these (concurrent) runs the own-turn leaf took 0.13–0.14
+  s/search, against 0.09–0.10 for the trick leaf and 0.39–0.42 for full
+  rollouts. It is still about 3× cheaper than full rollouts.
+
+**Decision.** The arena check for this leaf is skipped, as pre-registered.
+Neither value leaf may supply training advantages. A cheap leaf needs a better
+value estimate (P2 option 3: a head trained to separate alternatives, such as a
+points-scale or search-supervised head), not just a better stopping point.
+
+### 6.2 One-step distillation pilot
+
+**Question.** Before building training-time search: does **one** regularized
+improvement step, distilled from search, make the network itself play better?
+That is one iteration of the integrated loop of section 4.5, run offline.
+
+**Setup.** A scratch pilot, not committed. Its settings and outputs are in
+`runs/model-guided/pilot/`.
+
+- **States:** the shared bid+play model at all four seats (greedy, its own
+  evaluation distribution) for 1,000 hands, seed 20261025. 4 play decisions with
+  at least two legal moves were sampled per hand, giving 4,000 states. Every
+  tenth hand is held out (400 validation states).
+- **Search:** full model rollouts, points objective, 16 uniform worlds, from each
+  state's own observation. 0.43 s/search; 3.8 minutes with 8 processes.
+- **Target:** CMPO (section 4.4), π̄ ∝ π<sub>old</sub>·exp(clip(Â/σ, −c, c)),
+  with c ∈ {1, 2}. σ = 1.01 points, the π<sub>old</sub>-weighted RMS advantage.
+- **Fine-tuning:**
+  - only the play network;
+  - loss KL(π̄ ‖ π<sub>θ</sub>) + (V<sub>θ</sub> − V<sub>old</sub>)<sup>2</sup>.
+    The trunk is shared, and the second term keeps the value head's outputs.
+  - Adam, learning rate 10<sup>−4</sup>, batches of 256, early stopping on
+    validation KL (best epochs 8 and 9).
+- **Evaluation:** `evaluate_agent_vs_agent`, 4,096 duplicate deals (8,192 games),
+  held-out seed 20261026.
+  - Both sides use neural bidding, heuristic trump and neural play.
+  - The arena confirms that only the play network differs.
+  - Intervals resample whole duplicate groups.
+
+**Diagnostics** (from `distilled-c*.json`):
+
+| | c = 1 | c = 2 |
+| --- | --- | --- |
+| Search's best move ≠ policy's choice (train / validation) | 61% / 66% | 61% / 66% |
+| Target step KL(π̄ ‖ π<sub>old</sub>), mean (bound 2c) | 0.068 | 0.130 |
+| Play choices changed after fine-tuning (train / validation) | 4.6% / 2.8% | 5.3% / 3.3% |
+| KL to target, train (before → after) | 0.068 → 0.038 | 0.130 → 0.078 |
+| KL to target, validation (before → after) | 0.086 → 0.084 | 0.160 → 0.153 |
+| Value-head drift, validation RMSE (marks) | 0.020 | 0.023 |
+
+**Results:**
+
+| A | B | A marks/hand (95% CI) | A win rate |
+| --- | --- | --- | --- |
+| Distilled, c = 1 | Shared model | +0.005 [−0.002, +0.013] | 50.3% |
+| Distilled, c = 2 | Shared model | **+0.009 [+0.001, +0.018]** | 50.5% |
+| Distilled, c = 1 | HHH | +0.113 [+0.094, +0.132] | 55.6% |
+| Shared model | HHH | +0.114 [+0.094, +0.132] | 55.7% |
+
+**Readings:**
+
+- **One step helps, slightly, against the policy it was computed from.**
+  - Both point estimates are positive, and the larger step gains more.
+  - The c = 2 interval excludes zero, which meets the pre-registered "promising"
+    criterion, but narrowly. With two configurations tested, its lower bound
+    (+0.001) would not survive a multiple-comparison correction. Treat this as
+    weak positive evidence.
+- **The step is small by construction.** The policy is peaked, so a clipped tilt
+  of e<sup>±c</sup> rarely overturns its first choice. Play changed on only about
+  3% of held-out decisions, so a small effect is expected.
+- **Generalization from 3,600 states is weak.** The fit improves a lot on
+  searched states (KL −44% / −40%) but only 3–4% on held-out ones.
+- **No transfer to HHH** (+0.113 vs +0.114). This is consistent with section
+  4.1: the improvement is guaranteed against the fixed policy whose values were
+  searched, and HHH is a different opponent. The change is also too small to see
+  against HHH at this resolution.
+- **About noise.** The search disagrees with the policy on about 61% of states.
+  A large part of that is the 16-world noise measured in section 6 (independent
+  searches agree on the best move only about 60% of the time). Soft targets
+  absorb it, but it limits how much one step can learn.
+
+**Decision.** The mechanism points the right way, but one offline step from
+3,600 states is worth only about +0.01 marks/hand. For comparison, test-time
+search is worth +0.34. Any real gain must come from **iterating** and from many
+more searched states:
+
+- In-training search at *p* = 1% would search about 36 states per update, or
+  about 37,000 per 1,024-update run (10× this pilot). It would also re-search
+  from each improved policy.
+- The cheapest next test of compounding is a second offline round: search again
+  with the distilled model as guide, distill again, and compare round 2 with
+  round 1 and with the shared model. That needs no new training code.
 
 ## 7. Options compared
 
@@ -711,8 +862,9 @@ the policy.
      - **full rollouts, points objective:** rank moves best; cost about 4.5× the
        leaf;
      - **a truncated rollout with a leaf** only if that leaf passes the ranking
-       gate. The current acting-seat value leaf does not (section 6). Candidates:
-       the own-turn leaf and the world-value leaf (section 4.6).
+       gate. Neither the acting-seat nor the own-turn value leaf does (sections 6
+       and 6.1). Remaining candidates: the world-value leaf (section 4.6) and a
+       value head trained to separate alternatives (P2 option 3).
 3. **Search advantages.** For each legal action a: Q̂(a) from the search,
    V̂ = Σ<sub>a</sub> π<sub>old</sub>(a) Q̂(a), Â<sub>s</sub>(a) = Q̂(a) − V̂.
    Normalize per batch, as PPO already does for GAE advantages.
@@ -734,7 +886,7 @@ the policy.
    - search seconds;
    - the existing target-KL early stop.
 
-   Start with λ = 0.25, and *p* = 0.5% with full rollouts (or 1–2% with a leaf
+   Start with λ = 0.25, and *p* = 0.5–1% with full rollouts (or 2–5% with a leaf
    that has passed the gate). Turn search on only after a warm-up of ordinary
    PPO.
 
@@ -750,32 +902,48 @@ thread (Windows development machine with 20 logical CPUs, other work running):
 | Model rollouts, full hand | 0.576 | 4.98 | 0.630 |
 | Model rollouts + value leaf | 0.123 | 1.32 | 0.145 |
 
-**Training throughput (measured).** The joint bid+play study runs collected about
-**132 hands/s with 8 workers**. That is about 0.061 s of worker time per hand, with
-about 14 learner play decisions per hand.
+**Training throughput (measured).** From `runs/study-shared/progress.jsonl`, the
+shared bid+play study run: 262,144 hands in 1,024 updates of 4,096 learner
+decisions, 8 collection workers, 4 torch threads.
 
-**Slowdown estimate.** Searching a fraction *p* of play decisions adds about
-*p* × 14 × (seconds per search) of worker time per hand:
+| Quantity | Value |
+| --- | --- |
+| Hands per update | 256 |
+| Learner decisions per hand | 16, of which 14 are play decisions |
+| Collection | 1,108 s in total: 236.5 hands/s, i.e. 0.034 s of worker time per hand |
+| Optimization | 2,385 s in total; it runs after each collection, not alongside it |
+| Collection + optimization | **75 hands/s** (0.0133 s per hand); validation adds another 232 s over the run |
 
-| *p* | Leaf-cost search (0.13 s) | Throughput (8 workers) | Full-rollout search (0.6 s) | Throughput (8 workers) |
-| --- | --- | --- | --- | --- |
-| 0.5% | +0.009 s (+15%) | ≈ 115 hands/s | +0.042 s (+69%) | ≈ 78 hands/s |
-| 1% | +0.018 s (+30%) | ≈ 100 hands/s | +0.084 s (+140%) | ≈ 55 hands/s |
-| 2% | +0.036 s (+60%) | ≈ 83 hands/s | +0.17 s (+275%) | ≈ 35 hands/s |
-| 5% | +0.091 s (+150%) | ≈ 53 hands/s | +0.42 s (+690%) | ≈ 17 hands/s |
+**Optimization, not collection, dominates training time.** Search runs only during
+collection.
+
+**Slowdown estimate.** Searching a fraction *p* of play decisions adds *p* × 14 ×
+(seconds per search) of worker time per hand. That is spread over the 8 workers,
+so it adds *p* × 14 × t / 8 of wall time per hand to the 0.0133 s:
+
+| *p* | Leaf-cost search (t = 0.13 s) | Throughput | Full-rollout search (t = 0.6 s) | Throughput | Searched states per update |
+| --- | --- | --- | --- | --- | --- |
+| 0.5% | 1.09× | ≈ 69 hands/s | 1.39× | ≈ 54 hands/s | ≈ 18 |
+| 1% | 1.17× | ≈ 64 hands/s | 1.79× | ≈ 42 hands/s | ≈ 36 |
+| 2% | 1.34× | ≈ 56 hands/s | 2.58× | ≈ 29 hands/s | ≈ 72 |
+| 5% | 1.85× | ≈ 41 hands/s | 4.9× | ≈ 15 hands/s | ≈ 179 |
+
+The estimate assumes three things: search costs the same in a worker as in the
+single-thread measurement, collection parallelizes across the 8 workers, and the
+search loss adds negligible optimization time.
 
 **Conclusions:**
 
-- **Full rollouts are affordable only at a very small fraction.** *p* = 0.5% costs
-  about 1.7× today's training, within a 2× budget; *p* = 1% costs about 2.4×.
-  Alternatively, restrict full rollouts to late-hand positions, where rollouts
-  are short.
-- **A verified cheap leaf** would allow *p* ≈ 2–5% within roughly 1.6–2.5× the
+- **Full rollouts fit a 2× budget up to *p* ≈ 1%.** That is about 1.8× today's
+  training (*p* = 0.5% is about 1.4×). Restricting full rollouts to late-hand
+  positions, where rollouts are short, would stretch the budget further.
+- **A verified cheap leaf** would allow *p* ≈ 2–5% within roughly 1.3–1.9× the
   current cost.
-- **Searched states are few per batch.** Even *p* = 5% gives about 0.7 searched
-  decisions per hand, about 35 searched states per 4,096-decision PPO batch. Each
-  contributes every legal action, but the search-loss weight λ and *p* must be
-  tuned together so its signal is not swamped.
+- **Searched states are a small share of each update.** At *p* = 1% there are
+  about 36 searched states among an update's 4,096 learner decisions (about 3,600
+  of them play decisions). Each contributes every legal action, but the
+  search-loss weight λ and *p* must be tuned together so that its signal is not
+  swamped.
 - **Optimizations not yet applied:**
   - batching rollouts across worlds into one network call;
   - fewer sampled worlds (8);
@@ -808,8 +976,9 @@ when the previous gate passes. Defaults must reproduce current training exactly
   weights and seeds; picklable for spawn workers.
 
 **P2. A cheap leaf that ranks (only if a leaf is wanted).** Candidates, in order:
-1. **Own-turn leaf:** `until='own-turn'` in `texas42.belief.simulate` /
-   `evaluate_actions`, using the searcher's own value head (unbiased by the tower
+1. **Own-turn leaf (done; fails the gate, section 6.1):** `until='turn'` in
+   `texas42.belief.simulate` / `evaluate_actions` and `--pimc-leaf value-turn`,
+   using the searcher's own value head (unbiased in principle by the tower
    property; section 4.6).
 2. **World-value leaf:** the centralized critic's main head on hypothetical worlds
    (`encode_privileged(observation, world hands)`), for runs trained with
@@ -869,9 +1038,16 @@ when the previous gate passes. Defaults must reproduce current training exactly
 
 ## 11. Open questions
 
-- **Which cheap leaf ranks well?** The own-turn and world-value leaves are
-  unbiased in principle (section 4.6). Whether their *approximation* error is
-  small enough is an empirical question for P2.
+- **Which cheap leaf ranks well?** The own-turn leaf removes the viewpoint bias
+  but still fails the gate, because the PPO value head's approximation error
+  dominates (section 6.1).
+  - The world-value leaf (centralized critic) is untested.
+  - A head trained to separate alternative moves (for example on search values,
+    or in points) is the remaining route.
+- **Do distilled improvements compound?** One offline step gave about +0.01
+  marks/hand (section 6.2). Whether repeated rounds, or many more searched
+  states, approach the +0.34 of test-time search is the main open question for
+  training-time search.
 - **How many worlds per training search?**
   - At 16 worlds, two independent searches agree on the best move only about 60%
     of the time (section 6).

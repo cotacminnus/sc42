@@ -128,8 +128,10 @@ Next experiments:
   (policy improvement, performance difference, all-action variance reduction,
   regularized improvement), related methods, measured compute and an enumerated
   plan (P0–P6). Its first gate, move ranking, has been measured for the base,
-  shared and paired guides: the current value leaf fails it, so training-time
-  search must start with full rollouts or a new leaf (P2). Not implemented yet.
+  shared and paired guides. Both the trick and the own-turn value leaf fail it,
+  so training-time search must start with full rollouts (about 1.4–1.8× cost) or
+  a better-trained leaf (P2). An offline one-step distillation pilot gave a small
+  positive effect (+0.009 marks/hand vs its source). Not implemented yet.
 
 Short smoke tests establish mechanics, not competitive gains or generalization.
 
