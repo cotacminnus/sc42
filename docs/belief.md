@@ -393,6 +393,19 @@ strategy of `examples.evaluate_agent_vs_agent` ([composition](phase_composable_e
 [commands](command_reference.md#belief-based-pimc-trump-and-play)), with
 `--pimc-samples` and modest `--deals`. Expect a few seconds per hand.
 
+**Measured strength.** In the study round robin (1,024 deals per pairing, 32
+samples, heuristic bidding), plain PIMC beat every other agent:
+
+| Opponent | PIMC's margin (marks/hand) |
+| --- | --- |
+| HHH | +0.297 |
+| Base model | +0.337 |
+| Shared model | +0.278 |
+| Paired model | +0.313 |
+
+Details are in [the study](multiphase_selfplay.md#one-seed-study-base-shared-and-paired-262144-hands).
+Model-guided PIMC beats plain PIMC in turn (next section).
+
 ## Model-guided PIMC
 
 Plain PIMC models every player as Heuristic V1. Its estimates are only as good

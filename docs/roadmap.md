@@ -186,9 +186,13 @@ private conventions; Other-Play is a known mitigation.
 Paired-partner training (`--paired-partners`) trains two separate networks for
 the learning team. Two-spec team evaluation (`--agent-X-partner-*`) supports
 pair, mirrored and cross-play comparisons; see
-[paired partners](multiphase_selfplay.md#paired-partner-training). Next: compare
-paired vs shared training at equal hands over several seeds, and cross-play each
-partner with heuristic and other-seed partners.
+[paired partners](multiphase_selfplay.md#paired-partner-training).
+- **Measured so far:** a one-seed study at 262,144 hands. Paired trails Shared
+  by −0.066 marks/hand
+  ([study](multiphase_selfplay.md#one-seed-study-base-shared-and-paired-262144-hands)),
+  but each paired network saw about half the samples.
+- **Next:** compare at equal samples per network over several seeds, and
+  cross-play each partner with heuristic and other-seed partners.
 
 ### 9. Bidding
 

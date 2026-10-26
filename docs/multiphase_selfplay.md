@@ -481,6 +481,69 @@ an ordinary `SelfPlayTrainer`); `save_pair`, `pair_paths` and `resume_pair` in
 [two-spec teams](phase_composable_evaluation.md#two-spec-teams-paired-partners-and-cross-play)
 and the [recipes](command_reference.md#paired-partner-training-and-evaluation).
 
+### One-seed study: base, shared and paired (262,144 hands)
+
+**Setup.** One training seed (42), 256-wide networks, CPU. Outputs are in
+`runs/study-*` (not committed).
+
+| Model | Training | Bid | Trump | Play |
+| --- | --- | --- | --- | --- |
+| **Base** (`runs/study-play-v1`; also the anchor) | Legacy play-only PPO (`train_ppo`), 262,144 hands against HHH | Heuristic | Heuristic | Neural |
+| **Shared** (`runs/study-shared`) | `train_selfplay_ppo`, initialized from Base, bid and play learned, 262,144 hands against HHH, 4,096-decision updates | Neural | Heuristic | Neural |
+| **Paired** (`runs/study-paired`) | As Shared, with `--paired-partners`: two networks, about half the samples each | Neural, one network per partner | Heuristic | Neural, one network per partner |
+
+Evaluation is greedy neural inference on held-out duplicate deals (seed 20261019).
+The Paired model is always evaluated as its pair (partner 2 in each team's second
+seat).
+
+**Against fixed opponents** (2,048 deals, 4,096 games; signed marks/hand, 95% CI):
+
+| Opponent | Shared | Paired |
+| --- | --- | --- |
+| HHH | +0.104 [+0.077, +0.132] | +0.064 [+0.039, +0.088] |
+| CHH | +0.101 [+0.074, +0.127] | +0.062 [+0.037, +0.088] |
+| HHR | +0.290 [+0.264, +0.314] | +0.253 [+0.226, +0.277] |
+| HRR | +0.431 [+0.406, +0.456] | +0.410 [+0.384, +0.432] |
+| CRR | +0.408 [+0.383, +0.433] | +0.387 [+0.362, +0.412] |
+| RRR | +1.151 [+1.130, +1.173] | +1.148 [+1.126, +1.172] |
+| Head-to-head (Paired vs Shared) | | −0.066 [−0.092, −0.041] |
+
+**Round robin** (1,024 deals per pairing; row agent's signed marks/hand against
+the column agent). Plain PIMC uses 32 samples and heuristic bidding.
+
+| Row vs column | Base | Shared | Paired | HHH | RRR | Plain PIMC |
+| --- | --- | --- | --- | --- | --- | --- |
+| Base | – | −0.070 | −0.037 | +0.031 (n.s.) | +1.144 | −0.337 |
+| Shared | +0.070 | – | +0.067 | +0.110 | +1.150 | −0.278 |
+| Paired | +0.037 | −0.067 | – | +0.068 | +1.147 | −0.313 |
+| HHH | −0.031 (n.s.) | −0.110 | −0.068 | – | +1.192 | −0.297 |
+| Plain PIMC | +0.337 | +0.278 | +0.313 | +0.297 | +1.224 | – |
+
+Standings by mean marks/hand against the others:
+
+1. plain PIMC +0.490 (wins all five pairings);
+2. Shared +0.224;
+3. Paired +0.174;
+4. Base +0.146;
+5. HHH +0.137;
+6. RRR −1.172.
+
+All pairings except Base–HHH are significant.
+
+**Readings:**
+
+- **Learning the bid helps.** Shared improves on Base (+0.070 head-to-head, and
+  +0.110 vs +0.031 against HHH).
+- **At equal hands, Paired trails Shared** (−0.066). Each paired network sees about
+  half the samples, so this is not yet a fair test of complementary partners. It
+  needs equal samples per network and several seeds (roadmap step 8).
+- **Search beats every trained model.** Plain PIMC beats all three trained models
+  by 0.28–0.34 marks/hand. Model-guided PIMC is stronger still
+  ([model-guided results](belief.md#model-guided-results)).
+- **Caveats.** One seed and `best.pt` selected against the anchor's validation
+  schedule. Treat these as evidence about these checkpoints, not about the
+  methods.
+
 ## Evaluation ownership
 
 [Phase-composable evaluation](phase_composable_evaluation.md) is the canonical
