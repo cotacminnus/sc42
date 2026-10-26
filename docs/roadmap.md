@@ -129,13 +129,19 @@ Next experiments:
   regularized improvement), related methods, measured compute and an enumerated
   plan (P0–P6). Its first gate, move ranking, has been measured for the base,
   shared and paired guides. Both the trick and the own-turn value leaf fail it,
-  so training-time search must start with full rollouts (about 1.4–1.8× cost) or
-  a better-trained leaf (P2). Two offline distillation rounds gave small gains
-  that add up (+0.009, then +0.015 marks/hand in total vs the source model; no
-  change vs HHH), which justifies building in-training search as an experiment.
-  It is now implemented as `train_selfplay_ppo --search-fraction`, off by default
-  ([operation](multiphase_selfplay.md#search-inside-training)). Next: the
-  equal-hands and equal-CPU experiments (P5).
+  so training-time search must start with full rollouts or a better-trained leaf
+  (P2). Two offline distillation rounds gave small gains that add up (+0.009, then
+  +0.015 marks/hand in total vs the source model; no change vs HHH).
+  - **Implementation:** `train_selfplay_ppo --search-fraction`, off by default
+    ([operation](multiphase_selfplay.md#search-inside-training)).
+  - **First in-training run** (one seed,
+    [results](search_training.md#64-first-in-training-run-p5-one-seed)):
+    - at equal hands, search beats ordinary PPO (+0.022 marks/hand) and doubles
+      the gain over the starting model;
+    - but it costs about 7× per hand, and a control with twice the hands beats
+      it (−0.034).
+  - **Next:** cut the cost (load balancing, cheaper search positions, a leaf
+    that ranks), then run the 3-seed equal-CPU comparison.
 
 Short smoke tests establish mechanics, not competitive gains or generalization.
 

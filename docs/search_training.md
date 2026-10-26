@@ -43,11 +43,14 @@ already exist; see [belief modelling](belief.md#model-guided-pimc).
 - **Plan (section 10).**
   - **Implemented:** in-memory guides (P1), search in the collector (P3) and the
     search loss (P4). Enable with `train_selfplay_ppo --search-fraction 0.01`.
-  - **Recommended use:** full model rollouts on about 0.5–1% of play decisions
-    (about 1.4–1.8× current cost, section 9).
-  - A cheap leaf needs a better value estimate first (P2 option 3).
-  - **Next:** the training experiments (P5). Expect a modest effect, and confirm
-    it at equal compute.
+  - **First in-training run** (one seed, section 6.4):
+    - at equal hands, search beats ordinary PPO (+0.022 [+0.006, +0.040]
+      marks/hand);
+    - at about 7× the compute per hand it loses at equal compute;
+    - not adopted yet.
+  - **Next:** cut the search cost by roughly an order of magnitude. In order:
+    load balancing, cheaper positions, and a cheap leaf that ranks (P2 option
+    3). Then run the 3-seed equal-CPU comparison.
 - **Decision-time search is already strong.** Model-guided search with full
   rollouts is the strongest agent measured, at 1,024 deals:
   - +0.045 [+0.009, +0.081] marks/hand over plain heuristic PIMC;
@@ -696,9 +699,10 @@ analysis of the per-position `q` rows in the JSON outputs, not part of the CLI:
 
 **Gate decision (P0).** The acting-seat value leaf (`ValueLeaf` with
 `until='trick'`) must **not** supply training advantages. Training-time search
-starts with full model rollouts and the points objective at *p* ≈ 0.5–1%
-(1.4–1.8× current cost, section 9), or after a P2 leaf passes this same gate. Full model rollouts
-remain the reference and the recommended decision-time search.
+starts with full model rollouts and the points objective at *p* ≈ 0.5–1% (at a
+measured cost of about 7× per hand at 1%; sections 6.4 and 9), or after a P2 leaf
+passes this same gate. Full model rollouts remain the reference and the
+recommended decision-time search.
 
 ### 6.1 The own-turn leaf (P2a)
 
@@ -908,7 +912,107 @@ Outputs are in `runs/model-guided/pilot/round2/`.
 at *p* ≈ 1% is justified as an experiment. The expected effect is modest and
 must be confirmed at equal compute (P5). Cheaper ways to get larger steps per
 searched state are open questions: more worlds per search to cut target noise,
-and searching only high-entropy states.
+and searching only high-entropy states. (Done: section 6.4.)
+
+### 6.4 First in-training run (P5, one seed)
+
+**Protocol.** Both arms continue the shared bid+play study model with its exact
+recipe:
+
+- opponents HHH;
+- 4,096-decision updates, 4 epochs, minibatch 512, learning rate 10<sup>−4</sup>;
+- 8 collection workers, 4 torch threads;
+- a new seed (7), with `--init-checkpoint` and the base model as anchor.
+
+The two runs ran one after the other on one Windows machine, so their timings are
+not confounded by each other.
+
+| Arm | Training |
+| --- | --- |
+| **Control** | Ordinary PPO for 131,072 hands, with immutable snapshots every 16,384 hands |
+| **Search** | The same, plus `--search-fraction 0.01 --search-samples 16 --search-weight 0.25 --search-target cmpo --search-clip 2`, for 65,536 hands |
+
+Evaluation: `evaluate_agent_vs_agent` on 4,096 held-out duplicate deals (seed
+20261101), neural bid and play with heuristic trump on both sides. Outputs are in
+`runs/search-p5/`. The run and evaluation scripts are scratch files; every
+command uses committed CLIs with the flags above.
+
+**Measured cost:**
+
+| Per hand | Control | Search |
+| --- | --- | --- |
+| Collection (wall) | 2.7 ms | 27.7 ms |
+| Optimization | 1.8 ms | 4.7 ms |
+| **Total** | **4.6 ms** | **32.4 ms (7.1×)** |
+
+Search time itself was 0.97 worker-s per searched decision, for 5,810 decisions
+(0.089 per hand; forced moves are never searched).
+
+**Results** (signed marks/hand, 95% CI):
+
+| A | B | A marks/hand | A win rate |
+| --- | --- | --- | --- |
+| Search, 65,536 hands | Control, 65,536 hands (**equal hands**) | **+0.022 [+0.006, +0.040]** | 51.1% |
+| Search, 65,536 hands | Control, 131,072 hands (28% of search's compute) | **−0.034 [−0.052, −0.016]** | 48.3% |
+| Search, 65,536 hands | Starting model | +0.063 [+0.044, +0.080] | 53.1% |
+| Control, 65,536 hands | Starting model | +0.031 [+0.014, +0.049] | 51.6% |
+| Control, 131,072 hands | Starting model | +0.076 [+0.059, +0.093] | 53.8% |
+| Search, 65,536 hands | HHH | +0.137 [+0.119, +0.157] | 56.9% |
+| Control, 65,536 hands | HHH | +0.146 [+0.127, +0.164] | 57.3% |
+
+**Training diagnostics** (first vs last quarter of the 65,536 hands):
+
+| | Control | Search |
+| --- | --- | --- |
+| Play entropy | 0.265 → 0.268 | 0.275 → 0.317 |
+| KL to the anchor | 0.31 → 0.36 | 0.34 → 0.46 |
+| Searched states per update | – | about 23 |
+| Search/policy disagreement | – | 60–63% |
+| CMPO target step KL | – | about 0.15 |
+
+**Readings:**
+
+- **At equal hands, search helps.** It beats the control head-to-head
+  (+0.022). Against the starting model it doubled the improvement (+0.063 vs
+  +0.031). That is the integrated loop working as section 4.5 predicts, and it is
+  larger than the offline pilots.
+- **At equal compute it loses clearly.**
+  - The control with twice the hands beats it (−0.034) while using only 28% of
+    its compute.
+  - A true equal-compute control would train about 460,000 hands.
+  - Under the P5 decision rule (equal-CPU significantly positive), search inside
+    training is **not adopted** at this cost.
+- **No transfer to HHH**, as in every pilot. The gains are against the
+  self-play family the search modelled.
+- **Search adds entropy and drift.** Play entropy and KL to the anchor rose
+  faster than in the control. Soft targets that disagree with the policy on about
+  60% of states, mostly through 16-world noise, spread probability rather than
+  sharpen it.
+- **Cost was about 4× my estimate** (section 9 is corrected). Three causes:
+  - The baseline was cheaper than assumed: the study run's optimization time was
+    inflated by training two models in parallel.
+  - Searches cost about 1 s, not 0.5 s.
+  - Collection workers ran at about 45% parallel efficiency, because a few long
+    searches per wave leave the other workers idle.
+  - Optimization was also 2.5× slower with search. That is not yet explained and
+    should be profiled.
+
+**Decision and next steps.** The method works per sample, but not per unit of
+compute. Before more seeds, the cost must come down by roughly an order of
+magnitude, or the signal per search must go up. In order of expected value:
+
+1. **Balance the search load.** Schedule searched decisions as separate pool
+   tasks instead of inline in hand chunks. That would recover most of the 55%
+   idle worker time.
+2. **Search where it is cheap and informative:** late-hand positions (short
+   rollouts) or high-entropy positions.
+3. **Use fewer worlds per search,** for example 8, at the price of noisier
+   targets.
+4. **Build a cheap leaf that ranks** (P2 option 3). This is the only route to an
+   order-of-magnitude gain.
+
+A confirmatory equal-hands replication (2 more seeds) is cheap relative to these
+and would firm up the +0.022 result.
 
 ## 7. Options compared
 
@@ -982,57 +1086,57 @@ thread (Windows development machine with 20 logical CPUs, other work running):
 | Model rollouts, full hand | 0.576 | 4.98 | 0.630 |
 | Model rollouts + value leaf | 0.123 | 1.32 | 0.145 |
 
-**Training throughput (measured).** From `runs/study-shared/progress.jsonl`, the
-shared bid+play study run: 262,144 hands in 1,024 updates of 4,096 learner
-decisions, 8 collection workers, 4 torch threads.
+**Training throughput (measured, P5).** Section 6.4 timed ordinary training and
+search inside training back to back on one machine: 8 collection workers, 4 torch
+threads, 4,096-decision updates of 256 hands.
 
-| Quantity | Value |
-| --- | --- |
-| Hands per update | 256 |
-| Learner decisions per hand | 16, of which 14 are play decisions |
-| Collection | 1,108 s in total: 236.5 hands/s, i.e. 0.034 s of worker time per hand |
-| Optimization | 2,385 s in total; it runs after each collection, not alongside it |
-| Collection + optimization | **75 hands/s** (0.0133 s per hand); validation adds another 232 s over the run |
+| Per hand | Ordinary PPO | Search, *p* = 1% |
+| --- | --- | --- |
+| Collection (wall) | 2.7 ms | 27.7 ms |
+| Optimization | 1.8 ms | 4.7 ms |
+| **Total** | **4.6 ms (about 215 hands/s)** | **32.4 ms (7.1×)** |
 
-**Optimization, not collection, dominates training time.** Search runs only during
-collection.
+- **Search time:** 0.97 worker-s per searched decision.
+- **Searched decisions:** 0.089 per hand at *p* = 1%, because forced moves are
+  never searched. That is about 23 searched states per update.
 
-**Slowdown estimate.** Searching a fraction *p* of play decisions adds *p* × 14 ×
-(seconds per search) of worker time per hand. That is spread over the 8 workers,
-so it adds *p* × 14 × t / 8 of wall time per hand to the 0.0133 s:
+**Correction.** An earlier version of this section used the shared study run's
+progress log: 75 hands/s, with optimization dominating. That run trained the
+shared and paired models in parallel, which inflated its optimization time about
+5×. Its slowdown estimates (1.4–1.8× at *p* = 0.5–1%) were therefore far too
+optimistic.
 
-| *p* | Leaf-cost search (t = 0.13 s) | Throughput | Full-rollout search (t = 0.6 s) | Throughput | Searched states per update |
-| --- | --- | --- | --- | --- | --- |
-| 0.5% | 1.09× | ≈ 69 hands/s | 1.39× | ≈ 54 hands/s | ≈ 18 |
-| 1% | 1.17× | ≈ 64 hands/s | 1.79× | ≈ 42 hands/s | ≈ 36 |
-| 2% | 1.34× | ≈ 56 hands/s | 2.58× | ≈ 29 hands/s | ≈ 72 |
-| 5% | 1.85× | ≈ 41 hands/s | 4.9× | ≈ 15 hands/s | ≈ 179 |
+**Slowdown model.** Searching adds about *p* × 8.9 × t worker-seconds per hand,
+where 8.9 is the number of searchable (non-forced) learner play decisions per
+hand. That is spread over 8 workers at parallel efficiency e:
 
-The estimate assumes three things: search costs the same in a worker as in the
-single-thread measurement, collection parallelizes across the 8 workers, and the
-search loss adds negligible optimization time.
+| *p* | Perfect balance (e = 1) | Measured balance (e ≈ 0.45) |
+| --- | --- | --- |
+| 0.5% | 2.2× | 3.6× |
+| 1% | 3.3× | 6.2× (measured 7.1×, with the slower optimization) |
+| 2% | 5.7× | 11× |
+
+Full rollouts at t ≈ 1 s.
 
 **Conclusions:**
 
-- **Full rollouts fit a 2× budget up to *p* ≈ 1%.** That is about 1.8× today's
-  training (*p* = 0.5% is about 1.4×). Restricting full rollouts to late-hand
-  positions, where rollouts are short, would stretch the budget further.
-- **A verified cheap leaf** would allow *p* ≈ 2–5% within roughly 1.3–1.9× the
-  current cost.
-- **Searched states are a small share of each update.** At *p* = 1% there are
-  about 36 searched states among an update's 4,096 learner decisions (about 3,600
-  of them play decisions). Each contributes every legal action, but the
-  search-loss weight λ and *p* must be tuned together so that its signal is not
-  swamped.
-- **Optimizations not yet applied:**
+- **Full-rollout search does not fit a 2× budget** at any useful fraction, even
+  with perfect load balancing (*p* = 1% costs 3.3×). Within 2×, *p* ≈ 0.25%
+  gives about 6 searched states per update, too few to matter.
+- **Load balancing is the first fix.** It recovers about half the cost: schedule
+  searched decisions as their own pool tasks.
+- **Cheaper searches are the second:**
+  - late-hand positions (short rollouts);
+  - fewer worlds;
   - batching rollouts across worlds into one network call;
-  - fewer sampled worlds (8);
-  - searching only positions where the policy is uncertain (high entropy), which
-    targets the samples most likely to change the policy.
+  - searching only high-entropy positions.
+- **A cheap leaf that ranks (P2 option 3) is the only route to an
+  order-of-magnitude gain.** A 0.1–0.15 s leaf would put *p* = 1–2% within
+  about 1.3–1.6×.
 
-**Caveat.** These are single-thread timings on one machine with other work
-running, using positions sampled uniformly within the hand. Early-hand positions
-cost up to about 10× the mean. Treat the numbers as planning estimates.
+**Caveat.** One machine, one run per arm, background load not controlled. Search
+times come from the actual searched decisions. Accuracy-run timings (the table
+above) are lower because those runs searched fewer early-hand positions.
 
 ## 10. Implementation plan
 
@@ -1140,7 +1244,12 @@ when the previous gate passes. Defaults must reproduce current training exactly
   - CMPO KL ≤ 2c;
   - checkpoint round trip; CLI smoke.
 
-**P5. Experiments.**
+**P5. Experiments (first run done: section 6.4).**
+- **Result so far:** one seed, *p* = 1%, CMPO, λ = 0.25.
+  - Equal hands: positive (+0.022).
+  - Equal compute: negative (a control with twice the hands wins by 0.034, at
+    28% of the compute).
+  - The remaining protocol below waits for a cheaper search.
 - **Baseline:** the joint bid+play recipe (shared mode) from the same
   initialization.
 - **Treatments:** *p* ∈ {0.5%, 1%} with full rollouts (higher with a gated leaf);
