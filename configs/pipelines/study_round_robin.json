@@ -1,0 +1,243 @@
+{
+  "schema_version": 1,
+  "name": "study-round-robin-v1",
+  "description": "One-seed study round robin: every pair of Base, Shared, Paired, RRR, HHH and plain PIMC, once each (15 comparisons), on 1,024 held-out duplicate deals (seed 20261019). Reproduces the round-robin table in docs/multiphase_selfplay.md. PIMC steps take the longest (32 samples per decision). Requires the study checkpoints under runs/study-*.",
+  "output_root": "runs/pipelines/study-round-robin-v1",
+  "steps": [
+    {
+      "id": "base-vs-shared",
+      "command": "evaluate_agent_vs_agent",
+      "description": "Base (play-only, heuristic bid and trump) vs Shared (neural bid and play)",
+      "args": {
+        "agent-a-play": "neural",
+        "agent-a-checkpoint": "runs/study-play-v1/checkpoints/best.pt",
+        "agent-b-bid": "neural",
+        "agent-b-play": "neural",
+        "agent-b-checkpoint": "runs/study-shared/checkpoints/best.pt",
+        "deals": 1024,
+        "seed": 20261019,
+        "bootstrap-samples": 2000,
+        "threads": 0
+      }
+    },
+    {
+      "id": "base-vs-paired",
+      "command": "evaluate_agent_vs_agent",
+      "description": "Base (play-only, heuristic bid and trump) vs Paired pair (partner 1 seats 0/1, partner 2 seats 2/3)",
+      "args": {
+        "agent-a-play": "neural",
+        "agent-a-checkpoint": "runs/study-play-v1/checkpoints/best.pt",
+        "agent-b-bid": "neural",
+        "agent-b-play": "neural",
+        "agent-b-checkpoint": "runs/study-paired/checkpoints/partner-1/best.pt",
+        "agent-b-partner-checkpoint": "runs/study-paired/checkpoints/partner-2/best.pt",
+        "deals": 1024,
+        "seed": 20261019,
+        "bootstrap-samples": 2000,
+        "threads": 0
+      }
+    },
+    {
+      "id": "base-vs-rrr",
+      "command": "evaluate_agent_vs_agent",
+      "description": "Base (play-only, heuristic bid and trump) vs RRR (uniform random)",
+      "args": {
+        "agent-a-play": "neural",
+        "agent-a-checkpoint": "runs/study-play-v1/checkpoints/best.pt",
+        "agent-b-bid": "random",
+        "agent-b-trump": "random",
+        "agent-b-play": "random",
+        "deals": 1024,
+        "seed": 20261019,
+        "bootstrap-samples": 2000,
+        "threads": 0
+      }
+    },
+    {
+      "id": "base-vs-hhh",
+      "command": "evaluate_agent_vs_agent",
+      "description": "Base (play-only, heuristic bid and trump) vs HHH (Heuristic V1)",
+      "args": {
+        "agent-a-play": "neural",
+        "agent-a-checkpoint": "runs/study-play-v1/checkpoints/best.pt",
+        "deals": 1024,
+        "seed": 20261019,
+        "bootstrap-samples": 2000,
+        "threads": 0
+      }
+    },
+    {
+      "id": "base-vs-pimc",
+      "command": "evaluate_agent_vs_agent",
+      "description": "Base (play-only, heuristic bid and trump) vs Plain PIMC (heuristic bidding, 32 samples)",
+      "args": {
+        "agent-a-play": "neural",
+        "agent-a-checkpoint": "runs/study-play-v1/checkpoints/best.pt",
+        "agent-b-trump": "pimc",
+        "agent-b-play": "pimc",
+        "deals": 1024,
+        "seed": 20261019,
+        "bootstrap-samples": 2000,
+        "threads": 0
+      }
+    },
+    {
+      "id": "shared-vs-paired",
+      "command": "evaluate_agent_vs_agent",
+      "description": "Shared (neural bid and play) vs Paired pair (partner 1 seats 0/1, partner 2 seats 2/3)",
+      "args": {
+        "agent-a-bid": "neural",
+        "agent-a-play": "neural",
+        "agent-a-checkpoint": "runs/study-shared/checkpoints/best.pt",
+        "agent-b-bid": "neural",
+        "agent-b-play": "neural",
+        "agent-b-checkpoint": "runs/study-paired/checkpoints/partner-1/best.pt",
+        "agent-b-partner-checkpoint": "runs/study-paired/checkpoints/partner-2/best.pt",
+        "deals": 1024,
+        "seed": 20261019,
+        "bootstrap-samples": 2000,
+        "threads": 0
+      }
+    },
+    {
+      "id": "shared-vs-rrr",
+      "command": "evaluate_agent_vs_agent",
+      "description": "Shared (neural bid and play) vs RRR (uniform random)",
+      "args": {
+        "agent-a-bid": "neural",
+        "agent-a-play": "neural",
+        "agent-a-checkpoint": "runs/study-shared/checkpoints/best.pt",
+        "agent-b-bid": "random",
+        "agent-b-trump": "random",
+        "agent-b-play": "random",
+        "deals": 1024,
+        "seed": 20261019,
+        "bootstrap-samples": 2000,
+        "threads": 0
+      }
+    },
+    {
+      "id": "shared-vs-hhh",
+      "command": "evaluate_agent_vs_agent",
+      "description": "Shared (neural bid and play) vs HHH (Heuristic V1)",
+      "args": {
+        "agent-a-bid": "neural",
+        "agent-a-play": "neural",
+        "agent-a-checkpoint": "runs/study-shared/checkpoints/best.pt",
+        "deals": 1024,
+        "seed": 20261019,
+        "bootstrap-samples": 2000,
+        "threads": 0
+      }
+    },
+    {
+      "id": "shared-vs-pimc",
+      "command": "evaluate_agent_vs_agent",
+      "description": "Shared (neural bid and play) vs Plain PIMC (heuristic bidding, 32 samples)",
+      "args": {
+        "agent-a-bid": "neural",
+        "agent-a-play": "neural",
+        "agent-a-checkpoint": "runs/study-shared/checkpoints/best.pt",
+        "agent-b-trump": "pimc",
+        "agent-b-play": "pimc",
+        "deals": 1024,
+        "seed": 20261019,
+        "bootstrap-samples": 2000,
+        "threads": 0
+      }
+    },
+    {
+      "id": "paired-vs-rrr",
+      "command": "evaluate_agent_vs_agent",
+      "description": "Paired pair (partner 1 seats 0/1, partner 2 seats 2/3) vs RRR (uniform random)",
+      "args": {
+        "agent-a-bid": "neural",
+        "agent-a-play": "neural",
+        "agent-a-checkpoint": "runs/study-paired/checkpoints/partner-1/best.pt",
+        "agent-a-partner-checkpoint": "runs/study-paired/checkpoints/partner-2/best.pt",
+        "agent-b-bid": "random",
+        "agent-b-trump": "random",
+        "agent-b-play": "random",
+        "deals": 1024,
+        "seed": 20261019,
+        "bootstrap-samples": 2000,
+        "threads": 0
+      }
+    },
+    {
+      "id": "paired-vs-hhh",
+      "command": "evaluate_agent_vs_agent",
+      "description": "Paired pair (partner 1 seats 0/1, partner 2 seats 2/3) vs HHH (Heuristic V1)",
+      "args": {
+        "agent-a-bid": "neural",
+        "agent-a-play": "neural",
+        "agent-a-checkpoint": "runs/study-paired/checkpoints/partner-1/best.pt",
+        "agent-a-partner-checkpoint": "runs/study-paired/checkpoints/partner-2/best.pt",
+        "deals": 1024,
+        "seed": 20261019,
+        "bootstrap-samples": 2000,
+        "threads": 0
+      }
+    },
+    {
+      "id": "paired-vs-pimc",
+      "command": "evaluate_agent_vs_agent",
+      "description": "Paired pair (partner 1 seats 0/1, partner 2 seats 2/3) vs Plain PIMC (heuristic bidding, 32 samples)",
+      "args": {
+        "agent-a-bid": "neural",
+        "agent-a-play": "neural",
+        "agent-a-checkpoint": "runs/study-paired/checkpoints/partner-1/best.pt",
+        "agent-a-partner-checkpoint": "runs/study-paired/checkpoints/partner-2/best.pt",
+        "agent-b-trump": "pimc",
+        "agent-b-play": "pimc",
+        "deals": 1024,
+        "seed": 20261019,
+        "bootstrap-samples": 2000,
+        "threads": 0
+      }
+    },
+    {
+      "id": "rrr-vs-hhh",
+      "command": "evaluate_agent_vs_agent",
+      "description": "RRR (uniform random) vs HHH (Heuristic V1)",
+      "args": {
+        "agent-a-bid": "random",
+        "agent-a-trump": "random",
+        "agent-a-play": "random",
+        "deals": 1024,
+        "seed": 20261019,
+        "bootstrap-samples": 2000,
+        "threads": 0
+      }
+    },
+    {
+      "id": "rrr-vs-pimc",
+      "command": "evaluate_agent_vs_agent",
+      "description": "RRR (uniform random) vs Plain PIMC (heuristic bidding, 32 samples)",
+      "args": {
+        "agent-a-bid": "random",
+        "agent-a-trump": "random",
+        "agent-a-play": "random",
+        "agent-b-trump": "pimc",
+        "agent-b-play": "pimc",
+        "deals": 1024,
+        "seed": 20261019,
+        "bootstrap-samples": 2000,
+        "threads": 0
+      }
+    },
+    {
+      "id": "hhh-vs-pimc",
+      "command": "evaluate_agent_vs_agent",
+      "description": "HHH (Heuristic V1) vs Plain PIMC (heuristic bidding, 32 samples)",
+      "args": {
+        "agent-b-trump": "pimc",
+        "agent-b-play": "pimc",
+        "deals": 1024,
+        "seed": 20261019,
+        "bootstrap-samples": 2000,
+        "threads": 0
+      }
+    }
+  ]
+}

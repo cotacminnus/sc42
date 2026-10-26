@@ -66,6 +66,7 @@ python -m examples.run_pipeline --config configs/pipelines/progressive_training.
 | Independently train/freeze bidding, trump and play; composed/historical opponents | [Multi-phase PPO](docs/multiphase_selfplay.md) |
 | Two separately trained partner networks; pair and cross-play evaluation | [Paired partners](docs/multiphase_selfplay.md#paired-partner-training) |
 | Independently composed agents and phase ablations | [Phase-composable evaluation](docs/phase_composable_evaluation.md) |
+| Comparing models: one model against each baseline (for example paired vs CHH), batches and round robins with a summary table | [Model comparisons](docs/command_reference.md#model-comparisons-and-round-robins) |
 | Duplicate deals, metrics, bootstrap uncertainty | [Arena methodology](docs/arena.md) |
 | Frozen heuristic and random/conservative variants | [Heuristic V1](docs/simpleheuristic.md), [policy ablations](docs/policy_ablation.md) |
 | Bid-versus-pass replay experiments | [Counterfactual bidding](docs/counterfactual_bidding.md) |

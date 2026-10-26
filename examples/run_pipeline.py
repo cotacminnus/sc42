@@ -31,6 +31,7 @@ import sys
 SCHEMA_VERSION = 1
 MANIFEST_VERSION = 1
 STATE_FILE = 'pipeline_state.json'
+SUMMARY_FILE = 'summary.md'  # Comparison table of evaluate_agent_vs_agent results, written on completion.
 REPOSITORY = Path(__file__).resolve().parents[1]
 
 # The only executable entry points. kind decides automatic outputs, references and resume.
@@ -46,7 +47,8 @@ STATUS = {'training': 'TRAINING', 'evaluation': 'EVALUATING', 'dataset': 'LABELI
 OUTPUT_FILES = {'evaluation': 'result.json', 'dataset': 'labels.json'}
 # Arguments holding an input file that must exist (references or external paths).
 INPUT_FLAGS = re.compile(r'^(init-checkpoint|init-play-checkpoint|resume|warm-start|anchor-checkpoint|checkpoint|'
-                         r'oracle-dataset|agent-[ab](-(bid|trump|play))?-checkpoint)$')
+                         r'oracle-dataset|agent-[ab](-partner)?(-(bid|trump|play))?-checkpoint|'
+                         r'agent-[ab]-pimc-model)$')
 NAMED_INPUT_FLAGS = ('opponent-checkpoint',)  # NAME=PATH
 REFERENCE = re.compile(r'\$\{([A-Za-z0-9_-]+)\.(best|latest|output)\}')
 STEP_ID = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_-]*$')
@@ -282,10 +284,11 @@ def _check_collisions(pipeline):
         for b, sb, nb in owned[i + 1:]:
             if sa != sb and (a == b or a in b.parents or b in a.parents):
                 raise PipelineError(f'Output collision: {sa} {na} {a} overlaps {sb} {nb} {b}')
-    state = pipeline.output_root / STATE_FILE
+    reserved = {pipeline.output_root / STATE_FILE: 'the pipeline manifest',
+                pipeline.output_root / SUMMARY_FILE: 'the comparison summary'}
     for path, sid, name in owned:
-        if path == state:
-            raise PipelineError(f'Step {sid} {name} collides with the pipeline manifest')
+        if path in reserved:
+            raise PipelineError(f'Step {sid} {name} collides with {reserved[path]}')
 
 
 def resolve_args(step, pipeline, *, require=True):
@@ -621,7 +624,45 @@ def run(pipeline, *, resume=False, runner=subprocess.run):
         write_manifest(pipeline, manifest)
         label(step, total, width, 'COMPLETED')
     print('\nPipeline completed successfully.')
+    summary = comparison_summary(pipeline)
+    if summary is not None:
+        path = pipeline.output_root / SUMMARY_FILE
+        path.write_text(summary, encoding='utf-8')
+        print(f'\nComparison summary ({path}):\n\n{summary}')
     return 0
+
+
+def comparison_summary(pipeline):
+    """Markdown table of every evaluate_agent_vs_agent result, or None when the pipeline has none.
+
+    One row per step, in pipeline order: agent A's signed marks per hand and
+    win rate with the 95% intervals the command reported (whole duplicate
+    groups resampled), and the games played. Agent B's numbers are the mirror
+    image. Other commands keep their own reports.
+    """
+    descriptions = {raw['id']: raw.get('description', '') for raw in pipeline.config['steps']}
+    rows = []
+    for step in pipeline.steps:
+        if step.command != 'evaluate_agent_vs_agent':
+            continue
+        try:
+            report = json.loads(output_paths(step)['output'].read_text(encoding='utf-8'))
+            metrics = next(m for m in report['metrics'] if m['policy'] == 'A')
+            interval = next(i for i in report['intervals'] if i['policy'] == 'A')
+            marks, win = interval['mean_signed_marks'], interval['win_rate']
+            rows.append(f"| {step.id} | {descriptions.get(step.id, '')} | {metrics['mean_signed_marks']:+.3f} "
+                        f"[{marks['low']:+.3f}, {marks['high']:+.3f}] | {metrics['win_rate']:.1%} "
+                        f"[{win['low']:.1%}, {win['high']:.1%}] | {metrics['games_played']} |")
+        except (OSError, ValueError, KeyError, TypeError, StopIteration):
+            rows.append(f"| {step.id} | {descriptions.get(step.id, '')} | (no agent-vs-agent result) | | |")
+    if not rows:
+        return None
+    return '\n'.join([
+        f'# Comparison summary: {pipeline.name}', '',
+        'Agent A against agent B in each `evaluate_agent_vs_agent` step: A\'s signed marks per hand and win '
+        'rate, with 95% intervals that resample whole duplicate groups. B\'s results are the mirror image.', '',
+        '| Step | Description | A marks/hand (95% CI) | A win rate (95% CI) | Games |',
+        '| --- | --- | --- | --- | --- |', *rows]) + '\n'
 
 
 def main(argv=None):

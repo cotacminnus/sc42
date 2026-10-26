@@ -539,6 +539,15 @@ Evaluation is greedy neural inference on held-out duplicate deals (seed 20261019
 The Paired model is always evaluated as its pair (partner 2 in each team's second
 seat).
 
+**Reproduce the evaluations** with the tracked pipelines. Each writes a
+`summary.md`; the commands are in
+[model comparisons](command_reference.md#model-comparisons-and-round-robins).
+
+```bash
+python -m examples.run_pipeline --config configs/pipelines/study_comparisons.json   # table below
+python -m examples.run_pipeline --config configs/pipelines/study_round_robin.json   # round robin below
+```
+
 **Against fixed opponents** (2,048 deals, 4,096 games; signed marks/hand, 95% CI):
 
 | Opponent | Shared | Paired |

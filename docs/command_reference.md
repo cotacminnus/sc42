@@ -20,7 +20,7 @@ page owns *how to run things*.
 - [PPO training overview](#ppo-training-overview) — choosing a trainer, [workflow finder](#workflow-finder)
 - [Legacy trainer: train_ppo](#legacy-trainer-train_ppo) — Recipe 1, resume, mixed opponents
 - [Multi-phase trainer: train_selfplay_ppo](#multi-phase-trainer-train_selfplay_ppo) — Recipes 2–11 and 13–15 (from scratch, policy-only PPO), arguments, artifacts, troubleshooting
-- [Evaluation](#evaluation) — agent-vs-agent composition (Recipe 12), compatibility commands
+- [Evaluation](#evaluation) — agent-vs-agent composition (Recipe 12), [model comparisons and round robins](#model-comparisons-and-round-robins), compatibility commands
 - [Experiment pipelines](#experiment-pipelines) — JSON-defined step sequences ([full guide](experiment_pipelines.md))
 - [Performance benchmarks](#performance-benchmarks)
 - [Reproducibility checklist](#reproducibility-checklist)
@@ -125,6 +125,7 @@ Any other failure is a real one.
 | Train legacy play-only PPO | `python -m examples.train_ppo` | `rl` | [Legacy trainer](#legacy-trainer-train_ppo) |
 | Train independent-phase PPO / historical self-play | `python -m examples.train_selfplay_ppo` | `rl` | [Multi-phase trainer](#multi-phase-trainer-train_selfplay_ppo) |
 | Phase-composed agent-vs-agent evaluation (canonical) | `python -m examples.evaluate_agent_vs_agent` | `rl` only for neural phases | [Agent-vs-agent](#agent-vs-agent-composition) |
+| A model against each baseline, batches, round robins with a summary | `python -m examples.run_pipeline --config configs/pipelines/study_comparisons.json` | `rl` for neural agents | [Model comparisons](#model-comparisons-and-round-robins) |
 | Legacy checkpoint evaluation | `python -m examples.evaluate_ppo` | `rl` | [Compatibility evaluation](#compatibility-evaluation) |
 | Multi-opponent phase evaluation (anchors, archives) | `python -m examples.evaluate_selfplay_ppo` | `rl` | [Compatibility evaluation](#compatibility-evaluation) |
 | Agent API demo (no arguments) | `python -m examples.agent_selfplay` | — | [Self-play examples](#self-play-examples) |
@@ -1717,6 +1718,106 @@ a non-neural strategy is rejected. Different neural files are allowed per phase,
 including archived snapshots. Each selected network must satisfy metadata and
 trained-phase checks. Actual network tensors, not just paths/hashes, determine
 shared-parameter assertions. See [composition semantics](phase_composable_evaluation.md).
+
+### Model comparisons and round robins
+
+Every comparison is one `evaluate_agent_vs_agent` run: agent A's flags plus
+agent B's flags, on duplicate deals. Use the same `--deals`/`--seed` for every
+comparison in a set so they share deals, and keep evaluation seeds distinct from
+training seeds.
+
+**Agent flags.** These are written for side A; replace `-a-` with `-b-` for side B.
+Checkpoint paths are the study runs'; substitute your own. Components and
+strengths are in the [agent catalogue](phase_composable_evaluation.md#agent-catalogue).
+
+| Agent | Flags |
+| --- | --- |
+| HHH (Heuristic V1) | none |
+| HHR | `--agent-a-play random` |
+| HRR | `--agent-a-trump random --agent-a-play random` |
+| CHH | `--agent-a-bid conservative` |
+| CRR | `--agent-a-bid conservative --agent-a-trump random --agent-a-play random` |
+| RRR | `--agent-a-bid random --agent-a-trump random --agent-a-play random` |
+| Plain PIMC | `--agent-a-trump pimc --agent-a-play pimc` (add `--pimc-samples N`; default 32) |
+| Base (play-only) model | `--agent-a-checkpoint runs/study-play-v1/checkpoints/best.pt --agent-a-play neural` |
+| Shared (bid+play) model | `--agent-a-checkpoint runs/study-shared/checkpoints/best.pt --agent-a-bid neural --agent-a-play neural` |
+| Paired pair | `--agent-a-checkpoint runs/study-paired/checkpoints/partner-1/best.pt --agent-a-partner-checkpoint runs/study-paired/checkpoints/partner-2/best.pt --agent-a-bid neural --agent-a-play neural` |
+| Model-guided PIMC | `--agent-a-trump pimc --agent-a-play pimc --agent-a-pimc-model runs/study-shared/checkpoints/best.pt` |
+
+**One comparison: the paired pair against CHH.**
+
+```bash
+python -m examples.evaluate_agent_vs_agent \
+  --agent-a-checkpoint runs/study-paired/checkpoints/partner-1/best.pt \
+  --agent-a-partner-checkpoint runs/study-paired/checkpoints/partner-2/best.pt \
+  --agent-a-bid neural --agent-a-play neural \
+  --agent-b-bid conservative \
+  --deals 2048 --seed 20261019 --bootstrap-samples 2000 --threads 0 \
+  --output runs/compare/paired-vs-chh.json --log-dir logs/experiments/paired-vs-chh
+```
+
+The console report and the JSON give A's signed marks per hand and win rate with
+95% intervals (whole duplicate groups resampled), plus contract and role
+breakdowns. B's results are the mirror image.
+
+**Many comparisons: pipelines.** A pipeline runs a list of comparisons in one
+command, resumes after interruption, hashes every checkpoint it reads, and on
+completion writes `OUTPUT_ROOT/summary.md` with one table row per comparison
+([pipelines](experiment_pipelines.md)). Two tracked configurations reproduce the
+one-seed study ([results](multiphase_selfplay.md#one-seed-study-base-shared-and-paired-262144-hands)):
+
+| Configuration | Comparisons |
+| --- | --- |
+| `configs/pipelines/study_comparisons.json` | Shared and Paired each against HHH, HHR, HRR, CHH, CRR and RRR, then Paired against Shared: 13 steps, 2,048 deals |
+| `configs/pipelines/study_round_robin.json` | Every pair of Base, Shared, Paired, RRR, HHH and plain PIMC: 15 steps, 1,024 deals. The PIMC steps take the longest. |
+
+```bash
+python -m examples.run_pipeline --config configs/pipelines/study_comparisons.json --dry-run  # check paths first
+python -m examples.run_pipeline --config configs/pipelines/study_comparisons.json            # run all 13
+python -m examples.run_pipeline --config configs/pipelines/study_comparisons.json --resume   # after an interruption
+# Results: runs/pipelines/study-comparisons-v1/summary.md (and <step>/result.json per comparison)
+```
+
+To compare your own models:
+
+1. Copy a configuration.
+2. Change `name` and `output_root`.
+3. Edit each step's `args`, which are the flags above without the leading `--`.
+4. Dry-run it.
+
+A new `output_root` is needed for every changed configuration.
+
+**Ad hoc batches without a pipeline** (no resume or summary; each run writes its
+own JSON):
+
+```bash
+# bash: one model against every fixed variant
+MODEL="--agent-a-checkpoint runs/study-shared/checkpoints/best.pt --agent-a-bid neural --agent-a-play neural"
+declare -A OPPONENT=( [hhh]="" [hhr]="--agent-b-play random" [hrr]="--agent-b-trump random --agent-b-play random"
+  [chh]="--agent-b-bid conservative" [crr]="--agent-b-bid conservative --agent-b-trump random --agent-b-play random"
+  [rrr]="--agent-b-bid random --agent-b-trump random --agent-b-play random" )
+for NAME in "${!OPPONENT[@]}"; do
+  python -m examples.evaluate_agent_vs_agent $MODEL ${OPPONENT[$NAME]} \
+    --deals 2048 --seed 20261019 --threads 0 --output runs/compare/shared-vs-$NAME.json
+done
+```
+
+```powershell
+# PowerShell: the same loop
+$model = '--agent-a-checkpoint', 'runs/study-shared/checkpoints/best.pt', '--agent-a-bid', 'neural', '--agent-a-play', 'neural'
+$opponents = @{ hhh = @(); hhr = @('--agent-b-play', 'random'); hrr = @('--agent-b-trump', 'random', '--agent-b-play', 'random');
+  chh = @('--agent-b-bid', 'conservative'); crr = @('--agent-b-bid', 'conservative', '--agent-b-trump', 'random', '--agent-b-play', 'random');
+  rrr = @('--agent-b-bid', 'random', '--agent-b-trump', 'random', '--agent-b-play', 'random') }
+foreach ($name in $opponents.Keys) {
+  python -m examples.evaluate_agent_vs_agent @model @($opponents[$name]) --deals 2048 --seed 20261019 --threads 0 --output "runs/compare/shared-vs-$name.json"
+}
+```
+
+For a single shared-mode checkpoint against several built-in variants in one
+process, `evaluate_selfplay_ppo --checkpoint PATH --opponents HHH,CHH,HHR` also
+works ([compatibility commands](#compatibility-evaluation)). It does not take a
+paired partner; use `evaluate_agent_vs_agent` for pairs, PIMC and mixed
+compositions.
 
 ### Compatibility evaluation
 
