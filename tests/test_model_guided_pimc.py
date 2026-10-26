@@ -141,6 +141,56 @@ class ModelGuidedPIMCTests(unittest.TestCase):
                 CompositeAgentFactory(spec, pimc_leaf=leaf).prepare()
         CompositeAgentFactory(spec).prepare()  # Full rollouts never read the value heads.
 
+    def test_cmpo_target_properties(self):
+        from research.ppo.search import (advantage_scale, cmpo_target, masked_kl, masked_log_softmax,
+                                         search_advantages)
+        generator = torch.Generator().manual_seed(0)
+        masks = torch.rand(64, 58, generator=generator) < 0.12
+        masks[:, 0] = True  # At least one legal move per row.
+        log_old = masked_log_softmax(3 * torch.randn(64, 58, generator=generator), masks)
+        q = 10 * torch.randn(64, 58, generator=generator)
+        advantage, p_old = search_advantages(log_old, q, masks)
+        # The baseline makes advantages average to zero under pi_old; illegal entries are zero.
+        self.assertTrue(torch.allclose((p_old * advantage).sum(-1), torch.zeros(64), atol=1e-4))
+        self.assertTrue(torch.all(advantage[~masks] == 0))
+        sigma = advantage_scale(p_old, advantage)
+        for clip in (0.5, 1.0, 2.0):
+            log_target = cmpo_target(log_old, advantage, masks, clip, sigma)
+            ratio = (log_target - log_old)[masks]
+            self.assertTrue(torch.all(ratio.abs() <= 2 * clip + 1e-5))  # Each move: factor <= e^(2c).
+            self.assertTrue(torch.all(torch.isfinite(log_target[masks])))  # No legal move removed.
+            self.assertTrue(torch.all(log_target[~masks] == -torch.inf))
+            self.assertTrue(torch.all(masked_kl(log_target, log_old, masks) <= 2 * clip + 1e-5))
+
+    def test_search_distillation_pilot_smoke(self):
+        from examples.search_distillation_pilot import main
+        from research.ppo.checkpoint import read
+        with tempfile.TemporaryDirectory() as directory, contextlib.redirect_stdout(io.StringIO()):
+            out = Path(directory) / 'pilot'
+            argv = ['--source', str(self.joint), '--output-dir', str(out), '--games', '3',
+                    '--positions-per-game', '1', '--samples', '2', '--threads', '1', '--max-epochs', '2',
+                    '--validation-every', '3', '--log-dir', str(Path(directory) / 'log')]
+            rows = main(argv + ['--clip', '1', '2'])
+            self.assertEqual([row['clip'] for row in rows], [1.0, 2.0])
+            source = read(self.joint)
+            for clip in (1, 2):
+                data = read(out / f'distilled-c{clip}.pt')  # Validates the version-2 checkpoint.
+                derivation = data['metadata']['derivation']
+                self.assertEqual((derivation['kind'], derivation['clip'], derivation['source_sha256']),
+                                 ('search-distillation-pilot-v1', float(clip), self.identity.sha256))
+                for key, value in source['model'].items():  # Only the play network may change.
+                    if not key.startswith('networks.play.'):
+                        self.assertTrue(torch.equal(value, data['model'][key]), key)
+                diagnostics = json.loads((out / f'distilled-c{clip}.json').read_text())
+                self.assertLessEqual(diagnostics['target_step_kl_mean'], 2 * clip + 1e-6)
+                self.assertEqual(diagnostics['train_states'] + diagnostics['validation_states'], 3)
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                main(argv + ['--clip', '1'])  # Same settings: the cached search is reused.
+            self.assertIn('Reusing the search', output.getvalue())
+            with self.assertRaises(SystemExit):  # Different settings never reuse a cache.
+                main([a if a != '2' else '3' for a in argv] + ['--clip', '1'])
+
     def test_marks_objective(self):
         obs = observations(5, lambda o: o.phase == 'play' and len(o.view.completed_tricks) == 4)[0]
         hhh = (variant_factory('HHH'),) * 4

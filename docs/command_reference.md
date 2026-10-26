@@ -1455,6 +1455,43 @@ outcomes. It plays hands with the model (`--table model`) or Heuristic V1
 | `--seed` | `20261022` | Deals, table seats, position sampling and search streams |
 | `--output` | unset | JSON with per-position rows and the summary; `--log-dir` also gets a per-position CSV |
 
+**Offline search distillation (pilot).** `examples.search_distillation_pilot`
+runs one regularized improvement step offline:
+
+1. Search positions from the source model's own self-play.
+2. Build CMPO targets from the search.
+3. Fine-tune only the play network toward them.
+
+The output is an ordinary version-2 checkpoint with a `derivation` record. These
+commands reproduce the pilots exactly. Method and results are in
+[search in training](search_training.md#62-one-step-distillation-pilot).
+
+```bash
+# Round 1 (one search, two step sizes), then round 2 from the round-1 c=2 model
+python -m examples.search_distillation_pilot --source runs/study-shared/checkpoints/best.pt \
+  --output-dir runs/model-guided/pilot --clip 1 2 --threads 8
+python -m examples.search_distillation_pilot --source runs/model-guided/pilot/distilled-c2.pt \
+  --output-dir runs/model-guided/pilot/round2 --seed 20261027 --clip 2 --threads 8
+# Evaluate a distilled model against its source on held-out deals
+python -m examples.evaluate_agent_vs_agent \
+  --agent-a-checkpoint runs/model-guided/pilot/round2/distilled-c2.pt --agent-a-bid neural --agent-a-play neural \
+  --agent-b-checkpoint runs/study-shared/checkpoints/best.pt --agent-b-bid neural --agent-b-play neural \
+  --deals 4096 --seed 20261026 --threads 0 --output runs/model-guided/pilot/round2/arena-r2-vs-shared.json
+```
+
+| `search_distillation_pilot` argument | Default | Meaning |
+| --- | --- | --- |
+| `--source` | required | Version-2 checkpoint with a trained play network: the policy improved and the search guide |
+| `--output-dir` | required | `searched.pt` (search cache, reused when the settings match), `distilled-c{C}.pt` and `.json` diagnostics |
+| `--clip` | `2` | CMPO clip c (one or more values; one checkpoint each, sharing one search) |
+| `--games`, `--positions-per-game` | `1000`, `4` | Self-play hands, and play decisions (with at least two legal moves) sampled from each |
+| `--samples` | `16` | Sampled worlds per search (full model rollouts, points objective) |
+| `--seed` | `20261025` | Positions, search streams and fine-tuning |
+| `--validation-every` | `10` | Hold out every N-th hand for early stopping and diagnostics |
+| `--learning-rate`, `--batch-size`, `--max-epochs`, `--patience` | `1e-4`, `256`, `50`, `5` | Adam fine-tuning of the play network, with early stopping on the held-out KL |
+| `--value-weight` | `1.0` | Weight of the term that keeps the shared trunk's value outputs |
+| `--threads` | `0` | Search processes: `0` auto (capped at 8), `1` sequential. Results do not depend on it. |
+
 #### Recipe 12: held-out phase ablations
 
 Prerequisites: the trained checkpoints in each comparison, including all requested

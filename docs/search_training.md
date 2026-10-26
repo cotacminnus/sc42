@@ -759,8 +759,13 @@ points-scale or search-supervised head), not just a better stopping point.
 improvement step, distilled from search, make the network itself play better?
 That is one iteration of the integrated loop of section 4.5, run offline.
 
-**Setup.** A scratch pilot, not committed. Its settings and outputs are in
-`runs/model-guided/pilot/`.
+**Setup.** `examples.search_distillation_pilot`
+([command](command_reference.md#model-guided-pimc)).
+It reproduces these results exactly: the search and the checkpoint are
+bit-identical to the original scratch run. Outputs are in
+`runs/model-guided/pilot/`. The target functions (`search_advantages`,
+`cmpo_target`, `masked_kl`) live in `research/ppo/search.py`, where the training
+search loss (P4) reuses them.
 
 - **States:** the shared bid+play model at all four seats (greedy, its own
   evaluation distribution) for 1,000 hands, seed 20261025. 4 play decisions with

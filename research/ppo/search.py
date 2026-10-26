@@ -155,4 +155,55 @@ class ValueLeaf:
         return value if obs.seat % 2 == observer % 2 else -value
 
 
-__all__ = ['ValueLeaf', 'model_factories', 'model_policy_spec', 'trained_phases', 'value_heads_trained']
+# ---------------------------------------------------------------------------
+# Search-derived policy targets (docs/search_training.md, sections 4.3-4.4).
+# Shared by the offline distillation pilot (examples/search_distillation_pilot)
+# and the search loss in training. Batched tensors, one row per searched
+# state, 58 action columns; masks are the legal-action masks.
+# ---------------------------------------------------------------------------
+
+def masked_log_softmax(logits, masks):
+    """Log-probabilities over legal moves only (-inf on illegal ones)."""
+    import torch
+    return torch.log_softmax(logits.masked_fill(~masks, -torch.inf), -1)
+
+
+def search_advantages(log_old, q, masks):
+    """(Â, π_old): Â(a) = Q̂(a) - Σ_b π_old(b) Q̂(b) on legal moves, 0 elsewhere.
+
+    log_old is the masked log-policy that the search improves on, and q holds
+    the search's estimate for each legal move (other entries are ignored). The
+    baseline Σ π_old Q̂ makes Â average to zero under π_old, which leaves the
+    policy gradient unchanged at θ_old (section 4.3).
+    """
+    import torch
+    zeros = torch.zeros_like(q)
+    p_old = torch.where(masks, log_old.exp(), zeros)
+    baseline = (p_old * torch.where(masks, q, zeros)).sum(-1, keepdim=True)
+    return torch.where(masks, q - baseline, zeros), p_old
+
+
+def advantage_scale(p_old, advantage):
+    """σ = sqrt(mean over states of Σ_a π_old(a) Â(a)²), the CMPO normalizer."""
+    return float((p_old * advantage ** 2).sum(-1).mean().sqrt())
+
+
+def cmpo_target(log_old, advantage, masks, clip, sigma):
+    """Muesli's clipped MPO target: log π̄ with π̄ ∝ π_old · exp(clip(Â/σ, -c, c)).
+
+    The tilt keeps every legal move (π̄ > 0 wherever π_old > 0), changes each
+    probability by at most a factor e^(2c), and bounds KL(π̄ ‖ π_old) ≤ 2c
+    (section 4.4).
+    """
+    x = (advantage / sigma).clamp(-clip, clip)
+    return masked_log_softmax(log_old + x, masks)
+
+
+def masked_kl(log_p, log_q, masks):
+    """KL(p ‖ q) per row over legal moves (illegal entries are -inf in both)."""
+    import torch
+    return torch.where(masks, log_p.exp() * (log_p - log_q), torch.zeros_like(log_p)).sum(-1)
+
+
+__all__ = ['ValueLeaf', 'advantage_scale', 'cmpo_target', 'masked_kl', 'masked_log_softmax', 'model_factories',
+           'model_policy_spec', 'search_advantages', 'trained_phases', 'value_heads_trained']
