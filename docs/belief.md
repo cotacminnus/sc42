@@ -568,7 +568,30 @@ What the strength results show:
   - They beat the guide model itself by +0.34 marks/hand, about twice plain
     PIMC's margin over the same model (+0.16).
   - Head-to-head they lead plain PIMC by +0.094, but that interval includes 0 at
-    128 deals.
+    128 deals. The 1,024-deal confirmation below settles it: smaller, but
+    significant.
+
+**Confirmation at 1,024 deals.** 2,048 games per row, fresh seed 20261030, the same
+settings as above: heuristic bidding for every PIMC agent, 16 samples, full
+rollouts, uniform belief. Outputs are in `runs/model-guided/arena-1024/`.
+
+| A | B | A marks/hand | A win rate |
+| --- | --- | --- | --- |
+| Model-guided PIMC (shared guide) | Plain PIMC | **+0.045** [+0.009, +0.081] | 52.2% |
+| Model-guided PIMC (shared guide) | Base model (heuristic bid and trump, neural play) | **+0.381** [+0.348, +0.415] | 69.0% |
+| Model-guided PIMC (round-2 distilled guide) | Plain PIMC | **+0.044** [+0.006, +0.081] | 52.2% |
+| Model-guided PIMC (round-2 distilled guide) | Model-guided PIMC (shared guide) | +0.027 [−0.004, +0.061] | 51.4% |
+
+- **Model-guided search is the strongest agent measured.** It beats plain PIMC
+  significantly, though by about half the 128-deal estimate. It beats the
+  play-only base model by +0.38 marks/hand.
+- **A better guide makes at most a slightly better search, so far.** The round-2
+  distilled network beats its source by +0.015 on its own
+  ([search in training](search_training.md#63-second-distillation-round-do-the-gains-compound)).
+  As a guide:
+  - it leads the shared-guided search head-to-head by +0.027, an interval that
+    includes 0;
+  - it ties it against plain PIMC (+0.044 vs +0.045 on the same deals).
 - **The value leaf loses strength, despite accurate value estimates for the
   move actually played.** An objective ablation (64 deals, scratch script
   recorded in `runs/model-guided/objective-ablation.json`) separates the two

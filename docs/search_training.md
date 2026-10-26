@@ -45,8 +45,10 @@ already exist; see [belief modelling](belief.md#model-guided-pimc).
   - A cheap leaf needs a better value estimate first (P2 option 3).
   - Expect a modest effect, and confirm it at equal compute (P5).
 - **Decision-time search is already strong.** Model-guided search with full
-  rollouts is the strongest agent measured: +0.34 marks/hand over its own guide
-  model.
+  rollouts is the strongest agent measured, at 1,024 deals:
+  - +0.045 [+0.009, +0.081] marks/hand over plain heuristic PIMC;
+  - +0.38 over the base model;
+  - +0.34 over its own guide model (128 deals).
 
 ## Contents
 
@@ -1102,6 +1104,14 @@ when the previous gate passes. Defaults must reproduce current training exactly
   by the PPO-only model.
 - This tests section 4.5's claims 1 and 3: J(𝓘(π<sub>int</sub>)) vs
   J(𝓘(π<sub>PPO</sub>)), and π<sub>int</sub> vs π<sub>PPO</sub> without search.
+- **Preliminary, with the offline round-2 network as guide**
+  ([1,024-deal results](belief.md#model-guided-results)):
+  - head-to-head against shared-guided search: +0.027 [−0.004, +0.061]
+    marks/hand;
+  - against plain PIMC: +0.044 vs +0.045 for the shared guide, on the same
+    deals.
+  - So a +0.015 better network has not yet produced a measurably better search.
+    Claim 3 needs a larger gain in the network itself.
 
 ## 11. Open questions
 
