@@ -138,10 +138,12 @@ Next experiments:
     [results](search_training.md#64-first-in-training-run-p5-one-seed)):
     - at equal hands, search beats ordinary PPO (+0.022 marks/hand) and doubles
       the gain over the starting model;
-    - but it costs about 7× per hand, and a control with twice the hands beats
-      it (−0.034).
-  - **Next:** cut the cost (load balancing, cheaper search positions, a leaf
-    that ranks), then run the 3-seed equal-CPU comparison.
+    - but it costs about 2.5× per hand after load balancing, and a control with
+      twice the hands (81% of the compute) beats it (−0.034).
+  - **Next:**
+    - test a smaller fraction (*p* = 0.5%, about 1.75×);
+    - cut the search cost further (cheaper positions, a leaf that ranks);
+    - then run the 3-seed equal-CPU comparison.
 
 Short smoke tests establish mechanics, not competitive gains or generalization.
 

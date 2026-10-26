@@ -224,6 +224,7 @@ class SelfPlayTrainer(Trainer):
         self.oracle_data = self.oracle_validation = self.oracle_summary = None
         self.oracle_shuffle = self.value_diagnostics = None
         self.search_diagnostics, self._search_sums = None, None  # Last update's search loss diagnostics.
+        self.search_performance = None  # Last rollout's search pass: decisions, worker and wall seconds.
         if config.oracle_aux_coef > 0:
             from .oracle_dataset import load_dataset, training_tensors
             dataset = load_dataset(config.oracle_dataset, sha256=config.oracle_dataset_sha256)
@@ -339,6 +340,8 @@ class SelfPlayTrainer(Trainer):
         rows.sort(key=lambda r: r['episode'])
         if [r['episode'] for r in rows] != indices:
             raise RuntimeError('Duplicated or missing episode')
+        if search is not None:
+            rows = self._run_searches(rows, weights, search, pids)
         count = len(indices)
         self.worker_pids = sorted(pids)
         merging_started = perf_counter()
@@ -372,9 +375,7 @@ class SelfPlayTrainer(Trainer):
         self.rollout_performance['worker_peak_rss_bytes'] = max((r['worker_rss_bytes'] or 0 for r in rows), default=0) or None
         self.rollout_performance['merging_seconds'] = perf_counter() - merging_started
         if search is not None:
-            # Summed worker time spent searching, and the decisions searched.
-            self.rollout_performance.update(search_seconds=sum(r['search_seconds'] for r in rows),
-                                            searched_decisions=sum(r['searched_decisions'] for r in rows))
+            self.rollout_performance.update(self.search_performance)
         self.hands += count
         self.collection_seconds = perf_counter() - started
         return buffers, sum(r['reward'] for r in rows) / count
@@ -429,6 +430,45 @@ class SelfPlayTrainer(Trainer):
                                  advantage_mean=fmean(a), advantage_std=pvariance(a) ** .5,
                                  value_mean=fmean(values[i] for i in rows) if learned else None)
         return result
+
+    def _run_searches(self, rows, weights, search, pids):
+        """Second collection pass: every selected decision is its own pool task.
+
+        Inline searches inside hand chunks left workers idle behind a few long
+        searches (about 45% efficiency, docs/search_training.md 6.4). Here the
+        pool's bounded queue hands out one search at a time, most expensive
+        first (fewest completed tricks: longest rollouts), so the slowest search
+        starts early instead of ending the rollout alone. Values depend only on
+        each request's own seed, so neither the order nor the worker count
+        changes any result.
+        """
+        from .selfplay_rollout import attach_search_values, search_chunk
+        c, started = self.config, perf_counter()
+        requests = sorted((r for row in rows for r in row['search_requests']),
+                          key=lambda r: (len(r.obs.view.completed_tricks), r.key))
+        tasks = [(weights, c.hidden_size, self.model.neural_phases, search.samples, (request,))
+                 for request in requests]
+        previous = torch.get_num_threads()
+        try:
+            if self.workers == 1 or not tasks:
+                torch.set_num_threads(1)
+                chunks = [search_chunk(task) for task in tasks]
+            else:
+                if self.pool is None:
+                    self.pool = OrderedPool(self.workers, initializer=initialize_worker)
+                chunks = self.pool.map(search_chunk, tasks)
+        except BaseException:
+            self.close()
+            raise
+        finally:
+            torch.set_num_threads(previous)
+        results = [result for chunk, _ in chunks for result in chunk]
+        pids.update(pid for _, pid in chunks)
+        # search_seconds: summed worker time; search_wall_seconds: this pass's wall time.
+        self.search_performance = dict(searched_decisions=len(results),
+                                       search_seconds=sum(seconds for _, _, seconds in results),
+                                       search_wall_seconds=perf_counter() - started)
+        return attach_search_values(rows, {key: values for key, values, _ in results})
 
     def training_search(self):
         """This rollout's TrainingSearch, or None (search off, or still warming up)."""

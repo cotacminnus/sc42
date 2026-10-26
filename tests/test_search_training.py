@@ -20,8 +20,9 @@ if TORCH:
     from research.ppo.opponents import PolicySpec
     from research.ppo.search import (InMemoryGuide, TrainingSearch, masked_log_softmax, search_minibatch_loss,
                                      search_update_targets)
+    from research.ppo.rollout import snapshot
     from research.ppo.selfplay_checkpoint import save, config_from_dict
-    from research.ppo.selfplay_rollout import collect_phase_hand
+    from research.ppo.selfplay_rollout import attach_search_values, collect_phase_hand, search_chunk
     from research.ppo.selfplay_trainer import SelfPlayConfig, SelfPlayTrainer, PairedSelfPlayTrainer
     from texas42.agents import VARIANTS
 
@@ -36,6 +37,16 @@ def same(first, second):
 
 def without_search(paths):
     return tuple(tuple(replace(r, search_q=None) for r in path) for path in paths)
+
+
+def searched_hand(models, episode, pool, search):
+    """Both collection passes for one hand: selection in the hand, then search_chunk, then attach."""
+    row = collect_phase_hand(models, 42, episode, ('bid', 'play'), pool, search=search)
+    pair = models if isinstance(models, tuple) else (models,)
+    weights = tuple(snapshot(m) for m in pair) if len(pair) == 2 else snapshot(pair[0])
+    results, _ = search_chunk((weights, pair[0].hidden_size, pair[0].neural_phases, search.samples,
+                               row['search_requests']))
+    return attach_search_values([row], {key: values for key, values, _ in results})[0]
 
 
 @unittest.skipUnless(TORCH, 'optional rl extra is not installed')
@@ -86,10 +97,8 @@ class SearchTrainingTests(unittest.TestCase):
             pool = t.opponent_pool()
             for episode in range(3):
                 plain = collect_phase_hand(models, 42, episode, ('bid', 'play'), pool)
-                full = collect_phase_hand(models, 42, episode, ('bid', 'play'), pool,
-                                          search=TrainingSearch(1.0, 2))
-                half = collect_phase_hand(models, 42, episode, ('bid', 'play'), pool,
-                                          search=TrainingSearch(0.5, 2))
+                full = searched_hand(models, episode, pool, TrainingSearch(1.0, 2))
+                half = searched_hand(models, episode, pool, TrainingSearch(0.5, 2))
                 with self.subTest(mode=mode, episode=episode):
                     # Identical hands and records: search only adds search_q.
                     self.assertEqual(without_search(full['paths']), plain['paths'])
@@ -97,7 +106,7 @@ class SearchTrainingTests(unittest.TestCase):
                     self.assertEqual(full['reward'], plain['reward'])
                     records = [r for path in full['paths'] for r in path]
                     searched = [r for r in records if r.search_q is not None]
-                    self.assertEqual(full['searched_decisions'], len(searched))
+                    self.assertEqual(len(full['search_requests']), len(searched))
                     for r in records:
                         is_play = r.observation_features[2] == 1.0
                         legal = sum(r.legal_action_mask)
@@ -111,9 +120,20 @@ class SearchTrainingTests(unittest.TestCase):
                         for i, r in enumerate(path):
                             if r.search_q is not None:
                                 self.assertEqual(r.search_q, by_key[(r.seat, i)])
-            again = collect_phase_hand(models, 42, 0, ('bid', 'play'), pool, search=TrainingSearch(1.0, 2))
-            first = collect_phase_hand(models, 42, 0, ('bid', 'play'), pool, search=TrainingSearch(1.0, 2))
+            again = searched_hand(models, 0, pool, TrainingSearch(1.0, 2))
+            first = searched_hand(models, 0, pool, TrainingSearch(1.0, 2))
             self.assertEqual(again['paths'], first['paths'])  # Deterministic.
+            # The second pass equals searching inline with the in-memory networks.
+            from research.ppo.search import search_values
+            from research.ppo.composition import partner_index
+            pair = models if isinstance(models, tuple) else (models,)
+            guides = tuple(InMemoryGuide(pair[partner_index(s)] if len(pair) == 2 else pair[0]) for s in range(4))
+            request = first['search_requests'][0]
+            episode, seat, index = request.key
+            record = next(p for p in first['paths'] if p[0].seat == seat)[index]
+            self.assertEqual(record.search_q, search_values(request.obs, guides, 2, request.seed))
+            with self.assertRaises(RuntimeError):  # A result must match a decision.
+                attach_search_values([first], {(99, 0, 0): record.search_q})
 
     def test_in_memory_guide_plays_like_the_learner(self):
         # P1: the guide plays the in-memory network greedily on its neural phases

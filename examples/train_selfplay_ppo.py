@@ -404,7 +404,8 @@ def main(argv=None):
                           f'|A| {values["search_abs_advantage"]:.3f} points')
             if 'search_seconds' in trainer.rollout_performance:
                 print(f'  search time: {trainer.rollout_performance["search_seconds"]:.1f} worker-s for '
-                      f'{trainer.rollout_performance["searched_decisions"]} decisions')
+                      f'{trainer.rollout_performance["searched_decisions"]} decisions; search pass '
+                      f'{trainer.rollout_performance["search_wall_seconds"]:.1f} s wall')
             if (not paired and sample_count and set(trainer.model.neural_phases) <= set(trainer.model.trained_phases)
                     and trainer.hands - trainer.last_snapshot >= config.snapshot_every_hands):
                 spec = trainer.publish_snapshot(directory / 'snapshots')
