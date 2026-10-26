@@ -47,14 +47,15 @@ def scratch_phases(args, explicit):
                           else LearnerPhaseSpec('heuristic', initialization='none') for s in states)
 
 
-SKIPPED = {'train_opponents', 'eval_opponents', 'selection_opponent', 'rollout_play_steps', 'sampling_scheme'}
+SKIPPED = {'train_opponents', 'eval_opponents', 'selection_opponent', 'rollout_play_steps', 'sampling_scheme',
+           'critic_mode', 'return_estimator'}
 
 
 def build_parser():
     """The command's argparse definition (also used by examples.run_pipeline to validate)."""
     parser = argparse.ArgumentParser(description=__doc__)
     defaults = Config(learning_rate=1e-4)
-    add_config_arguments(parser, defaults, exclude=SKIPPED)
+    add_config_arguments(parser, defaults, exclude=SKIPPED, critic_modes=SelfPlayConfig.critic_modes)
     source = parser.add_mutually_exclusive_group()
     source.add_argument('--init-play-checkpoint', type=Path)
     source.add_argument('--init-checkpoint', type=Path, help='New stage: weights only, fresh optimizer/RNG')
@@ -82,10 +83,6 @@ def build_parser():
     parser.add_argument('--snapshot-pool-size', type=int, default=8)
     parser.add_argument('--bid-bc-hands', type=int, default=0)
     parser.add_argument('--forgetting-hands', type=int, default=8)
-    parser.add_argument('--critic-mode', choices=('local', 'centralized'), default='local',
-                        help='local: existing per-phase value heads; centralized: separate privileged critic')
-    parser.add_argument('--return-estimator', choices=('gae', 'monte-carlo'), default='gae',
-                        help='monte-carlo uses complete-hand returns (diagnostic baseline)')
     parser.add_argument('--oracle-aux-coef', type=float, default=0.0,
                         help='weight of the critic oracle-point interval loss; 0 disables it')
     parser.add_argument('--oracle-dataset', type=Path,
@@ -221,6 +218,10 @@ def main(argv=None):
         if args.resume:
             if saved is None:
                 raise ValueError('Resume requires a multi-phase checkpoint; use --init-play-checkpoint for migration')
+            for key in ('critic_mode', 'return_estimator'):
+                if '--' + key.replace('_', '-') in explicit and getattr(config, key) != getattr(saved, key):
+                    raise ValueError(f'Exact resume cannot change {key} ({getattr(saved, key)} -> '
+                                     f'{getattr(config, key)}); start a new stage with --init-checkpoint')
             # Omitted options restore saved settings; explicit changes undergo strict validation.
             changes = {f.name: getattr(config, f.name) for f in fields(SelfPlayConfig)
                        if '--' + f.name.replace('_', '-') in explicit}
@@ -265,7 +266,13 @@ def main(argv=None):
         learners = (trainer, trainer.partner) if paired else (trainer,)
         if args.resume:
             (resume_pair if paired else resume)(args.resume, trainer)
-        elif args.bid_bc_hands:
+        else:
+            # Provenance of a critic-mode change between stages; older checkpoints were local.
+            # Every network-owning trainer records it in its own checkpoint.
+            for learner in learners:
+                learner.initial_critic_mode = (data['metadata'].get('critic_mode', 'local')
+                                               if data is not None else None)
+        if not args.resume and args.bid_bc_hands:
             for index, learner in enumerate(learners, start=1):
                 bc = clone_bidding(learner, args.bid_bc_hands)
                 who = f' (partner {index})' if paired else ''
@@ -301,7 +308,14 @@ def main(argv=None):
         print('Original anchor: none')
     print(f'Device: {trainer.device}; workers: {trainer.workers}; torch threads: {config.torch_threads}; validation workers: {resolve_workers(args.eval_threads)}')
     print(f'Primary selection opponent: {config.primary_opponent}; training pool: {config.opponent_probabilities}')
-    print(f'Critic: {config.critic_mode}; returns: {config.return_estimator} (gamma={config.gamma}, lambda={config.gae_lambda})')
+    if config.critic_mode == 'none':
+        print(f'Critic: none (policy-only PPO); returns: monte-carlo, zero baseline (gamma={config.gamma}); '
+              'no value loss, value heads not optimized, --value-coef unused')
+    else:
+        print(f'Critic: {config.critic_mode}; returns: {config.return_estimator} (gamma={config.gamma}, lambda={config.gae_lambda})')
+    if trainer.initial_critic_mode not in (None, config.critic_mode):
+        print(f'Critic mode change from the initialization checkpoint: {trainer.initial_critic_mode} -> '
+              f'{config.critic_mode} (new optimizer)')
     if trainer.critic is not None:
         origin = ('copied from the initialization checkpoint' if trainer.critic_initialization == 'checkpoint'
                   else 'restored from the resume checkpoint' if args.resume
@@ -362,7 +376,7 @@ def main(argv=None):
                     for i, t in enumerate(learners, start=1)}
             print(f'Update {trainer.updates}: {trainer.hands}/{config.total_hands} hands; samples {trainer.phase_counts}; reward {reward:+.4f}')
             for label, learner, values in groups:
-                if values:
+                if values and config.critic_mode != 'none':  # Policy-only PPO has no critic to report.
                     ev = learner.value_diagnostics['explained_variance']
                     print(f'  {label}critic: value loss {values["value_loss"]:.5f}; explained variance '
                           + ('N/A' if ev is None else f'{ev:.4f}')

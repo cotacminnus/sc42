@@ -97,6 +97,26 @@ abort training. Logs report sample-weighted optimization diagnostics, including
 pre-clipping gradient norm, approximate KL and clipping fraction. Optional KL
 stopping skips a minibatch whose measured divergence already exceeds the limit.
 
+### Policy-only PPO (`--critic-mode none`)
+
+The historical behaviour above is the default `--critic-mode local`. With
+`--critic-mode none` the same trainer runs PPO without a learned critic: each play
+decision's advantage is its Monte Carlo return (with the default gamma = 1, the
+seat's terminal signed marks for all seven plays), i.e. a zero baseline, followed
+by the same batch normalization. The loss is the clipped surrogate minus the
+entropy bonus; there is no value MSE, `--value-coef` is unused, and the value head
+stays in the model (so checkpoints and inference are unchanged) but is excluded
+from Adam and receives no gradients. Collection, sampling streams and the actor's
+initialization are identical to the local mode. `none` requires and defaults to
+`--return-estimator monte-carlo` (an explicit `gae` is rejected); `local` may also
+select `monte-carlo`. Progress rows report `value_loss: null`; checkpoints record
+`critic_mode`, `return_estimator` and `critic_optimized`, and exact resume rejects a
+different mode. Older checkpoints, which record no mode, resume as `local` with GAE.
+Removing the baseline makes gradient estimates noisier, which can slow learning;
+whether it matters here is an empirical question. The
+[multi-phase guide](multiphase_selfplay.md#critic-modes-returns-and-oracle-auxiliary-supervision)
+compares the three modes.
+
 ## Checkpoints, progress, and reproducibility
 
 `config.json` and `progress.jsonl` contain configuration, sample/hand counts,

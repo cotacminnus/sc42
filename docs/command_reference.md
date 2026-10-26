@@ -18,7 +18,7 @@ page owns *how to run things*.
 - [Endgame oracle](#endgame-oracle) — open-hand endgames, complete-deal bidding, [training labels](#oracle-training-labels)
 - [PPO training overview](#ppo-training-overview) — choosing a trainer, [workflow finder](#workflow-finder)
 - [Legacy trainer: train_ppo](#legacy-trainer-train_ppo) — Recipe 1, resume, mixed opponents
-- [Multi-phase trainer: train_selfplay_ppo](#multi-phase-trainer-train_selfplay_ppo) — Recipes 2–11, 13 and 14 (from scratch), arguments, artifacts, troubleshooting
+- [Multi-phase trainer: train_selfplay_ppo](#multi-phase-trainer-train_selfplay_ppo) — Recipes 2–11 and 13–15 (from scratch, policy-only PPO), arguments, artifacts, troubleshooting
 - [Evaluation](#evaluation) — agent-vs-agent composition (Recipe 12), compatibility commands
 - [Experiment pipelines](#experiment-pipelines) — JSON-defined step sequences ([full guide](experiment_pipelines.md))
 - [Performance benchmarks](#performance-benchmarks)
@@ -448,6 +448,7 @@ option. The recipes are research configurations, not proven optimal settings.
 | [12: controlled evaluation](#recipe-12-held-out-phase-ablations) | Compare one phase while holding continuations constant | Trained checkpoint(s), independent final deal seed |
 | [13: critic comparison](#recipe-13-local-versus-centralized-critic-and-oracle-auxiliary) | Local critic (A), centralized critic (B), centralized plus oracle auxiliary (C) | Original play checkpoint; an oracle dataset for C |
 | [14: from scratch](#recipe-14-from-scratch-training-and-self-play) | Random initialization of any phase subset; HHH, current-policy self-play or historical self-play | **None**: no checkpoint or anchor |
+| [15: policy-only PPO](#recipe-15-policy-only-ppo-and-a-three-way-critic-comparison) | Critic-free PPO (`--critic-mode none`), and matched none/local/centralized branches | **None** (from scratch), or any checkpoint for a new stage |
 
 Before running a recipe, confirm the named input files exist and satisfy its
 trained-phase prerequisites. Output directories must be new unless resuming. An
@@ -571,10 +572,12 @@ These defaults apply to legacy `examples.train_ppo` only; the multi-phase traine
 | `--gae-lambda` | `0.95` | Generalized advantage estimation parameter. |
 | `--clip-epsilon` | `0.2` | PPO clipped surrogate ratio limit. |
 | `--entropy-coef` | `0.01` | Policy entropy regularization weight. |
-| `--value-coef` | `0.5` | Value loss weight. |
+| `--value-coef` | `0.5` | Value loss weight; unused with `--critic-mode none`. |
 | `--max-grad-norm` | `0.5` | Maximum norm for gradient clipping. |
 | `--target-kl` | `0.0` | Optional KL early-stop threshold; 0 disables. |
 | `--hidden-size` | `256` | Width of both MLP hidden layers. |
+| `--critic-mode` | `local` | `local`: the historical actor-critic (value head, GAE). `none`: [policy-only PPO](ppo_training.md#policy-only-ppo-critic-mode-none). No `centralized` mode here. Fixed for exact resume. |
+| `--return-estimator` | `gae` (`monte-carlo` with `none`) | `gae` or `monte-carlo`; `none` requires `monte-carlo` and rejects an explicit `gae`. |
 | `--seed` | `42` | Training/deal seed. |
 | `--device` | `auto` | CPU or CUDA optimizer device; auto selects CUDA when available. |
 | `--sampling-scheme` | `auto` | `auto`, `legacy-v1` or `episode-v1`; governs action sampling streams. |
@@ -1037,6 +1040,50 @@ opponent distribution, selection settings and the random-initialization
 provenance. `--init-checkpoint` starts a **new stage** (fresh Adam, counters and
 roster); a scratch lineage stays anchor-free, so its defaults are the HHH ones above.
 
+### Recipe 15: policy-only PPO and a three-way critic comparison
+
+`--critic-mode none` trains with the same clipped PPO objective, legal masks,
+entropy bonus, minibatches, KL diagnostics and gradient clipping, but without a
+learned critic: each decision's advantage is its complete-hand Monte Carlo return
+(a zero baseline, then the usual advantage normalization). It needs no checkpoint
+and works with every phase configuration, opponent pool and stage type. See
+[policy-only PPO](multiphase_selfplay.md#critic-modes-returns-and-oracle-auxiliary-supervision)
+for the method and its variance trade-off.
+
+```bash
+# A. Policy-only PPO from random weights, mixed HHH and current-policy self-play
+python -m examples.train_selfplay_ppo --from-scratch --critic-mode none \
+  --opponent-pool HHH:0.3,self-current:0.7 --eval-opponents HHH,CHH --selection-opponent HHH \
+  --total-hands 262144 --rollout-decisions 4096 --threads 8 --seed 42 \
+  --output-dir runs/ppo-no-critic
+
+# B. The same command without --critic-mode is the local actor-critic (unchanged default)
+python -m examples.train_selfplay_ppo --from-scratch \
+  --opponent-pool HHH:0.3,self-current:0.7 --eval-opponents HHH,CHH --selection-opponent HHH \
+  --total-hands 262144 --rollout-decisions 4096 --threads 8 --seed 42 \
+  --output-dir runs/ppo-local-critic
+
+# C. Legacy play-only trainer without a critic
+python -m examples.train_ppo --critic-mode none --total-hands 100000 --threads 8 \
+  --output-dir runs/ppo-play-no-critic
+
+# D. New stage that switches a policy-only checkpoint to the centralized critic
+python -m examples.train_selfplay_ppo --init-checkpoint runs/ppo-no-critic/checkpoints/best.pt \
+  --learner-bid neural-train --learner-trump neural-train --learner-play neural-train \
+  --critic-mode centralized --opponent-pool HHH:0.3,self-current:0.7 \
+  --total-hands 262144 --rollout-decisions 4096 --threads 8 --output-dir runs/ppo-no-critic-stage2
+```
+
+For a controlled comparison, train **independent** branches that differ only in
+`--critic-mode` (A, B and the same command with `--critic-mode centralized`), each
+from the same `--seed` so the initial actor weights and first rollout are identical,
+and evaluate all three on the same held-out deals. Never start one treatment from
+another's trained actor. `configs/pipelines/critic_comparison.json` runs exactly
+this through the [pipeline runner](experiment_pipelines.md). Each mode keeps its
+default estimator (Monte Carlo for `none`, GAE otherwise); add
+`--return-estimator monte-carlo` to the critic branches to separate the effect of the
+baseline from that of the estimator.
+
 Recipe 12 (held-out evaluation) is in [Evaluation](#recipe-12-held-out-phase-ablations).
 
 ### train_selfplay_ppo arguments
@@ -1068,7 +1115,7 @@ configuration. Values are checked against argparse, `Config` and `SelfPlayConfig
 | `--gae-lambda` | Float in `[0,1]` | `0.95` | GAE decay within a complete seat/hand trajectory. Lower values rely more on old value estimates; no GAE crosses seats or hands. |
 | `--clip-epsilon` | Finite float in `(0,1)` | `0.2` | PPO probability-ratio clipping range `1±epsilon`; uses original legal masks/log probabilities. Does not guarantee a maximum KL change. |
 | `--entropy-coef` | Finite float ≥ 0 | `0.01` | Subtracted legal-policy entropy weight in the loss. Zero disables it; it applies only to trained actions. No illegal/reserved logits contribute. |
-| `--value-coef` | Finite float ≥ 0 | `0.5` | Weight on signed-mark return MSE. Zero removes critic regression from the combined loss, while GAE still uses old value predictions. |
+| `--value-coef` | Finite float ≥ 0 | `0.5` | Weight on signed-mark return MSE. Zero removes critic regression from the combined loss, while GAE still uses old value predictions. Ignored with `--critic-mode none`, which has no value loss and no learned baseline. |
 | `--max-grad-norm` | Finite float > 0 | `0.5` | Gradient-norm clipping before Adam. Logged `gradient_norm` is measured **before** clipping. Frozen modules have no gradients. |
 | `--target-kl` | Finite float ≥ 0 | `0.0` | Zero disables early stopping. Otherwise checks approximate KL before applying each minibatch and skips the violating minibatch and remaining passes. An excessively small threshold can produce a no-optimizer-steps error. |
 | `--hidden-size` | Integer > 0, compatible with sources | Initialization checkpoint's width; argparse fallback `256` | Width of both hidden layers in every phase network. Omission adopts the loaded checkpoint width; explicit mismatch is rejected. All learner sources must match this width, encoder, ruleset and action vocabulary. |
@@ -1255,15 +1302,24 @@ guarantee of higher hands/second.
 
 | Argument | Accepted values | Default | Meaning and interactions |
 | --- | --- | --- | --- |
-| `--critic-mode` | `local`, `centralized` | `local` | `local` reproduces the existing per-phase value heads exactly. `centralized` trains a separate critic on privileged features (all remaining hands); actors still see only their own observation. Fixed for exact resume. |
-| `--return-estimator` | `gae`, `monte-carlo` | `gae` | `monte-carlo` uses complete-hand returns (GAE with λ = 1) as a diagnostic baseline. Uses `--gamma` (default 1). |
-| `--oracle-aux-coef` | Finite float ≥ 0 | `0` (disabled) | Weight of the critic's oracle-point interval loss. A positive value requires `--critic-mode centralized` and `--oracle-dataset`. |
+| `--critic-mode` | `none`, `local`, `centralized` | `local` | `local` reproduces the existing per-phase value heads exactly. `centralized` trains a separate critic on privileged features (all remaining hands); actors still see only their own observation. `none` is policy-only PPO: Monte Carlo returns are the advantages (zero baseline), there is no value loss, and value heads are excluded from Adam. Fixed for exact resume; a new stage may change it. |
+| `--return-estimator` | `gae`, `monte-carlo` | `gae`; `monte-carlo` with `--critic-mode none` | `monte-carlo` uses complete-hand returns (GAE with λ = 1) as a diagnostic baseline. Uses `--gamma` (default 1). `--critic-mode none` requires `monte-carlo`: an explicit `gae` is rejected, never overridden. Fixed for exact resume. |
+| `--oracle-aux-coef` | Finite float ≥ 0 | `0` (disabled) | Weight of the critic's oracle-point interval loss. A positive value requires `--critic-mode centralized` and `--oracle-dataset`; it is rejected with `none` or `local`. |
 | `--oracle-dataset` | Path from `examples.oracle_labels` | Unset | Its SHA256 is stored in the configuration and verified on resume; only the `train` split is optimized and the `validation` split is reported. |
 
 When a centralized critic starts from a checkpoint without compatible critic
 weights (every play-only or local-critic file), it is initialized fresh from its own
 seed stream and the startup output says so; `--init-checkpoint` from a centralized
 checkpoint copies its critic.
+
+Changing `--critic-mode` is allowed only between stages (`--init-checkpoint`,
+`--init-play-checkpoint`): the new stage always has a fresh Adam state, a
+centralized critic is copied only from a centralized source, and the checkpoint
+records the source's mode as `initial_critic_mode`. `--resume` with a different
+`--critic-mode` or `--return-estimator` fails. With `none`, progress rows report
+`value_loss` (and per-phase `*_value_loss`) as `null`, `explained_variance` and
+`value_mean` as `null`, and no `critic_gradient_norm`; checkpoints record
+`critic_mode`, `return_estimator` and `critic_optimized: false`.
 
 ### Training artifacts and metrics
 
@@ -1653,7 +1709,7 @@ python -m examples.run_pipeline --config configs/pipelines/progressive_training.
 Allowed step commands: `train_ppo`, `train_selfplay_ppo`, `evaluate_ppo`,
 `evaluate_selfplay_ppo`, `evaluate_agent_vs_agent`, `oracle_labels`. Examples are in
 `configs/pipelines/` (`template.json`, `progressive_training.json`,
-`scratch_selfplay.json`).
+`scratch_selfplay.json`, `critic_comparison.json`).
 
 ## Performance benchmarks
 

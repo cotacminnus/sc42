@@ -64,6 +64,9 @@ def validate(data):
     for spec in data['snapshots']:
         spec_from_dict(spec)
     # Older checkpoints predate critic modes; their configuration defaults to local.
+    if (m.get('critic_mode', 'local') != config.critic_mode
+            or m.get('return_estimator', config.return_estimator) != config.return_estimator):
+        raise ValueError('Inconsistent critic mode or return estimator metadata')
     if config.critic_mode == 'centralized':
         from .critic import CRITIC_ARCHITECTURE
         from texas42.privileged import PRIVILEGED_LAYOUT_VERSION
@@ -71,7 +74,7 @@ def validate(data):
                 or m.get('privileged_layout_version') != PRIVILEGED_LAYOUT_VERSION):
             raise ValueError('Incompatible centralized critic state or privileged feature layout')
     elif data.get('critic') is not None:
-        raise ValueError('A local-critic checkpoint must not contain centralized critic weights')
+        raise ValueError(f'A {config.critic_mode}-critic checkpoint must not contain centralized critic weights')
 
 
 def config_from_dict(data):
@@ -116,7 +119,7 @@ def save(path, trainer):
     data['bc_metrics'] = trainer.bc_metrics
     data['metadata']['learner_phases'] = [asdict(s) for s in trainer.learner_phases]
     data['metadata']['optimizer_parameters'] = optimizer_parameters(trainer)
-    data['metadata']['critic_mode'] = trainer.config.critic_mode
+    data['metadata']['initial_critic_mode'] = trainer.initial_critic_mode
     # Provenance: random initialization names no checkpoint, path or SHA256.
     data['metadata']['initialization'] = 'random' if trainer.config.from_scratch else 'checkpoint'
     data['metadata']['initialization_seed'] = trainer.config.seed if trainer.config.from_scratch else None
@@ -161,6 +164,7 @@ def resume(path, trainer):
     if trainer.critic is not None:
         trainer.critic.load_state_dict(data['critic'], strict=True)
         trainer.critic_initialization = data['metadata'].get('critic_initialization')
+    trainer.initial_critic_mode = data['metadata'].get('initial_critic_mode')
     if trainer.oracle_shuffle is not None:
         trainer.oracle_shuffle.set_state(data['rng']['oracle'])
     trainer.model.trained_phases = tuple(data['metadata']['trained_phases'])

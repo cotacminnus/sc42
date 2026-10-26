@@ -30,12 +30,26 @@ def add_evaluation_arguments(parser, *, seed=12345):
     add_output_arguments(parser)
 
 
-def add_config_arguments(parser, defaults, *, exclude=()):
-    """Expose shared scalar PPO settings while leaving stage-specific flags local."""
+CRITIC_FIELDS = ('critic_mode', 'return_estimator')
+
+
+def add_config_arguments(parser, defaults, *, exclude=(), critic_modes=None):
+    """Expose shared scalar PPO settings while leaving stage-specific flags local.
+
+    --critic-mode/--return-estimator default to local and an unresolved estimator
+    (None), which the config resolves from the critic mode.
+    """
     for field in fields(defaults):
-        if field.name not in exclude:
+        if field.name not in exclude and field.name not in CRITIC_FIELDS:
             value = getattr(defaults, field.name)
             parser.add_argument('--' + field.name.replace('_', '-'), type=type(value), default=value)
+    modes = critic_modes or type(defaults).critic_modes
+    parser.add_argument('--critic-mode', choices=modes, default='local',
+                        help='none: policy-only PPO (Monte Carlo returns, no value loss; --value-coef unused); '
+                             'local: per-network value heads' + ('; centralized: separate privileged critic'
+                                                                 if 'centralized' in modes else ''))
+    parser.add_argument('--return-estimator', choices=('gae', 'monte-carlo'),
+                        help='default: gae, or monte-carlo with --critic-mode none (which requires it)')
 
 
 class Tee:

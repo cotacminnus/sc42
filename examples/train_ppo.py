@@ -38,6 +38,10 @@ def build_parser():
     return parser
 
 
+def format_optional(value, spec):
+    return 'N/A' if value is None else format(value, spec)
+
+
 @record_output
 def main(argv=None):
     parser = build_parser()
@@ -78,6 +82,9 @@ def main(argv=None):
     print(f'Validation workers: {resolve_workers(args.eval_threads, config.eval_deals)} (requested {args.eval_threads})', flush=True)
     print(f'PPO trick-play training: heuristic auction/trump, neural partnership versus {trainer.opponents.describe()}', flush=True)
     print(f'Evaluation opponents: {", ".join(config.eval_opponents)}; checkpoint selection: {config.selection_opponent}', flush=True)
+    print(f'Critic: {config.critic_mode}; returns: {config.return_estimator}'
+          + (' (policy-only PPO: zero baseline, no value loss, --value-coef unused)' if config.critic_mode == 'none' else ''),
+          flush=True)
     try:
         while trainer.hands < config.total_hands:
             update_started = perf_counter()
@@ -89,7 +96,7 @@ def main(argv=None):
                        optimizer_steps=trainer.optimizer_steps, mean_signed_reward=reward,
                        runtime_seconds=elapsed, hands_per_second=(trainer.hands - initial_hands) / elapsed, **metrics)
             print(f"Hands {trainer.hands}/{config.total_hands} | samples {trainer.samples} | update {trainer.updates} | "
-                  f"policy {metrics['policy_loss']:.4f} value {metrics['value_loss']:.4f} entropy {metrics['entropy']:.4f} "
+                  f"policy {metrics['policy_loss']:.4f} value {format_optional(metrics['value_loss'], '.4f')} entropy {metrics['entropy']:.4f} "
                   f"KL {metrics['approx_kl']:.5f} clip {metrics['clip_fraction']:.3f} grad {metrics['gradient_norm']:.3f} | "
                   f"{row['hands_per_second']:.1f} hands/s", flush=True)
             row.update(execution=execution, worker_pids=trainer.worker_pids,

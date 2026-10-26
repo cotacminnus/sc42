@@ -91,7 +91,7 @@ python -m examples.run_pipeline --config configs/pipelines/progressive_training.
 | `texas42/belief.py` | Hidden-deal constraints, exact counting/sampling, rollouts and expected action values |
 | `texas42/training.py`, `encoding.py`, `actions.py` | Versioned ID-based views, 387 features and legal global actions |
 | `texas42/openspiel.py` | Optional adapter depending on the native engine |
-| `research/ppo/` | Optional training (local or centralized critic), oracle label datasets, checkpoints, frozen policy composition and model-guided search (`search.py`) |
+| `research/ppo/` | Optional training (policy-only PPO, local or centralized critic), oracle label datasets, checkpoints, frozen policy composition and model-guided search (`search.py`) |
 | `examples/` | Runnable game, training and evaluation commands, including the JSON pipeline runner |
 | `configs/pipelines/` | Example JSON experiment pipelines |
 | `tests/`, `docs/` | Deterministic unittest coverage and technical documentation |

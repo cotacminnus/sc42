@@ -70,6 +70,13 @@ class ModelGuidedPIMCTests(unittest.TestCase):
         cls.central = root / 'central.pt'
         save_phase(cls.central, central)
         central.close()
+        # Policy-only PPO (critic_mode 'none'): the value heads are frozen at initialization.
+        policy_only = SelfPlayTrainer(replace(config, critic_mode='none', return_estimator='monte-carlo'),
+                                      load_model(cls.legacy)[0])
+        policy_only.model.trained_phases = ('bid', 'trump', 'play')
+        cls.policy_only = root / 'policy-only.pt'
+        save_phase(cls.policy_only, policy_only)
+        policy_only.close()
         cls.identity = CheckpointIdentity.from_path(cls.joint)
         cls.legacy_identity = CheckpointIdentity.from_path(cls.legacy)
 
@@ -131,6 +138,7 @@ class ModelGuidedPIMCTests(unittest.TestCase):
         self.assertTrue(value_heads_trained(self.identity))
         self.assertTrue(value_heads_trained(self.legacy_identity))  # Predates critic modes: local.
         self.assertFalse(value_heads_trained(central))
+        self.assertFalse(value_heads_trained(CheckpointIdentity.from_path(self.policy_only)))
         obs = observations(4, lambda o: o.phase == 'play' and len(o.view.completed_tricks) == 2)[0]
         state = world_state(obs, sample_world(hidden_constraints(obs), random.Random(0)))
         with self.assertRaisesRegex(ValueError, 'local value heads'):
