@@ -42,6 +42,14 @@ class SelfPlayConfig(Config):
     # 'shared': both learner seats use one network (the original method).
     # 'paired': each learner seat has its own network (PairedSelfPlayTrainer).
     partner_mode: str = 'shared'
+    # Search inside training (docs/search_training.md, sections 8 and 10).
+    # search_fraction 0 disables it and reproduces training exactly.
+    search_fraction: float = 0.0      # share of learner play decisions searched
+    search_samples: int = 16          # sampled worlds per search (full rollouts, points)
+    search_weight: float = 0.25       # λ: weight of the search loss in the PPO loss
+    search_target: str = 'cmpo'       # 'cmpo' (KL to the clipped MPO target) or 'advantage'
+    search_clip: float = 2.0          # CMPO clip c on Â/σ (KL step bound 2c)
+    search_warmup_hands: int = 0      # ordinary PPO until this many hands
 
     @property
     def snapshot_fallback(self):
@@ -116,6 +124,21 @@ class SelfPlayConfig(Config):
             if self.critic_mode != 'local':
                 raise ValueError('Paired-partner training does not yet support the centralized critic '
                                  f'or policy-only PPO (critic_mode {self.critic_mode})')
+        from .search import SEARCH_TARGETS
+        if not (math.isfinite(self.search_fraction) and 0 <= self.search_fraction <= 1):
+            raise ValueError('search_fraction must be in [0, 1]')
+        if self.search_fraction and 'play' not in self.learn_phases:
+            raise ValueError('Search inside training improves play decisions; add play to learn_phases')
+        if type(self.search_samples) is not int or self.search_samples < 1:
+            raise ValueError('search_samples must be a positive integer')
+        if not math.isfinite(self.search_weight) or self.search_weight < 0:
+            raise ValueError('search_weight must be finite and nonnegative')
+        if self.search_target not in SEARCH_TARGETS:
+            raise ValueError('search_target must be ' + ' or '.join(SEARCH_TARGETS))
+        if not math.isfinite(self.search_clip) or self.search_clip <= 0:
+            raise ValueError('search_clip must be finite and positive')
+        if type(self.search_warmup_hands) is not int or self.search_warmup_hands < 0:
+            raise ValueError('search_warmup_hands must be a nonnegative integer')
 
 
 class SelfPlayTrainer(Trainer):
@@ -200,6 +223,7 @@ class SelfPlayTrainer(Trainer):
         self.optimizer = torch.optim.Adam(parameters, lr=config.learning_rate)
         self.oracle_data = self.oracle_validation = self.oracle_summary = None
         self.oracle_shuffle = self.value_diagnostics = None
+        self.search_diagnostics, self._search_sums = None, None  # Last update's search loss diagnostics.
         if config.oracle_aux_coef > 0:
             from .oracle_dataset import load_dataset, training_tensors
             dataset = load_dataset(config.oracle_dataset, sha256=config.oracle_dataset_sha256)
@@ -270,6 +294,11 @@ class SelfPlayTrainer(Trainer):
         weights = weights[0] if len(weights) == 1 else weights
         # Centralized critic payload (shared mode only; paired mode rejects it in the config).
         critic = (snapshot(self.critic),) if self.critic is not None else ()
+        # Search inside training: decided once per rollout (warm-up by hands so far).
+        # Without it the task tuple is exactly the original one.
+        search = self.training_search()
+        if search is not None:
+            critic = (critic[0] if critic else None, search)
         rows, pids, indices, actual = [], set(), [], 0
         previous = torch.get_num_threads()
         try:
@@ -342,6 +371,10 @@ class SelfPlayTrainer(Trainer):
                                    for k in ('inference_seconds', 'neural_inference_seconds', 'opponent_loading_seconds')}
         self.rollout_performance['worker_peak_rss_bytes'] = max((r['worker_rss_bytes'] or 0 for r in rows), default=0) or None
         self.rollout_performance['merging_seconds'] = perf_counter() - merging_started
+        if search is not None:
+            # Summed worker time spent searching, and the decisions searched.
+            self.rollout_performance.update(search_seconds=sum(r['search_seconds'] for r in rows),
+                                            searched_decisions=sum(r['searched_decisions'] for r in rows))
         self.hands += count
         self.collection_seconds = perf_counter() - started
         return buffers, sum(r['reward'] for r in rows) / count
@@ -397,11 +430,52 @@ class SelfPlayTrainer(Trainer):
                                  value_mean=fmean(values[i] for i in rows) if learned else None)
         return result
 
+    def training_search(self):
+        """This rollout's TrainingSearch, or None (search off, or still warming up)."""
+        c = self.config
+        if not c.search_fraction or self.hands < c.search_warmup_hands:
+            return None
+        from .search import TrainingSearch
+        return TrainingSearch(c.search_fraction, c.search_samples)
+
+    def search_objective(self, data):
+        """Search loss for this update (docs/search_training.md, 4.3-4.4 and 8), or None.
+
+        The targets are fixed at θ_old (search_update_targets). Each minibatch
+        then adds search_weight × the mean per-state search loss, estimated
+        without bias from the minibatch's searched rows: the summed loss is
+        scaled by N / (|minibatch| × searched states), so its expectation over
+        random minibatches is the mean over all searched states of the rollout.
+        """
+        if 'searched' not in data:
+            return None
+        from .search import search_minibatch_loss, search_update_targets
+        c = self.config
+        self.search_diagnostics = search_update_targets(self.model, data, c.search_target, c.search_clip)
+        total, searched = len(data['actions']), self.search_diagnostics['searched_states']
+        sums = [0.0, 0]  # Per-state search loss summed over the update, and its count.
+
+        def objective(batch):
+            result = search_minibatch_loss(self.model, batch, c.search_target, c.clip_epsilon)
+            if result is None:
+                return None
+            summed, count = result
+            sums[0] += summed.item()
+            sums[1] += count
+            return c.search_weight * summed * (total / (len(batch['actions']) * searched))
+
+        self._search_sums = sums
+        return objective
+
     def update(self, buffer):
         if not len(buffer):
             raise ValueError('No trainable decisions collected; skip the PPO update')
         self.value_diagnostics = self.return_diagnostics(buffer)
+        self.search_diagnostics, self._search_sums = None, None
         metrics = super().update(buffer)
+        if self.search_diagnostics is not None:
+            loss, count = self._search_sums
+            metrics.update(self.search_diagnostics, search_loss=loss / count if count else None)
         # A KL early stop can leave a collected phase without an optimizer step.
         trained = set(getattr(self.model, 'trained_phases', ('play',))) | {
             p for p in PHASES if p + '_policy_loss' in metrics}

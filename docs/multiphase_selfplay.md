@@ -587,6 +587,35 @@ All pairings except Base–HHH are significant.
   schedule. Treat these as evidence about these checkpoints, not about the
   methods.
 
+## Search inside training
+
+`--search-fraction P` adds Monte Carlo search to training. The theory, gates,
+pilots and experiment plan are in [search in training](search_training.md); this
+section covers operation.
+
+```bash
+python -m examples.train_selfplay_ppo --init-checkpoint runs/study-shared/checkpoints/best.pt \
+  --learn-phases bid,play --total-hands 65536 --rollout-decisions 4096 --threads 8 \
+  --search-fraction 0.01 --search-samples 16 --search-weight 0.25 --search-target cmpo \
+  --output-dir runs/search-train --log-dir logs/experiments/search-train
+```
+
+| Aspect | Behaviour |
+| --- | --- |
+| Searched decisions | Each learner play decision with at least two legal moves, with probability P. One draw from a dedicated per-hand stream per learner play decision, so selection is worker-invariant and independent of the action streams. |
+| The search | From the learner's own observation: uniform belief over consistent deals, `--search-samples` worlds, every legal move rolled out to the end of the hand with the current networks at all four seats (each seat's own network in paired mode), points objective. The true hidden hands are never used. |
+| Effect on the hand | None. Search has its own seeded streams, so actions, records and rewards are bit-identical to a run without search. It only adds `Experience.search_q`. |
+| The loss | Per update, targets fixed at θ_old: search advantages Â = Q̂ − Σ π_old Q̂, normalized by their π_old-weighted RMS. Each minibatch adds `--search-weight` × the mean per-state search loss: CMPO's KL(π̄ ‖ π_θ), or the all-action clipped surrogate (`--search-target advantage`). The value loss and GAE are unchanged. |
+| Logged | Per update: `searched_states`, `search_loss`, `search_disagreement`, `search_abs_advantage`, `search_advantage_scale` (and `search_target_kl` for CMPO). Per rollout: `rollout_performance.search_seconds` and `searched_decisions`. |
+| Cost | Full-rollout searches take about 0.4–0.6 s each in a worker. At P = 0.01 a 4,096-decision update searches about 36 states, about 1.8× the study run's training time (estimate in [search in training](search_training.md#9-compute-budget)). |
+| Checkpoints and resume | Settings are config fields; checkpoints written before search existed load with search off. An explicit `--search-*` flag on `--resume` changes the setting. |
+| Not yet supported | Stochastic (sampled) rollouts, searching bid or trump decisions, and leaf-truncated search (no cheap leaf passes the ranking gate). |
+
+Implementation: `research/ppo/search.py` (`TrainingSearch`, `InMemoryGuide`,
+`search_values`, `search_update_targets`, `search_minibatch_loss`),
+`selfplay_rollout.collect_phase_hand(search=...)` and
+`SelfPlayTrainer.search_objective`. Tests: `tests/test_search_training.py`.
+
 ## Evaluation ownership
 
 [Phase-composable evaluation](phase_composable_evaluation.md) is the canonical

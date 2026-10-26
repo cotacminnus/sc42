@@ -90,6 +90,17 @@ def build_parser():
     parser.add_argument('--paired-partners', action='store_true',
                         help="train two separate learner networks: partner 1 plays the team's first seat "
                              '(0/1), partner 2 its second seat (2/3); saved as checkpoints/partner-1 and partner-2')
+    search = parser.add_argument_group(
+        'search inside training', 'docs/search_training.md: a seeded fraction of learner play decisions is '
+        'searched with the current networks; a search loss is added to PPO. Fraction 0 (default) is off.')
+    search.add_argument('--search-fraction', type=float, default=0.0,
+                        help='share of learner play decisions searched (for example 0.01)')
+    search.add_argument('--search-samples', type=int, default=16, help='sampled worlds per search')
+    search.add_argument('--search-weight', type=float, default=0.25, help='weight of the search loss')
+    search.add_argument('--search-target', choices=('cmpo', 'advantage'), default='cmpo',
+                        help='cmpo: KL to the clipped MPO target; advantage: all-action clipped surrogate')
+    search.add_argument('--search-clip', type=float, default=2.0, help='CMPO clip c on normalized advantages')
+    search.add_argument('--search-warmup-hands', type=int, default=0, help='ordinary PPO before searching')
     parser.add_argument('--eval-threads', type=int, default=1)
     parser.add_argument('--output-dir', type=Path, default=Path('runs/ppo-selfplay'))
     add_output_arguments(parser)
@@ -214,7 +225,10 @@ def main(argv=None):
             from_scratch=args.from_scratch or bool(args.resume and saved.from_scratch),
             oracle_dataset=str(args.oracle_dataset.resolve()) if args.oracle_dataset else None,
             oracle_dataset_sha256=dataset_sha256(args.oracle_dataset) if args.oracle_dataset else None,
-            partner_mode='paired' if args.paired_partners else 'shared')
+            partner_mode='paired' if args.paired_partners else 'shared',
+            search_fraction=args.search_fraction, search_samples=args.search_samples,
+            search_weight=args.search_weight, search_target=args.search_target,
+            search_clip=args.search_clip, search_warmup_hands=args.search_warmup_hands)
         if args.resume:
             if saved is None:
                 raise ValueError('Resume requires a multi-phase checkpoint; use --init-play-checkpoint for migration')
@@ -384,6 +398,13 @@ def main(argv=None):
                              f'({values["oracle_aux_point_error"]:.3f} points)' if 'oracle_aux_loss' in values else ''))
                 for phase in config.learn_phases:
                     print(f'  {label}{phase}: policy {values.get(phase + "_policy_loss", 0):.5f}, entropy {values.get(phase + "_entropy", 0):.4f}, KL {values.get(phase + "_approx_kl", 0):.6f}')
+                if values.get('searched_states'):
+                    print(f'  {label}search: {values["searched_states"]} states; loss {values["search_loss"]:.5f}; '
+                          f'disagreement {values["search_disagreement"]:.1%}; '
+                          f'|A| {values["search_abs_advantage"]:.3f} points')
+            if 'search_seconds' in trainer.rollout_performance:
+                print(f'  search time: {trainer.rollout_performance["search_seconds"]:.1f} worker-s for '
+                      f'{trainer.rollout_performance["searched_decisions"]} decisions')
             if (not paired and sample_count and set(trainer.model.neural_phases) <= set(trainer.model.trained_phases)
                     and trainer.hands - trainer.last_snapshot >= config.snapshot_every_hands):
                 spec = trainer.publish_snapshot(directory / 'snapshots')

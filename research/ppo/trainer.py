@@ -223,6 +223,14 @@ class Trainer:
         """Optional (weighted loss tensor, metrics) added to each optimizer step."""
         return None
 
+    def search_objective(self, data):
+        """Optional per-minibatch search loss for this update: batch -> loss tensor or None.
+
+        None (the default, and whenever no decision was searched) leaves the
+        update unchanged. SelfPlayTrainer implements search inside training.
+        """
+        return None
+
     def update(self, buffer):
         self.synchronize()
         started = perf_counter()
@@ -238,6 +246,8 @@ class Trainer:
             critic.train()
         # Policy-only PPO: value outputs are ignored and no value loss exists.
         policy_only = c.critic_mode == 'none'
+        # Search targets are fixed here, at θ_old, before any optimizer step.
+        search = self.search_objective(data)
         totals, weight = {}, 0
         phase_totals, phase_weights = {}, {}
         stop = False
@@ -261,6 +271,9 @@ class Trainer:
                 auxiliary = self.auxiliary_loss() if critic is not None else None
                 if auxiliary is not None:
                     loss = loss + auxiliary[0]
+                term = search(batch) if search is not None else None
+                if term is not None:
+                    loss = loss + term
                 if not torch.isfinite(loss):
                     raise FloatingPointError('Non-finite PPO loss')
                 self.optimizer.zero_grad()

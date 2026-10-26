@@ -37,11 +37,13 @@ per process through checkpoint.load_frozen. Factories follow the arena
 convention factory(seat, seed) -> Agent and are picklable for spawn workers.
 """
 from dataclasses import dataclass
+import math
+import random
 
 from texas42.selfplay import observation_from_view
 
 from .composition import (CompositeAgentFactory, CompositePolicySpec, PairedAgentFactory, PhasePolicySpec,
-                          PHASES, partner_index, phase_network)
+                          PHASES, _NeuralPolicy, partner_index, phase_network)
 from .opponents import CheckpointIdentity
 
 
@@ -156,6 +158,86 @@ class ValueLeaf:
 
 
 # ---------------------------------------------------------------------------
+# Search inside training (docs/search_training.md, sections 8 and 10).
+#   P1: InMemoryGuide plays the learner's CURRENT network inside the search,
+#       from the rollout snapshot a collection worker already holds (the
+#       learner has no checkpoint file mid-rollout).
+#   P3: TrainingSearch + search_values: the collector searches a seeded
+#       fraction of learner play decisions and stores every legal move's
+#       estimate beside the decision (buffer.Experience.search_q).
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class TrainingSearch:
+    """Collector settings for searching learner play decisions (P3).
+
+    fraction  probability that a learner play decision is searched. Drawn from
+              a dedicated per-hand stream, one draw per learner play decision,
+              so which decisions are searched never depends on worker
+              scheduling. Forced moves (one legal action) are never searched.
+    samples   sampled worlds per search: uniform belief from the learner's own
+              observation, full-hand rollouts, points objective. Those settings
+              pass the move-ranking gate (section 6); value leaves do not.
+    """
+    fraction: float
+    samples: int
+
+    def __post_init__(self):
+        if not (math.isfinite(self.fraction) and 0 < self.fraction <= 1):
+            raise ValueError('search fraction must be in (0, 1]')
+        if type(self.samples) is not int or self.samples < 1:
+            raise ValueError('search samples must be a positive integer')
+
+
+class _GuideAgent:
+    """Greedy player for an in-memory PhaseActorCritic (P1).
+
+    Each neural phase takes the masked argmax of its network's logits (the
+    composition fast path, _NeuralPolicy); every other phase plays Heuristic
+    V1. That is how the learner plays greedily during collection
+    (agent.PPOAgent), and how model_factories plays a checkpoint. No RNG is
+    consumed.
+    """
+
+    def __init__(self, model):
+        from texas42.agents import HeuristicAgent
+        self.delegates = {p: (_NeuralPolicy(model.networks[p], 0, True) if p in model.neural_phases
+                              else HeuristicAgent()) for p in PHASES}
+
+    def reset(self, seat):
+        for delegate in self.delegates.values():
+            delegate.reset(seat)
+
+    def act(self, obs):
+        return self.delegates[obs.phase].act(obs)
+
+
+@dataclass(frozen=True, eq=False)
+class InMemoryGuide:
+    """Arena-style seat factory, factory(seat, seed) -> Agent, for a network in memory."""
+    model: object
+
+    def __call__(self, seat, seed):
+        return _GuideAgent(self.model)
+
+
+def search_values(obs, guides, samples, seed):
+    """Full-rollout search estimate (points) of every legal move, as a tuple over all action IDs.
+
+    guides are four seat factories playing the current policy (InMemoryGuide);
+    entries for illegal actions are 0.0. Worlds come from the observation only,
+    never from the real hidden hands.
+    """
+    from texas42.belief import evaluate_actions
+    evaluation = evaluate_actions(obs, rng=random.Random(seed), samples=samples, rollout_policies=guides,
+                                  objective='points')
+    values = [0.0] * len(obs.action_mask)
+    for estimate in evaluation.estimates:
+        values[estimate.action_id] = estimate.expected_points
+    return tuple(values)
+
+
+# ---------------------------------------------------------------------------
 # Search-derived policy targets (docs/search_training.md, sections 4.3-4.4).
 # Shared by the offline distillation pilot (examples/search_distillation_pilot)
 # and the search loss in training. Batched tensors, one row per searched
@@ -205,5 +287,83 @@ def masked_kl(log_p, log_q, masks):
     return torch.where(masks, log_p.exp() * (log_p - log_q), torch.zeros_like(log_p)).sum(-1)
 
 
-__all__ = ['ValueLeaf', 'advantage_scale', 'cmpo_target', 'masked_kl', 'masked_log_softmax', 'model_factories',
-           'model_policy_spec', 'search_advantages', 'trained_phases', 'value_heads_trained']
+# ---------------------------------------------------------------------------
+# P4: the search loss inside the PPO update (docs/search_training.md, 4.3-4.4, 8).
+# ---------------------------------------------------------------------------
+
+SEARCH_TARGETS = ('cmpo', 'advantage')
+
+
+def search_update_targets(model, data, target, clip):
+    """Fix the update's search targets at θ_old; add them to `data`; return diagnostics.
+
+    Run once per update, before the first optimizer step, so π_old is the
+    rollout policy. Rows where data['searched'] is set carry search_q. Added
+    full-length tensors (meaningful only on searched rows):
+      search_log_old     log π_old over legal moves;
+      search_advantage   Â / σ: search advantage, scaled by its π_old-weighted
+                         RMS over the update's searched states (as CMPO does);
+      search_log_target  log π̄, the CMPO target ('cmpo' only).
+    """
+    import torch
+    rows = data['searched']
+    masks = data['masks'][rows]
+    with torch.no_grad():
+        logits, _ = model(data['features'][rows])
+        log_old = masked_log_softmax(logits, masks)
+        advantage, p_old = search_advantages(log_old, data['search_q'][rows], masks)
+        sigma = advantage_scale(p_old, advantage) or 1.0  # All moves equal: no signal at any scale.
+        q = torch.where(masks, data['search_q'][rows], torch.full_like(log_old, -torch.inf))
+
+        def full(values):
+            out = torch.zeros_like(data['search_q'])
+            out[rows] = values
+            return out
+
+        data['search_log_old'] = full(log_old)
+        data['search_advantage'] = full(advantage / sigma)
+        diagnostics = dict(searched_states=int(rows.sum()), search_advantage_scale=sigma,
+                           search_disagreement=float((q.argmax(-1) != log_old.argmax(-1)).float().mean()),
+                           search_abs_advantage=float((p_old * advantage.abs()).sum(-1).mean()))
+        if target == 'cmpo':
+            log_target = cmpo_target(log_old, advantage, masks, clip, sigma)
+            data['search_log_target'] = full(log_target)
+            diagnostics['search_target_kl'] = float(masked_kl(log_target, log_old, masks).mean())
+    return diagnostics
+
+
+def search_minibatch_loss(model, batch, target, clip_epsilon):
+    """(sum of per-state search losses, searched rows) for one minibatch, or None.
+
+    cmpo       KL(π̄ ‖ π_θ): fit the regularized improvement target (4.4).
+    advantage  -Σ_a π_old(a) min(r(a) Â(a), clip(r(a), 1±ε) Â(a)), with
+               r = π_θ/π_old: PPO's clipped surrogate summed over every legal
+               move, whose gradient at θ_old is the all-action gradient
+               Σ_a ∇π_θ(a) Â(a) (4.3).
+    """
+    import torch
+    rows = batch['searched']
+    count = int(rows.sum())
+    if not count:
+        return None
+    masks = batch['masks'][rows]
+    logits, _ = model(batch['features'][rows])
+    log_new = masked_log_softmax(logits, masks)
+    if target == 'cmpo':
+        losses = masked_kl(batch['search_log_target'][rows], log_new, masks)
+    else:
+        log_old = batch['search_log_old'][rows]
+        # Fill illegal entries before exp: -inf - -inf would be NaN, even in a gradient.
+        ratio = (log_new - log_old).masked_fill(~masks, 0.0).exp()
+        p_old = log_old.exp().masked_fill(~masks, 0.0)
+        advantage = batch['search_advantage'][rows]
+        surrogate = torch.minimum(ratio * advantage,
+                                  ratio.clamp(1 - clip_epsilon, 1 + clip_epsilon) * advantage)
+        losses = -(p_old * surrogate).sum(-1)
+    return losses.sum(), count
+
+
+__all__ = ['InMemoryGuide', 'SEARCH_TARGETS', 'TrainingSearch', 'ValueLeaf', 'advantage_scale', 'cmpo_target',
+           'masked_kl', 'masked_log_softmax', 'model_factories', 'model_policy_spec', 'search_advantages',
+           'search_minibatch_loss', 'search_update_targets', 'search_values', 'trained_phases',
+           'value_heads_trained']

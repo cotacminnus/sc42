@@ -2,6 +2,7 @@
 from dataclasses import replace
 import hashlib
 import os
+import random
 from time import perf_counter
 import torch
 from texas42.agents import HeuristicAgent
@@ -22,7 +23,7 @@ _CRITIC_VERSION = None
 
 
 @torch.no_grad()
-def collect_phase_hand(models, seed, episode, learn_phases, pool, critic=None, current_sha256=None):
+def collect_phase_hand(models, seed, episode, learn_phases, pool, critic=None, current_sha256=None, search=None):
     """One complete hand; `models` is one shared learner or a (partner 1, partner 2) pair.
 
     Shared mode passes a single model (or a 1-tuple) and keeps the original
@@ -44,6 +45,16 @@ def collect_phase_hand(models, seed, episode, learn_phases, pool, critic=None, c
     With a centralized critic, the actor still sees only `encode(obs)`; the
     privileged features and the critic's value are stored beside the decision
     for the update and never enter action selection.
+
+    search (research.ppo.search.TrainingSearch, optional): search inside
+    training (docs/search_training.md, P3). For each learner play decision,
+    one draw from a dedicated per-hand stream decides whether to search it
+    (forced moves never are). The search runs from the learner's own
+    observation, with the current learner networks playing every seat
+    (pair-aware, like the hand itself), and stores every legal move's
+    estimate as Experience.search_q. It uses its own seeded streams and never
+    touches the hand's action generator, so the hand, its actions and its
+    records are exactly those of a run without search.
     """
     models = models if isinstance(models, tuple) else (models,)
     if len(models) not in (1, 2):
@@ -79,7 +90,22 @@ def collect_phase_hand(models, seed, episode, learn_phases, pool, critic=None, c
     obs = env.reset()
     paths = {s: [] for s in range(4) if s % 2 == team}
     decisions, inference, neural_inference = 0, 0.0, 0.0
+    if search is not None:
+        from .search import InMemoryGuide, search_values
+        guides = tuple(InMemoryGuide(learner(seat)) for seat in range(4))
+        search_draws = random.Random(stream_seed(seed, 'search-decisions-v1', episode))
+        searched, search_seconds = 0, 0.0
     while True:
+        search_q = None
+        if search is not None and obs.seat in paths and obs.phase == 'play' and 'play' in learn_phases:
+            # Draw first, then check legality: the stream advances identically
+            # whichever decisions are searched.
+            if search_draws.random() < search.fraction and len(obs.legal_action_ids) > 1:
+                search_started = perf_counter()
+                search_q = search_values(obs, guides, search.samples,
+                                         stream_seed(seed, 'search-worlds-v1', episode * 64 + decisions))
+                search_seconds += perf_counter() - search_started
+                searched += 1
         started = perf_counter()
         if obs.seat in paths and obs.phase in learn_phases:
             features = tuple(encode(obs))
@@ -95,7 +121,7 @@ def collect_phase_hand(models, seed, episode, learn_phases, pool, critic=None, c
             action = int(action.item())
             paths[obs.seat].append(Experience(features, obs.action_mask, action,
                 float(logp.item()), float(value.item()), 0.0, False, obs.seat, episode,
-                critic_features))
+                critic_features, search_q))
         else:
             action = agents[obs.seat].act(obs)
         inference += perf_counter() - started
@@ -117,18 +143,23 @@ def collect_phase_hand(models, seed, episode, learn_phases, pool, critic=None, c
         rss = int(Path('/proc/self/statm').read_text().split()[1]) * os.sysconf('SC_PAGE_SIZE')
     except (OSError, ValueError, IndexError):
         rss = None
-    return dict(worker_rss_bytes=rss, episode=episode, paths=tuple(tuple(p) for p in paths.values()),
-                reward=transition.rewards[team], opponent=label,
-                opponent_sha256=current_sha256 if spec is None else spec.sha256,
-                decisions=decisions, points=transition.hand_result.team_points, bidder=transition.hand_result.bidder,
-                inference_seconds=inference, opponent_loading_seconds=loading,
-                neural_inference_seconds=neural_inference + sum(getattr(a, 'neural_inference_seconds', 0.0) for a in agents))
+    row = dict(worker_rss_bytes=rss, episode=episode, paths=tuple(tuple(p) for p in paths.values()),
+               reward=transition.rewards[team], opponent=label,
+               opponent_sha256=current_sha256 if spec is None else spec.sha256,
+               decisions=decisions, points=transition.hand_result.team_points, bidder=transition.hand_result.bidder,
+               inference_seconds=inference, opponent_loading_seconds=loading,
+               neural_inference_seconds=neural_inference + sum(getattr(a, 'neural_inference_seconds', 0.0) for a in agents))
+    if search is not None:
+        row.update(searched_decisions=searched, search_seconds=search_seconds)
+    return row
 
 
 def phase_chunk(task):
     global _LEARNER, _VERSION, _CRITIC, _CRITIC_VERSION
+    # optional: (critic weights or None[, TrainingSearch]); absent keeps the original task.
     weights, hidden, neural, learn, seed, indices, pool, *optional = task
     critic_weights = optional[0] if optional else None
+    search = optional[1] if len(optional) > 1 else None
     # Bound process-local opponent caches to the current roster plus anchor.
     from .checkpoint import _FROZEN_MODELS
     allowed = {s for s in (pool.anchor, *pool.policies, *pool.snapshots) if s is not None}
@@ -167,7 +198,7 @@ def phase_chunk(task):
     rows, current = [], hashlib.sha256(b''.join(payloads)).hexdigest()
     for episode in indices:
         try:
-            rows.append(collect_phase_hand(_LEARNER, seed, episode, learn, pool, critic, current))
+            rows.append(collect_phase_hand(_LEARNER, seed, episode, learn, pool, critic, current, search))
         except Exception as exc:
             raise RuntimeError(f'Multi-phase episode={episode} worker={os.getpid()}: {exc}') from exc
     return rows, os.getpid()

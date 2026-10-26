@@ -1,7 +1,9 @@
 # Search inside training: theory, evidence and plan
 
-**Status:** theory, gate measurements and an enumerated implementation plan. No
-training code uses search yet. This document is the authoritative home for:
+**Status:** theory, gate measurements, offline pilots, and an implementation of
+search inside training (P1, P3, P4: `--search-fraction`, off by default). The
+training experiments (P5) are pending. This document is the authoritative home
+for:
 
 - why Monte Carlo search could become part of PPO training rather than only a
   decision-time tool;
@@ -39,11 +41,13 @@ already exist; see [belief modelling](belief.md#model-guided-pimc).
     - The gains add up roughly per round, but at about +0.005–0.009 each, with no
       change yet against HHH.
 - **Plan (section 10).**
-  - Build in-memory search guides (P1).
-  - Then train with full model rollouts on about 0.5–1% of play decisions (about
-    1.4–1.8× current cost, section 9).
+  - **Implemented:** in-memory guides (P1), search in the collector (P3) and the
+    search loss (P4). Enable with `train_selfplay_ppo --search-fraction 0.01`.
+  - **Recommended use:** full model rollouts on about 0.5–1% of play decisions
+    (about 1.4–1.8× current cost, section 9).
   - A cheap leaf needs a better value estimate first (P2 option 3).
-  - Expect a modest effect, and confirm it at equal compute (P5).
+  - **Next:** the training experiments (P5). Expect a modest effect, and confirm
+    it at equal compute.
 - **Decision-time search is already strong.** Model-guided search with full
   rollouts is the strongest agent measured, at 1,024 deals:
   - +0.045 [+0.009, +0.081] marks/hand over plain heuristic PIMC;
@@ -941,7 +945,9 @@ the policy.
        value head trained to separate alternatives (P2 option 3).
 3. **Search advantages.** For each legal action a: Q̂(a) from the search,
    V̂ = Σ<sub>a</sub> π<sub>old</sub>(a) Q̂(a), Â<sub>s</sub>(a) = Q̂(a) − V̂.
-   Normalize per batch, as PPO already does for GAE advantages.
+   Normalize per update by σ, the π<sub>old</sub>-weighted RMS of Â<sub>s</sub>
+   over the searched states. This is CMPO's normalization, and the role PPO's
+   batch normalization plays for GAE advantages.
 4. **Loss.**
    - L = L<sub>PPO</sub>(GAE, sampled action) + λ · L<sub>search</sub>.
    - L<sub>search</sub> is the all-action clipped surrogate (section 4.3), averaged
@@ -1041,13 +1047,19 @@ when the previous gate passes. Defaults must reproduce current training exactly
   regret against full model rollouts (points objective) is no larger than that of
   plain heuristic-rollout search, and its top-1 agreement is at least as high.
 
-**P1. In-memory search guides.**
-- `research/ppo/search.py`: build rollout factories and a leaf from in-memory
-  network weights (the collector's rollout snapshot), not only from a
-  `CheckpointIdentity`. The learner has no checkpoint file mid-rollout.
-- Pair-aware in paired mode (already true of `model_factories` and `ValueLeaf`).
-- Tests: in-memory and checkpoint-built guides give identical Q̂ for the same
-  weights and seeds; picklable for spawn workers.
+**P1. In-memory search guides (done).**
+- `research/ppo/search.py` (`InMemoryGuide`) is an arena-style seat factory for a
+  network held in memory. The collection worker already holds the rollout
+  snapshot, and the learner has no checkpoint file mid-rollout.
+  - Neural phases play the masked argmax of their network, through the same fast
+    path as model-guided PIMC.
+  - Other phases play Heuristic V1, as the learner does during collection.
+  - No RNG is consumed.
+- Pair-aware: the collector builds one guide per seat from that seat's own
+  network.
+- No leaf is built in memory: no cheap leaf has passed the gate.
+- Test: the guide's moves equal the network's masked argmax, and Heuristic V1 on
+  heuristic phases (`tests/test_search_training.py`).
 
 **P2. A cheap leaf that ranks (only if a leaf is wanted).** Candidates, in order:
 1. **Own-turn leaf (done; fails the gate, section 6.1):** `until='turn'` in
@@ -1065,28 +1077,68 @@ when the previous gate passes. Defaults must reproduce current training exactly
 - Acceptance: the P0 criterion with the new leaf, plus an arena check that leaf
   search is not worse than full-rollout search beyond the confidence interval.
 
-**P3. Search in the collector.**
-- `research/ppo/selfplay_rollout.py` (`collect_phase_hand`): for each learner play
-  decision, a per-episode draw from `stream_seed(seed, 'search-decisions-v1',
-  episode)` decides whether to search. Search over the learner's own belief
-  worlds, never `remaining_hands()`.
-- `research/ppo/buffer.py` (`Experience`): optional `search_q`, carried to
-  `tensors()` as a 58-wide array plus mask.
-- Config (`SelfPlayConfig`, `examples/train_selfplay_ppo.py`): `search_fraction`
-  (default 0 = off), `search_samples`, `search_leaf`, `search_rollouts`
-  ∈ {greedy, sampled}, `search_warmup_hands`.
-- Tests: fraction 0 is bit-identical to today; 1-vs-N worker invariance with
-  search on; searched decisions and Q̂ are deterministic given the seed.
+**P3. Search in the collector (done).**
+- `research/ppo/selfplay_rollout.py` (`collect_phase_hand(..., search=TrainingSearch)`).
+- **Which decisions:** for each learner play decision, one draw from
+  `stream_seed(seed, 'search-decisions-v1', episode)` decides whether to search
+  it. The draw comes first and the legality check second, so the stream never
+  depends on what was searched. Forced moves are never searched.
+- **The search** (`search.search_values`):
+  - runs from the learner's own observation (uniform belief), never
+    `remaining_hands()`;
+  - `--search-samples` worlds, seeded by `stream_seed(seed, 'search-worlds-v1',
+    episode·64 + decision)`;
+  - full rollouts with the current networks at all four seats, points objective.
+- **Never changes the hand.** The search uses only its own streams, so the hand,
+  its actions and its records are bit-identical to a run without search (tested in
+  shared and paired mode).
+- **Storage:** `research/ppo/buffer.py` (`Experience.search_q`, a 58-wide tuple
+  with 0.0 on illegal actions) is carried to `tensors()` as `search_q` plus a
+  `searched` mask, only when some decision was searched.
+- **Config** (`SelfPlayConfig`, `examples/train_selfplay_ppo.py`):
+  `search_fraction` (default 0 = off), `search_samples` and `search_warmup_hands`.
+  It is decided once per rollout from the hands trained so far. The collection
+  task tuple is unchanged when search is off.
+- **Telemetry:** `rollout_performance.search_seconds` (summed worker time) and
+  `searched_decisions`.
+- **Not implemented:** sampled (stochastic) rollouts. Rollouts are greedy, so they
+  estimate Q of greedy(π) (section 4.3).
+- **Tests:** identical hands with and without search; a decision's search values
+  do not depend on the fraction; 1-vs-2-worker invariance of records and updates;
+  determinism.
 
-**P4. The loss.**
-- `research/ppo/trainer.py` (`Trainer.update`): `search_weight` λ,
-  `search_target` ∈ {advantage, cmpo}, `search_clip` c. Per-phase metrics: entropy,
-  anchor KL, disagreement rate, mean |Â<sub>s</sub>|, searched fraction, search
-  seconds.
-- Checkpoints (`selfplay_checkpoint.py`): config fields only; no format change.
-- Tests: on hand-made batches, the gradient of L<sub>search</sub> at
-  θ<sub>old</sub> equals the all-action gradient (section 4.3), and the CMPO target
-  respects KL ≤ 2c. A tiny seeded update/resume fixture covers both generations.
+**P4. The loss (done).**
+- **Hook:** `research/ppo/trainer.py`, `Trainer.search_objective(data)`.
+  - It returns None by default, so ordinary updates keep their exact operation
+    order.
+  - `SelfPlayTrainer` implements it with `search.search_update_targets` and
+    `search.search_minibatch_loss`.
+- **Fixed targets.** Targets are fixed at θ<sub>old</sub> before the first
+  optimizer step:
+  - log π<sub>old</sub> over every legal move;
+  - Â/σ, with σ the π<sub>old</sub>-weighted RMS of the search advantages over
+    the update's searched states (CMPO's normalization);
+  - for `cmpo`, the target log π̄.
+- **Per minibatch.** Each minibatch adds λ times the mean per-state search loss.
+  The sum over its searched rows is scaled by N / (|minibatch| × searched
+  states), which is an unbiased estimate of the mean over all searched states.
+  - `cmpo`: KL(π̄ ‖ π<sub>θ</sub>).
+  - `advantage`: −Σ<sub>a</sub> π<sub>old</sub>(a) min(r Â, clip(r, 1±ε) Â).
+- **Settings:** `search_weight` λ, `search_target` ∈ {cmpo, advantage},
+  `search_clip` c.
+- **Metrics per update:** `searched_states`, `search_loss`, `search_disagreement`
+  (argmax Q̂ ≠ argmax π<sub>old</sub>), `search_abs_advantage` (points),
+  `search_advantage_scale` and `search_target_kl` (`cmpo`). They appear alongside
+  the existing entropy and anchor-KL diagnostics.
+- **Checkpoints:** config fields only, with no format change. Older checkpoints
+  load with search off.
+- **Tests:**
+  - with λ = 0, an update with searched decisions is bit-identical to plain PPO;
+  - both targets change the play network;
+  - the `advantage` loss gradient at θ<sub>old</sub> equals the all-action
+    gradient Σ<sub>a</sub> ∇π<sub>θ</sub>(a) Â(a) (section 4.3);
+  - CMPO KL ≤ 2c;
+  - checkpoint round trip; CLI smoke.
 
 **P5. Experiments.**
 - **Baseline:** the joint bid+play recipe (shared mode) from the same
