@@ -9,10 +9,11 @@ from .multiphase import PhaseActorCritic, LearnerPhaseSpec, phases, PHASES
 from .opponents import DYNAMIC_OPPONENTS, NO_ANCHOR, HistoricalPool, PolicySpec
 from .buffer import RolloutBuffer
 from .rollout import initialize_worker, snapshot
+from .composition import partner_index
+from .seeds import stream_seed
 from .selfplay_rollout import phase_chunk
 from .critic import CRITIC_MODES, ORACLE_POINT_SCALE, interval_loss, new_critic
 from .model import freeze_value_heads
-from .seeds import stream_seed
 
 
 @dataclass(frozen=True)
@@ -38,6 +39,17 @@ class SelfPlayConfig(Config):
     oracle_dataset_sha256: str | None = None
     # Random initialization of every neural learner phase; no checkpoint or anchor needed.
     from_scratch: bool = False
+    # 'shared': both learner seats use one network (the original method).
+    # 'paired': each learner seat has its own network (PairedSelfPlayTrainer).
+    partner_mode: str = 'shared'
+    # Search inside training (docs/search_training.md, sections 8 and 10).
+    # search_fraction 0 disables it and reproduces training exactly.
+    search_fraction: float = 0.0      # share of learner play decisions searched
+    search_samples: int = 16          # sampled worlds per search (full rollouts, points)
+    search_weight: float = 0.25       # λ: weight of the search loss in the PPO loss
+    search_target: str = 'cmpo'       # 'cmpo' (KL to the clipped MPO target) or 'advantage'
+    search_clip: float = 2.0          # CMPO clip c on Â/σ (KL step bound 2c)
+    search_warmup_hands: int = 0      # ordinary PPO until this many hands
 
     @property
     def snapshot_fallback(self):
@@ -99,6 +111,34 @@ class SelfPlayConfig(Config):
                 raise ValueError('Oracle auxiliary supervision requires an oracle dataset identity')
         elif self.oracle_dataset is not None or self.oracle_dataset_sha256 is not None:
             raise ValueError('An oracle dataset requires a positive oracle_aux_coef')
+        if self.partner_mode not in ('shared', 'paired'):
+            raise ValueError("partner_mode must be 'shared' or 'paired'")
+        if self.partner_mode == 'paired':
+            # Not yet supported in paired mode (each needs a pair-aware design):
+            # a historical pair needs a two-network opponent type, and the
+            # collector sends one centralized critic while each partner trainer
+            # would own and optimize its own. self-current is supported: the
+            # collector seats the current pair as the opponent partnership.
+            if any(n == 'self-snapshots' for n, _ in self.opponent_probabilities):
+                raise ValueError('Paired-partner training does not yet support self-snapshots opponents')
+            if self.critic_mode != 'local':
+                raise ValueError('Paired-partner training does not yet support the centralized critic '
+                                 f'or policy-only PPO (critic_mode {self.critic_mode})')
+        from .search import SEARCH_TARGETS
+        if not (math.isfinite(self.search_fraction) and 0 <= self.search_fraction <= 1):
+            raise ValueError('search_fraction must be in [0, 1]')
+        if self.search_fraction and 'play' not in self.learn_phases:
+            raise ValueError('Search inside training improves play decisions; add play to learn_phases')
+        if type(self.search_samples) is not int or self.search_samples < 1:
+            raise ValueError('search_samples must be a positive integer')
+        if not math.isfinite(self.search_weight) or self.search_weight < 0:
+            raise ValueError('search_weight must be finite and nonnegative')
+        if self.search_target not in SEARCH_TARGETS:
+            raise ValueError('search_target must be ' + ' or '.join(SEARCH_TARGETS))
+        if not math.isfinite(self.search_clip) or self.search_clip <= 0:
+            raise ValueError('search_clip must be finite and positive')
+        if type(self.search_warmup_hands) is not int or self.search_warmup_hands < 0:
+            raise ValueError('search_warmup_hands must be a nonnegative integer')
 
 
 class SelfPlayTrainer(Trainer):
@@ -183,6 +223,8 @@ class SelfPlayTrainer(Trainer):
         self.optimizer = torch.optim.Adam(parameters, lr=config.learning_rate)
         self.oracle_data = self.oracle_validation = self.oracle_summary = None
         self.oracle_shuffle = self.value_diagnostics = None
+        self.search_diagnostics, self._search_sums = None, None  # Last update's search loss diagnostics.
+        self.search_performance = None  # Last rollout's search pass: decisions, worker and wall seconds.
         if config.oracle_aux_coef > 0:
             from .oracle_dataset import load_dataset, training_tensors
             dataset = load_dataset(config.oracle_dataset, sha256=config.oracle_dataset_sha256)
@@ -221,13 +263,43 @@ class SelfPlayTrainer(Trainer):
         return HistoricalPool(c.opponent_probabilities, c.opponent_policies, c.anchor, tuple(self.snapshots),
                               c.snapshot_fallback)
 
+    def learner_models(self):
+        """Networks acting for the learning team: one shared network here.
+
+        PairedSelfPlayTrainer returns (partner 1, partner 2); the collector then
+        routes each learner seat to its own network (composition.partner_index).
+        """
+        return (self.model,)
+
     @torch.no_grad()
     def collect(self):
+        """Collect one rollout; returns (buffer, mean learner-team reward)."""
+        buffers, reward = self._collect()
+        self.samples += len(buffers[0])
+        return buffers[0], reward
+
+    @torch.no_grad()
+    def _collect(self):
+        """Shared rollout loop: one RolloutBuffer per learner network, plus reward.
+
+        Each seat trajectory goes to its own network's buffer (by partner index
+        when paired), so GAE still runs per seat and per hand. Callers update
+        sample counters, because the paired trainer splits them by partner.
+        """
         c, started = self.config, perf_counter()
         if self.hands >= c.total_hands:
             raise ValueError('Training budget exhausted')
-        weights, pool = snapshot(self.model), self.opponent_pool()
+        models = self.learner_models()
+        weights, pool = tuple(snapshot(m) for m in models), self.opponent_pool()
+        # One network sends its single payload exactly as before pairing existed.
+        weights = weights[0] if len(weights) == 1 else weights
+        # Centralized critic payload (shared mode only; paired mode rejects it in the config).
         critic = (snapshot(self.critic),) if self.critic is not None else ()
+        # Search inside training: decided once per rollout (warm-up by hands so far).
+        # Without it the task tuple is exactly the original one.
+        search = self.training_search()
+        if search is not None:
+            critic = (critic[0] if critic else None, search)
         rows, pids, indices, actual = [], set(), [], 0
         previous = torch.get_num_threads()
         try:
@@ -268,11 +340,14 @@ class SelfPlayTrainer(Trainer):
         rows.sort(key=lambda r: r['episode'])
         if [r['episode'] for r in rows] != indices:
             raise RuntimeError('Duplicated or missing episode')
+        if search is not None:
+            rows = self._run_searches(rows, weights, search, pids)
         count = len(indices)
         self.worker_pids = sorted(pids)
         merging_started = perf_counter()
-        buffer = RolloutBuffer()
+        buffers = [RolloutBuffer() for _ in models]
         self.opponent_assignments, self.opponent_metrics, self.phase_counts = [], {}, {}
+        self.partner_phase_counts = [{} for _ in models]
         for row in rows:
             self.opponent_assignments.append((row['episode'], row['opponent'], row['opponent_sha256']))
             stats = self.opponent_metrics.setdefault(row['opponent'], dict(hands=0, reward_sum=0.0))
@@ -281,24 +356,29 @@ class SelfPlayTrainer(Trainer):
             for path in row['paths']:
                 if not path:
                     continue  # A defending learner has no trump action/reward trajectory.
-                buffer.add_trajectory(path, c.gamma, c.gae_lambda, estimator=c.return_estimator,
-                                      baseline=c.critic_mode != 'none')
+                index = partner_index(path[0].seat) if len(models) == 2 else 0
+                buffers[index].add_trajectory(path, c.gamma, c.gae_lambda, estimator=c.return_estimator,
+                                              baseline=c.critic_mode != 'none')
                 for record in path:
                     phase = ('bid', 'trump', 'play')[record.observation_features[:3].index(1.0)]
                     self.phase_counts[phase] = self.phase_counts.get(phase, 0) + 1
+                    counts = self.partner_phase_counts[index]
+                    counts[phase] = counts.get(phase, 0) + 1
         for stats in self.opponent_metrics.values():
             stats['mean_signed_reward'] = stats['reward_sum'] / stats['hands']
         expected = count * self.minimum_decisions
-        if not expected <= len(buffer) <= expected + count * int('trump' in c.learn_phases):
+        total = sum(len(b) for b in buffers)
+        if not expected <= total <= expected + count * int('trump' in c.learn_phases):
             raise RuntimeError('Incorrect enabled-phase rollout count')
         self.rollout_performance = {k: sum(r[k] for r in rows)
                                    for k in ('inference_seconds', 'neural_inference_seconds', 'opponent_loading_seconds')}
         self.rollout_performance['worker_peak_rss_bytes'] = max((r['worker_rss_bytes'] or 0 for r in rows), default=0) or None
         self.rollout_performance['merging_seconds'] = perf_counter() - merging_started
+        if search is not None:
+            self.rollout_performance.update(self.search_performance)
         self.hands += count
-        self.samples += len(buffer)
         self.collection_seconds = perf_counter() - started
-        return buffer, sum(r['reward'] for r in rows) / count
+        return buffers, sum(r['reward'] for r in rows) / count
 
     def auxiliary_loss(self):
         """Interval loss of the critic's oracle head on certified point bounds."""
@@ -351,11 +431,91 @@ class SelfPlayTrainer(Trainer):
                                  value_mean=fmean(values[i] for i in rows) if learned else None)
         return result
 
+    def _run_searches(self, rows, weights, search, pids):
+        """Second collection pass: every selected decision is its own pool task.
+
+        Inline searches inside hand chunks left workers idle behind a few long
+        searches (about 45% efficiency, docs/search_training.md 6.4). Here the
+        pool's bounded queue hands out one search at a time, most expensive
+        first (fewest completed tricks: longest rollouts), so the slowest search
+        starts early instead of ending the rollout alone. Values depend only on
+        each request's own seed, so neither the order nor the worker count
+        changes any result.
+        """
+        from .selfplay_rollout import attach_search_values, search_chunk
+        c, started = self.config, perf_counter()
+        requests = sorted((r for row in rows for r in row['search_requests']),
+                          key=lambda r: (len(r.obs.view.completed_tricks), r.key))
+        tasks = [(weights, c.hidden_size, self.model.neural_phases, search.samples, (request,))
+                 for request in requests]
+        previous = torch.get_num_threads()
+        try:
+            if self.workers == 1 or not tasks:
+                torch.set_num_threads(1)
+                chunks = [search_chunk(task) for task in tasks]
+            else:
+                if self.pool is None:
+                    self.pool = OrderedPool(self.workers, initializer=initialize_worker)
+                chunks = self.pool.map(search_chunk, tasks)
+        except BaseException:
+            self.close()
+            raise
+        finally:
+            torch.set_num_threads(previous)
+        results = [result for chunk, _ in chunks for result in chunk]
+        pids.update(pid for _, pid in chunks)
+        # search_seconds: summed worker time; search_wall_seconds: this pass's wall time.
+        self.search_performance = dict(searched_decisions=len(results),
+                                       search_seconds=sum(seconds for _, _, seconds in results),
+                                       search_wall_seconds=perf_counter() - started)
+        return attach_search_values(rows, {key: values for key, values, _ in results})
+
+    def training_search(self):
+        """This rollout's TrainingSearch, or None (search off, or still warming up)."""
+        c = self.config
+        if not c.search_fraction or self.hands < c.search_warmup_hands:
+            return None
+        from .search import TrainingSearch
+        return TrainingSearch(c.search_fraction, c.search_samples)
+
+    def search_objective(self, data):
+        """Search loss for this update (docs/search_training.md, 4.3-4.4 and 8), or None.
+
+        The targets are fixed at θ_old (search_update_targets). Each minibatch
+        then adds search_weight × the mean per-state search loss, estimated
+        without bias from the minibatch's searched rows: the summed loss is
+        scaled by N / (|minibatch| × searched states), so its expectation over
+        random minibatches is the mean over all searched states of the rollout.
+        """
+        if 'searched' not in data:
+            return None
+        from .search import search_minibatch_loss, search_update_targets
+        c = self.config
+        self.search_diagnostics = search_update_targets(self.model, data, c.search_target, c.search_clip)
+        total, searched = len(data['actions']), self.search_diagnostics['searched_states']
+        sums = [0.0, 0]  # Per-state search loss summed over the update, and its count.
+
+        def objective(batch):
+            result = search_minibatch_loss(self.model, batch, c.search_target, c.clip_epsilon)
+            if result is None:
+                return None
+            summed, count = result
+            sums[0] += summed.item()
+            sums[1] += count
+            return c.search_weight * summed * (total / (len(batch['actions']) * searched))
+
+        self._search_sums = sums
+        return objective
+
     def update(self, buffer):
         if not len(buffer):
             raise ValueError('No trainable decisions collected; skip the PPO update')
         self.value_diagnostics = self.return_diagnostics(buffer)
+        self.search_diagnostics, self._search_sums = None, None
         metrics = super().update(buffer)
+        if self.search_diagnostics is not None:
+            loss, count = self._search_sums
+            metrics.update(self.search_diagnostics, search_loss=loss / count if count else None)
         # A KL early stop can leave a collected phase without an optimizer step.
         trained = set(getattr(self.model, 'trained_phases', ('play',))) | {
             p for p in PHASES if p + '_policy_loss' in metrics}
@@ -377,3 +537,75 @@ class SelfPlayTrainer(Trainer):
         self.snapshots = self.snapshots[-self.config.snapshot_pool_size:]
         # Files remain immutable archive artifacts; only active membership is bounded.
         return spec
+
+
+class PairedSelfPlayTrainer(SelfPlayTrainer):
+    """Two independent learner networks for the learning team (partner_mode='paired').
+
+    `self` is partner 1, the team's first seat (0 or 1). `self.partner` is an
+    ordinary SelfPlayTrainer for partner 2, the second seat (2 or 3). Each
+    partner keeps its own network, Adam state, minibatch-shuffle stream,
+    counters and checkpoint, and is optimized only on its own seat's decisions.
+    This coordinator owns only the shared rollout and the opponent bookkeeping.
+
+    Both partners start from identical weights: Trainer.__init__ reseeds the
+    global RNGs from config.seed, so building the second trainer repeats the
+    first one's initialization exactly. Any specialization comes from the
+    different experience each seat collects.
+
+    Compared with shared mode: each network receives about half the samples
+    per hand; advantages are normalized per partner batch; historical
+    self-snapshots are not supported yet (SelfPlayConfig rejects them).
+    """
+
+    def __init__(self, config, initial=None):
+        # initial=None is from-scratch training: SelfPlayTrainer draws the random
+        # initialization from a fixed seed stream, so both partners still start equal.
+        if config.partner_mode != 'paired':
+            raise ValueError("PairedSelfPlayTrainer requires partner_mode='paired'")
+        super().__init__(config, initial)
+        self.partner = SelfPlayTrainer(config, initial)
+        # Distinct shuffle stream so the partners do not see identical minibatch orders.
+        self.partner.shuffle = torch.Generator().manual_seed(
+            stream_seed(config.seed, 'minibatches-partner-2'))
+        # Recorded in each partner's checkpoint metadata (selfplay_checkpoint.save).
+        self.pairing = dict(mode='paired-v1', partner=1, seat='team-first-seat')
+        self.partner.pairing = dict(mode='paired-v1', partner=2, seat='team-second-seat')
+
+    def learner_models(self):
+        return (self.model, self.partner.model)
+
+    @torch.no_grad()
+    def collect(self):
+        """Collect one rollout; returns ((partner-1 buffer, partner-2 buffer), reward)."""
+        buffers, reward = self._collect()
+        self.samples += len(buffers[0])
+        self.partner.samples += len(buffers[1])
+        self.partner.hands = self.hands
+        return tuple(buffers), reward
+
+    def update(self, buffers):
+        """Run each partner's unchanged PPO update on its own samples.
+
+        Returns {'partner_1': metrics, 'partner_2': metrics}; a partner with no
+        samples this rollout (possible with trump-only training) is skipped.
+        """
+        first, second = buffers
+        if not len(first) and not len(second):
+            raise ValueError('No trainable decisions collected; skip the PPO update')
+        metrics, seconds = {}, 0.0
+        if len(first):
+            metrics['partner_1'] = super().update(first)
+            seconds += self.optimization_seconds
+        if len(second):
+            metrics['partner_2'] = self.partner.update(second)
+            seconds += self.partner.optimization_seconds
+        self.optimization_seconds = seconds  # Both partners' optimizer time.
+        return metrics
+
+    def publish_snapshot(self, directory):
+        raise ValueError('Paired-partner training does not publish historical snapshots yet')
+
+    def close(self):
+        super().close()
+        self.partner.close()

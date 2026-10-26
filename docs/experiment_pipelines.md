@@ -46,6 +46,8 @@ anything starts.
 | `progressive_training.json` | Curriculum from random weights: play → bidding (play frozen) → trump (bid/play frozen) → joint with a centralized critic and historical snapshots → head-to-head evaluation against the pre-joint model. No pretrained checkpoint or anchor. |
 | `scratch_selfplay.json` | All phases from random weights against `HHH:0.3,self-current:0.7`, a second stage adding historical snapshots, then fixed-opponent and head-to-head evaluations. |
 | `critic_comparison.json` | Three independent from-scratch branches that differ only in `critic-mode` (`none`, `local`, `centralized`), each evaluated on the same held-out deals. |
+| `study_comparisons.json` | Evaluation only. The one-seed study's Shared and Paired models each against HHH, HHR, HRR, CHH, CRR and RRR, then Paired against Shared (13 comparisons). Needs the study checkpoints in `runs/study-*`, or your own paths. |
+| `study_round_robin.json` | Evaluation only. Every pair of Base, Shared, Paired, RRR, HHH and plain PIMC (15 comparisons). |
 
 These examples use full-size budgets (hundreds of thousands of hands, 8 workers).
 For a quick trial, copy one and shrink `total-hands`, `rollout-decisions`,
@@ -206,8 +208,11 @@ Rules:
   error even if `latest.pt` exists; the runner never substitutes one for the other.
 - The absolute path and SHA256 of every referenced file are recorded, and checked
   again on resume.
-- External files given directly by path (for example an existing `init-checkpoint`
-  or `oracle-dataset`) are checked and hashed in the same way before their step runs.
+- External files given directly by path are checked and hashed in the same way
+  before their step runs. Examples: an existing `init-checkpoint` or
+  `oracle-dataset`, or an `evaluate_agent_vs_agent` `agent-a-checkpoint`,
+  `agent-a-partner-checkpoint` (and their per-phase forms) or
+  `agent-a-pimc-model`.
 
 ## Output layout
 
@@ -237,8 +242,18 @@ runs/pipelines/progressive-v1/
     └── logs/result.log, result.csv, result-metrics.csv
 ```
 
-Explicit `output-dir`, `output` or `log-dir` values are respected, but two steps may
-not share or nest output locations, and nothing may overwrite the manifest.
+Explicit `output-dir`, `output` or `log-dir` values are respected. Two steps may
+not share or nest output locations, and nothing may overwrite the manifest or the
+summary.
+
+**Comparison summary.** When a pipeline with `evaluate_agent_vs_agent` steps
+completes, the runner writes `OUTPUT_ROOT/summary.md` and prints it.
+
+- One table row per comparison, in step order: the step id, its `description`,
+  agent A's signed marks per hand and win rate with their 95% intervals, and the
+  games played.
+- A resumed run that completes rewrites it.
+- Other evaluation commands keep their own reports and are not summarized.
 
 ## Running and dry runs
 
@@ -384,6 +399,29 @@ and `evaluate_ppo` can evaluate it.
 **Compare models.** End with `evaluate_agent_vs_agent` steps that reference the
 checkpoints to compare, and `evaluate_selfplay_ppo` steps against fixed opponents.
 Use evaluation seeds different from training.
+
+**Evaluation-only comparison sets.** A pipeline needs no training step. Each step
+can name existing checkpoints by path, and `summary.md` collects the results. For
+example, one model against each fixed variant:
+
+```json
+{
+  "id": "paired-vs-chh",
+  "command": "evaluate_agent_vs_agent",
+  "description": "Paired pair vs CHH",
+  "args": {
+    "agent-a-bid": "neural", "agent-a-play": "neural",
+    "agent-a-checkpoint": "runs/study-paired/checkpoints/partner-1/best.pt",
+    "agent-a-partner-checkpoint": "runs/study-paired/checkpoints/partner-2/best.pt",
+    "agent-b-bid": "conservative",
+    "deals": 2048, "seed": 20261019, "bootstrap-samples": 2000, "threads": 0
+  }
+}
+```
+
+`study_comparisons.json` (13 steps) and `study_round_robin.json` (15 steps) are
+complete examples. The flags for every agent and opponent are in
+[model comparisons](command_reference.md#model-comparisons-and-round-robins).
 
 ## Experimental design notes
 

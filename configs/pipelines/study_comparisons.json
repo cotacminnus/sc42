@@ -1,0 +1,220 @@
+{
+  "schema_version": 1,
+  "name": "study-comparisons-v1",
+  "description": "One-seed study, evaluation only: the Shared and Paired models each against the six fixed heuristic/random variants, then Paired against Shared, on 2,048 held-out duplicate deals (seed 20261019). Reproduces docs/multiphase_selfplay.md (one-seed study). Requires the study checkpoints under runs/study-*; replace the paths to compare your own models.",
+  "output_root": "runs/pipelines/study-comparisons-v1",
+  "steps": [
+    {
+      "id": "shared-vs-hhh",
+      "command": "evaluate_agent_vs_agent",
+      "description": "Shared (neural bid and play) vs HHH (Heuristic V1)",
+      "args": {
+        "agent-a-bid": "neural",
+        "agent-a-play": "neural",
+        "agent-a-checkpoint": "runs/study-shared/checkpoints/best.pt",
+        "deals": 2048,
+        "seed": 20261019,
+        "bootstrap-samples": 2000,
+        "threads": 0
+      }
+    },
+    {
+      "id": "shared-vs-hhr",
+      "command": "evaluate_agent_vs_agent",
+      "description": "Shared (neural bid and play) vs HHR",
+      "args": {
+        "agent-a-bid": "neural",
+        "agent-a-play": "neural",
+        "agent-a-checkpoint": "runs/study-shared/checkpoints/best.pt",
+        "agent-b-play": "random",
+        "deals": 2048,
+        "seed": 20261019,
+        "bootstrap-samples": 2000,
+        "threads": 0
+      }
+    },
+    {
+      "id": "shared-vs-hrr",
+      "command": "evaluate_agent_vs_agent",
+      "description": "Shared (neural bid and play) vs HRR",
+      "args": {
+        "agent-a-bid": "neural",
+        "agent-a-play": "neural",
+        "agent-a-checkpoint": "runs/study-shared/checkpoints/best.pt",
+        "agent-b-trump": "random",
+        "agent-b-play": "random",
+        "deals": 2048,
+        "seed": 20261019,
+        "bootstrap-samples": 2000,
+        "threads": 0
+      }
+    },
+    {
+      "id": "shared-vs-chh",
+      "command": "evaluate_agent_vs_agent",
+      "description": "Shared (neural bid and play) vs CHH (conservative bidding)",
+      "args": {
+        "agent-a-bid": "neural",
+        "agent-a-play": "neural",
+        "agent-a-checkpoint": "runs/study-shared/checkpoints/best.pt",
+        "agent-b-bid": "conservative",
+        "deals": 2048,
+        "seed": 20261019,
+        "bootstrap-samples": 2000,
+        "threads": 0
+      }
+    },
+    {
+      "id": "shared-vs-crr",
+      "command": "evaluate_agent_vs_agent",
+      "description": "Shared (neural bid and play) vs CRR",
+      "args": {
+        "agent-a-bid": "neural",
+        "agent-a-play": "neural",
+        "agent-a-checkpoint": "runs/study-shared/checkpoints/best.pt",
+        "agent-b-bid": "conservative",
+        "agent-b-trump": "random",
+        "agent-b-play": "random",
+        "deals": 2048,
+        "seed": 20261019,
+        "bootstrap-samples": 2000,
+        "threads": 0
+      }
+    },
+    {
+      "id": "shared-vs-rrr",
+      "command": "evaluate_agent_vs_agent",
+      "description": "Shared (neural bid and play) vs RRR (uniform random)",
+      "args": {
+        "agent-a-bid": "neural",
+        "agent-a-play": "neural",
+        "agent-a-checkpoint": "runs/study-shared/checkpoints/best.pt",
+        "agent-b-bid": "random",
+        "agent-b-trump": "random",
+        "agent-b-play": "random",
+        "deals": 2048,
+        "seed": 20261019,
+        "bootstrap-samples": 2000,
+        "threads": 0
+      }
+    },
+    {
+      "id": "paired-vs-hhh",
+      "command": "evaluate_agent_vs_agent",
+      "description": "Paired pair (partner 1 seats 0/1, partner 2 seats 2/3) vs HHH (Heuristic V1)",
+      "args": {
+        "agent-a-bid": "neural",
+        "agent-a-play": "neural",
+        "agent-a-checkpoint": "runs/study-paired/checkpoints/partner-1/best.pt",
+        "agent-a-partner-checkpoint": "runs/study-paired/checkpoints/partner-2/best.pt",
+        "deals": 2048,
+        "seed": 20261019,
+        "bootstrap-samples": 2000,
+        "threads": 0
+      }
+    },
+    {
+      "id": "paired-vs-hhr",
+      "command": "evaluate_agent_vs_agent",
+      "description": "Paired pair (partner 1 seats 0/1, partner 2 seats 2/3) vs HHR",
+      "args": {
+        "agent-a-bid": "neural",
+        "agent-a-play": "neural",
+        "agent-a-checkpoint": "runs/study-paired/checkpoints/partner-1/best.pt",
+        "agent-a-partner-checkpoint": "runs/study-paired/checkpoints/partner-2/best.pt",
+        "agent-b-play": "random",
+        "deals": 2048,
+        "seed": 20261019,
+        "bootstrap-samples": 2000,
+        "threads": 0
+      }
+    },
+    {
+      "id": "paired-vs-hrr",
+      "command": "evaluate_agent_vs_agent",
+      "description": "Paired pair (partner 1 seats 0/1, partner 2 seats 2/3) vs HRR",
+      "args": {
+        "agent-a-bid": "neural",
+        "agent-a-play": "neural",
+        "agent-a-checkpoint": "runs/study-paired/checkpoints/partner-1/best.pt",
+        "agent-a-partner-checkpoint": "runs/study-paired/checkpoints/partner-2/best.pt",
+        "agent-b-trump": "random",
+        "agent-b-play": "random",
+        "deals": 2048,
+        "seed": 20261019,
+        "bootstrap-samples": 2000,
+        "threads": 0
+      }
+    },
+    {
+      "id": "paired-vs-chh",
+      "command": "evaluate_agent_vs_agent",
+      "description": "Paired pair (partner 1 seats 0/1, partner 2 seats 2/3) vs CHH (conservative bidding)",
+      "args": {
+        "agent-a-bid": "neural",
+        "agent-a-play": "neural",
+        "agent-a-checkpoint": "runs/study-paired/checkpoints/partner-1/best.pt",
+        "agent-a-partner-checkpoint": "runs/study-paired/checkpoints/partner-2/best.pt",
+        "agent-b-bid": "conservative",
+        "deals": 2048,
+        "seed": 20261019,
+        "bootstrap-samples": 2000,
+        "threads": 0
+      }
+    },
+    {
+      "id": "paired-vs-crr",
+      "command": "evaluate_agent_vs_agent",
+      "description": "Paired pair (partner 1 seats 0/1, partner 2 seats 2/3) vs CRR",
+      "args": {
+        "agent-a-bid": "neural",
+        "agent-a-play": "neural",
+        "agent-a-checkpoint": "runs/study-paired/checkpoints/partner-1/best.pt",
+        "agent-a-partner-checkpoint": "runs/study-paired/checkpoints/partner-2/best.pt",
+        "agent-b-bid": "conservative",
+        "agent-b-trump": "random",
+        "agent-b-play": "random",
+        "deals": 2048,
+        "seed": 20261019,
+        "bootstrap-samples": 2000,
+        "threads": 0
+      }
+    },
+    {
+      "id": "paired-vs-rrr",
+      "command": "evaluate_agent_vs_agent",
+      "description": "Paired pair (partner 1 seats 0/1, partner 2 seats 2/3) vs RRR (uniform random)",
+      "args": {
+        "agent-a-bid": "neural",
+        "agent-a-play": "neural",
+        "agent-a-checkpoint": "runs/study-paired/checkpoints/partner-1/best.pt",
+        "agent-a-partner-checkpoint": "runs/study-paired/checkpoints/partner-2/best.pt",
+        "agent-b-bid": "random",
+        "agent-b-trump": "random",
+        "agent-b-play": "random",
+        "deals": 2048,
+        "seed": 20261019,
+        "bootstrap-samples": 2000,
+        "threads": 0
+      }
+    },
+    {
+      "id": "paired-vs-shared",
+      "command": "evaluate_agent_vs_agent",
+      "description": "Paired pair (partner 1 seats 0/1, partner 2 seats 2/3) vs Shared (neural bid and play)",
+      "args": {
+        "agent-a-bid": "neural",
+        "agent-a-play": "neural",
+        "agent-a-checkpoint": "runs/study-paired/checkpoints/partner-1/best.pt",
+        "agent-a-partner-checkpoint": "runs/study-paired/checkpoints/partner-2/best.pt",
+        "agent-b-bid": "neural",
+        "agent-b-play": "neural",
+        "agent-b-checkpoint": "runs/study-shared/checkpoints/best.pt",
+        "deals": 2048,
+        "seed": 20261019,
+        "bootstrap-samples": 2000,
+        "threads": 0
+      }
+    }
+  ]
+}

@@ -56,10 +56,10 @@ import random
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
 from itertools import combinations
+from typing import TYPE_CHECKING
 
 from .actions import PLAY_ACTIONS
 from .agents.base import PrivilegedState
-from .arena import AgentFactory
 from .encoding import revealed_voids
 from .history import public_history
 from .models import Suit, Trump
@@ -68,8 +68,13 @@ from .selfplay import Observation, observation_from_view
 from .state import HandResult, HandState
 from .training import TrainingBidView, TrainingPlayView
 
+if TYPE_CHECKING:
+    # Annotation-only: belief code never needs the arena (process pools,
+    # statistics) at runtime, and agents.pimc imports this module.
+    from .arena import AgentFactory
+
 SEATS = (0, 1, 2, 3)
-STOP_CONDITIONS = ('trick', 'phase', 'hand')
+STOP_CONDITIONS = ('trick', 'phase', 'hand', 'turn')
 
 # At or below this many consistent worlds, build_belief lists every world
 # (exact expectations) instead of sampling. Cost grows linearly with worlds:
@@ -554,9 +559,11 @@ def policy_likelihood(obs: Observation, world: PrivilegedState, policies: Sequen
 
 
 def _check_distribution(probabilities: dict[int, float], obs: Observation) -> None:
+    # Tolerance 1e-6: learned policies compute softmaxes in floating point, so
+    # exact sums of 1 are not guaranteed; real mistakes are far larger.
     if (not set(probabilities) <= set(obs.legal_action_ids)
             or any(p < 0 for p in probabilities.values())
-            or not math.isclose(sum(probabilities.values()), 1.0, rel_tol=1e-9, abs_tol=1e-9)):
+            or not math.isclose(sum(probabilities.values()), 1.0, rel_tol=1e-6, abs_tol=1e-6)):
         raise ValueError('action_probabilities must be a distribution over legal IDs')
 
 
@@ -671,7 +678,7 @@ class Rollout:
                          are interventions ("what if I play X"), not chance
                          events, so they contribute no factor.
     start_points/end_points  team points (team 0, team 1) before and after.
-    stop_reason          "trick", "phase" or "hand": the condition that ended it.
+    stop_reason          "trick", "phase", "turn" or "hand": the condition that ended it.
     hand_result          engine HandResult if the hand finished, else None.
     final_state          the private HandState where simulation stopped (for
                          a leaf evaluator). Mutating it affects nothing else.
@@ -718,6 +725,15 @@ def simulate(state: HandState, *, rng: random.Random, choices: Sequence[int] = (
                 "phase": stop when the bid/trump/play phase changes, or the
                          hand ends (for play this is the end of the hand).
                 "hand":  play to the end of the hand.
+                "turn":  stop when the seat that acted first is to act again
+                         (or the hand ends). In evaluate_actions that seat is
+                         the searcher, so a leaf evaluator then scores the
+                         searcher's OWN later information state. By perfect
+                         recall that refines the root information, so an
+                         information-set value leaf is unbiased there (tower
+                         property; docs/search_training.md, section 4.6). After
+                         "trick", whoever won the trick acts, and its value
+                         ignores the searcher's private hand.
       track_probability  compute rollout_probability. Policy steps then call
                 ActionProbabilities in addition to act (about twice the policy
                 cost). Pass False when only the outcome matters, as
@@ -735,7 +751,7 @@ def simulate(state: HandState, *, rng: random.Random, choices: Sequence[int] = (
         for seat, agent in enumerate(agents):
             agent.reset(seat)
     start_points = tuple(state.points)
-    start_phase, start_tricks = state.phase, len(state.completed)
+    start_phase, start_tricks, start_seat = state.phase, len(state.completed), state.seat
     applied: list[int] = []
     probability: float | None = 1.0 if track_probability else None
     stop_reason = 'hand'
@@ -784,6 +800,9 @@ def simulate(state: HandState, *, rng: random.Random, choices: Sequence[int] = (
         if until == 'phase' and state.phase != start_phase:
             stop_reason = 'phase'
             break
+        if until == 'turn' and state.seat == start_seat:
+            stop_reason = 'turn'
+            break
     if len(choices) > len(applied):
         raise ValueError('choices extend past the stopping point')
     return Rollout(tuple(applied), min(len(choices), len(applied)), probability, start_points,
@@ -819,8 +838,11 @@ def simulate(state: HandState, *, rng: random.Random, choices: Sequence[int] = (
 class ActionEstimate:
     """Belief-weighted value of one legal action for the observer's team.
 
-    expected_points        weighted mean of points gained by the observer's
-                           team from now until the stopping point (+ leaf).
+    expected_points        weighted mean of the objective value for the
+                           observer's team: points gained from now until the
+                           stopping point (+ leaf) by default, or signed marks
+                           for objective='marks' (the name follows the default
+                           objective; see ActionEvaluation.objective).
     std                    weighted standard deviation of that value across
                            worlds: how much the answer depends on the deal.
     standard_error         approximate error of expected_points as an estimate
@@ -851,7 +873,10 @@ class ActionEstimate:
 
 @dataclass(frozen=True, slots=True)
 class ActionEvaluation:
-    """Result of evaluate_actions: one estimate per legal action, plus context."""
+    """Result of evaluate_actions: one estimate per legal action, plus context.
+
+    objective is 'points' or 'marks': the unit of every expected_points value.
+    """
 
     observer: int
     estimates: tuple[ActionEstimate, ...]
@@ -860,6 +885,7 @@ class ActionEvaluation:
     mode: str
     worlds_used: int
     effective_sample_size: float
+    objective: str = 'points'
 
 
 def _weighted_stats(values: Sequence[float], weights: Sequence[float]) -> tuple[float, float, float]:
@@ -881,8 +907,8 @@ def evaluate_actions(obs: Observation, *, rng: random.Random, belief: Belief | N
                      leaf_evaluator: Callable[[HandState, int], float] | None = None,
                      samples: int = DEFAULT_SAMPLES, enumerate_below: int = DEFAULT_ENUMERATE_BELOW,
                      likelihood_policies: Sequence[AgentFactory] | None = None,
-                     epsilon: float = DEFAULT_EPSILON) -> ActionEvaluation:
-    """Estimate the expected points of every legal action for the observer.
+                     epsilon: float = DEFAULT_EPSILON, objective: str = 'points') -> ActionEvaluation:
+    """Estimate the expected value of every legal action for the observer.
 
     Inputs:
       obs               the observer's ordinary Observation (any phase).
@@ -895,18 +921,36 @@ def evaluate_actions(obs: Observation, *, rng: random.Random, belief: Belief | N
                         hybrid.variant_factory("HHH") for each seat). None
                         means uniformly random continuations, which are
                         unbiased but weak, so expect noisy, pessimistic values.
-      until             where each rollout stops ("trick", "phase", "hand").
-      leaf_evaluator    optional f(state, observer_seat) -> expected ADDITIONAL
-                        points for the observer's team from the stopping state.
-                        This is the hook for a perfect-information oracle;
-                        it receives only hypothetical states. Ignored for
-                        rollouts that finished the hand.
-    Objective: expected points gained by the observer's team (the team's share
-    of the remaining 42). Marks and contract-made rates are reported as
-    diagnostics when rollouts reach the end of the hand.
-    Output: ActionEvaluation. best_action_id maximizes expected_points (ties
-    go to the lowest action ID).
+      until             where each rollout stops ("trick", "phase", "hand", or
+                        "turn": the observer's own next decision; see simulate).
+      leaf_evaluator    optional f(state, observer_seat) -> the observer team's
+                        remaining value from the stopping state, in objective
+                        units: ADDITIONAL points (objective='points') or the
+                        expected FINAL signed marks (objective='marks'; marks
+                        are only awarded at hand end, so nothing has accrued
+                        yet). Hooks: a perfect-information oracle, or a trained
+                        value head (research.ppo.search.ValueLeaf). It receives
+                        only hypothetical states. Ignored for rollouts that
+                        finished the hand.
+      objective         'points' (default): points gained by the observer's
+                        team, its share of the remaining 42. Marks and
+                        contract-made rates are then reported as diagnostics
+                        when rollouts reach the end of the hand.
+                        'marks': the observer team's signed marks for the hand
+                        (+stake if it scores, -stake otherwise), the quantity
+                        PPO value heads predict. Use it with a value-head leaf,
+                        and for bid/trump decisions, where points ignore the
+                        contract. Stopping before the hand ends then requires
+                        a leaf_evaluator.
+    Output: ActionEvaluation. ActionEstimate.expected_points holds the expected
+    objective value (points, or signed marks for objective='marks');
+    ActionEvaluation.objective records which. best_action_id maximizes it
+    (ties go to the lowest action ID).
     """
+    if objective not in ('points', 'marks'):
+        raise ValueError("objective must be 'points' or 'marks'")
+    if objective == 'marks' and until != 'hand' and leaf_evaluator is None:
+        raise ValueError("objective='marks' with rollouts that stop early needs a leaf_evaluator")
     # Step 1: the belief (worlds + weights). Built here unless the caller
     # passes one in, for example to reuse it across several evaluations.
     if belief is None:
@@ -931,7 +975,13 @@ def evaluate_actions(obs: Observation, *, rng: random.Random, belief: Belief | N
             # the same move in every world.
             rollout = simulate(base, rng=random.Random(rollout_seed), choices=(a,),
                                policies=rollout_policies, until=until, track_probability=False)
-            value = float(rollout.points_delta[team])
+            if objective == 'points':
+                value = float(rollout.points_delta[team])
+            elif rollout.hand_result is not None:
+                result = rollout.hand_result
+                value = float(result.marks_awarded if result.scoring_team == team else -result.marks_awarded)
+            else:
+                value = 0.0  # Marks accrue only at hand end; the leaf supplies the estimate.
             if rollout.hand_result is None:
                 if leaf_evaluator is not None:
                     value += float(leaf_evaluator(rollout.final_state, obs.seat))
@@ -958,7 +1008,7 @@ def evaluate_actions(obs: Observation, *, rng: random.Random, belief: Belief | N
             None if marks is None else _weighted_stats(marks[a], weights)[0],
             None if made is None else _weighted_stats(made[a], weights)[0]))
     return ActionEvaluation(obs.seat, tuple(estimates), legal[best], belief.world_count,
-                            belief.mode, len(belief.worlds), belief.effective_sample_size)
+                            belief.mode, len(belief.worlds), belief.effective_sample_size, objective)
 
 
 __all__ = [

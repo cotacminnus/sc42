@@ -14,7 +14,7 @@ dependencies. From the repository root:
 ```bash
 python -m pip install -e .
 python -m texas42
-python -m unittest discover -s tests -v
+python -m unittest discover -s tests -v   # see Testing below
 ```
 
 Optional extras are `.[rl]` (PyTorch/NumPy training and neural evaluation) and
@@ -60,16 +60,19 @@ python -m examples.run_pipeline --config configs/pipelines/progressive_training.
 | Topic | Authoritative guide |
 | --- | --- |
 | Commands, arguments, JSON/log/CSV paths | [Command reference](docs/command_reference.md) |
+| Running the tests: full suite, single modules, coverage map, CI, platform notes | [Testing](docs/command_reference.md#testing) |
 | JSON-defined multi-stage experiments, checkpoint chaining and resume | [Experiment pipelines](docs/experiment_pipelines.md) |
 | Original play-only PPO and version-1 reproduction | [Legacy PPO](docs/ppo_training.md) |
 | Independently train/freeze bidding, trump and play; composed/historical opponents | [Multi-phase PPO](docs/multiphase_selfplay.md) |
+| Two separately trained partner networks; pair and cross-play evaluation | [Paired partners](docs/multiphase_selfplay.md#paired-partner-training) |
 | Independently composed agents and phase ablations | [Phase-composable evaluation](docs/phase_composable_evaluation.md) |
+| Comparing models: one model against each baseline (for example paired vs CHH), batches and round robins with a summary table | [Model comparisons](docs/command_reference.md#model-comparisons-and-round-robins) |
 | Duplicate deals, metrics, bootstrap uncertainty | [Arena methodology](docs/arena.md) |
 | Frozen heuristic and random/conservative variants | [Heuristic V1](docs/simpleheuristic.md), [policy ablations](docs/policy_ablation.md) |
 | Bid-versus-pass replay experiments | [Counterfactual bidding](docs/counterfactual_bidding.md) |
 | Exact open-hand contract/point endgames and complete-deal bid benchmarks | [Endgame oracle](docs/endgame_oracle.md) |
-=======
-| Hidden-deal beliefs, world counting/sampling, rollouts, PIMC action values | [Belief modelling](docs/belief.md) |
+| Hidden-deal beliefs, world counting/sampling, rollouts, PIMC action values, model-guided PIMC | [Belief modelling](docs/belief.md) |
+| Monte Carlo search inside training: theory, ranking gate, offline distillation pilots and the `--search-fraction` training option (experiments pending) | [Search in training](docs/search_training.md) |
 | Observations, public history and training-data validation | [Encoding](docs/encoding.md) |
 | Permanent global actions and reserved contracts | [Action space](docs/action-space.md) |
 | Process workers and evaluation profiling | [Parallel execution](docs/parallel_execution.md), [evaluation performance](docs/evaluation_performance.md) |
@@ -90,7 +93,7 @@ python -m examples.run_pipeline --config configs/pipelines/progressive_training.
 | `texas42/belief.py` | Hidden-deal constraints, exact counting/sampling, rollouts and expected action values |
 | `texas42/training.py`, `encoding.py`, `actions.py` | Versioned ID-based views, 387 features and legal global actions |
 | `texas42/openspiel.py` | Optional adapter depending on the native engine |
-| `research/ppo/` | Optional training (policy-only PPO, local or centralized critic), oracle label datasets, checkpoints and frozen policy composition |
+| `research/ppo/` | Optional training (policy-only PPO, local or centralized critic), oracle label datasets, checkpoints, frozen policy composition and model-guided search (`search.py`) |
 | `examples/` | Runnable game, training and evaluation commands, including the JSON pipeline runner |
 | `configs/pipelines/` | Example JSON experiment pipelines |
 | `tests/`, `docs/` | Deterministic unittest coverage and technical documentation |
@@ -172,8 +175,14 @@ or hidden-hand labels.
 Agents may also implement the optional pure query
 `action_probabilities(obs) -> {action_id: probability}`, the distribution `act`
 samples from (the `ActionProbabilities` protocol). It must not consume RNG or
-change memory. All built-in agents implement it. [Belief modelling](docs/belief.md)
-uses it to weight hypothetical deals and to compute rollout probabilities.
+change memory. All built-in agents implement it except the PIMC search agent, whose
+decisions consume RNG. [Belief modelling](docs/belief.md) uses it to weight
+hypothetical deals and to compute rollout probabilities.
+`texas42.agents.pimc.PIMCAgent` is a search baseline built on those beliefs; compare
+it through the `pimc` trump/play strategy of `examples.evaluate_agent_vs_agent`.
+`--agent-X-pimc-model PATH` lets a trained model play the search's rollouts
+(model-guided PIMC, the strongest agent measured; see
+[model-guided results](docs/belief.md#model-guided-results)).
 
 ## Self-play and data contracts
 
@@ -196,12 +205,38 @@ See [encoding and collection](docs/encoding.md) for deserialization, validation,
 feature layouts and privacy; [action compatibility](docs/action-space.md) owns
 ID mappings and old-log migration.
 
+## Testing
+
+Tests are standard-library `unittest` modules in `tests/`, run from the repository
+root:
+
+```bash
+python -m unittest discover -s tests -v                       # full suite
+python -m unittest tests.test_belief -v                       # one module
+python -m unittest tests.test_belief.SimulationTests -v       # one test class (or Class.test_name)
+python -m unittest discover -s tests -p "test_oracle*.py" -v  # modules matching a pattern
+git diff --check                                              # whitespace check before review
+```
+
+- **Optional extras.** Tests that need PyTorch (`.[rl]`) or OpenSpiel
+  (`.[openspiel]`) skip themselves when the extra is missing. Check the skip
+  count in the summary.
+- **Runtime.** With `.[rl]` installed, the full suite runs about 390 tests in
+  roughly 8 minutes.
+- **Windows.** Four results fail for platform reasons: one CPU-quota test and
+  three subtests that build directory names containing `:`. They are not
+  regressions.
+
+The [testing reference](docs/command_reference.md#testing) is the canonical list.
+It has a quick 12-second core check, which module covers which area, the CI jobs
+and the details of the platform failures.
+
 ## Development
 
-Read [AGENTS.md](AGENTS.md) before contributing. Tests use standard-library
-`unittest`; optional RL/OpenSpiel tests skip if their dependencies are absent.
-GitHub Actions checks core and optional integrations. Run `git diff --check`
-before review, and preserve seeded behavior when refactoring research code.
+Read [AGENTS.md](AGENTS.md) before contributing. GitHub Actions
+(`.github/workflows/tests.yml`) runs the suite on every push and pull request,
+for the core package, OpenSpiel and PyTorch configurations. Preserve seeded
+behavior when refactoring research code.
 
 ## License
 

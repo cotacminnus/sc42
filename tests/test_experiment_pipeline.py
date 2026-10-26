@@ -17,7 +17,8 @@ TORCH = importlib.util.find_spec('torch') is not None
 CONFIGS = Path(__file__).resolve().parents[1] / 'configs' / 'pipelines'
 # Tracked examples only; .gitignore leaves other (personal) pipeline files in this directory.
 EXAMPLES = tuple(CONFIGS / name for name in ('template.json', 'progressive_training.json', 'scratch_selfplay.json',
-                                             'critic_comparison.json'))
+                                             'critic_comparison.json', 'study_comparisons.json',
+                                             'study_round_robin.json'))
 
 
 def quiet(function, *args, **kwargs):
@@ -49,6 +50,20 @@ class FakeRunner:
             Path(option('--output')).parent.mkdir(parents=True, exist_ok=True)
             Path(option('--output')).write_text('{}')
         return SimpleNamespace(returncode=0)
+
+
+class ReportRunner(FakeRunner):
+    """FakeRunner whose evaluate_agent_vs_agent steps leave a minimal agent-vs-agent report."""
+
+    def __call__(self, command, cwd):
+        result = super().__call__(command, cwd)
+        if result.returncode == 0 and command[2] == 'examples.evaluate_agent_vs_agent':
+            Path(command[command.index('--output') + 1]).write_text(json.dumps(dict(
+                metrics=[dict(policy='A', mean_signed_marks=0.125, win_rate=0.56, games_played=100),
+                         dict(policy='B', mean_signed_marks=-0.125, win_rate=0.44, games_played=100)],
+                intervals=[dict(policy='A', mean_signed_marks=dict(low=0.05, high=0.2),
+                                win_rate=dict(low=0.52, high=0.6))])))
+        return result
 
 
 class PipelineTestCase(unittest.TestCase):
@@ -314,6 +329,41 @@ class ExecutionTests(PipelineTestCase):
         record = json.loads((self.path / 'given' / rp.STATE_FILE).read_text())['steps'][0]
         self.assertEqual(record['inputs'], [dict(argument='checkpoint', path=str(external),
                                                  sha256=rp.sha256_file(external))])
+
+    def test_comparison_summary_and_pair_and_guide_inputs(self):
+        first, second = self.path / 'partner-1.pt', self.path / 'partner-2.pt'
+        for path in (first, second):
+            path.write_bytes(path.name.encode())
+        steps = [
+            dict(id='paired-vs-chh', command='evaluate_agent_vs_agent', description='Paired pair vs CHH',
+                 args={'agent-a-bid': 'neural', 'agent-a-play': 'neural', 'agent-a-checkpoint': str(first),
+                       'agent-a-partner-checkpoint': str(second), 'agent-b-bid': 'conservative'}),
+            dict(id='guided-vs-pimc', command='evaluate_agent_vs_agent',
+                 args={'agent-a-trump': 'pimc', 'agent-a-play': 'pimc', 'agent-a-pimc-model': str(first),
+                       'agent-b-trump': 'pimc', 'agent-b-play': 'pimc'}),
+            dict(id='fixed', command='evaluate_selfplay_ppo', args={'checkpoint': str(first)}),
+        ]
+        code, output = self.run_pipeline(self.config(steps), ReportRunner())
+        self.assertEqual(code, 0)
+        manifest = self.manifest()
+        # Partner checkpoints and PIMC guide models are verified, hashed inputs too.
+        self.assertEqual([i['argument'] for i in manifest['steps'][0]['inputs']],
+                         ['agent-a-checkpoint', 'agent-a-partner-checkpoint'])
+        self.assertEqual([i['argument'] for i in manifest['steps'][1]['inputs']], ['agent-a-pimc-model'])
+        summary = (self.path / 'out' / rp.SUMMARY_FILE).read_text(encoding='utf-8')
+        self.assertIn('| paired-vs-chh | Paired pair vs CHH | +0.125 [+0.050, +0.200] | 56.0% [52.0%, 60.0%] | 100 |',
+                      summary)
+        self.assertIn('| guided-vs-pimc |  | +0.125', summary)
+        self.assertNotIn('| fixed |', summary)  # Only agent-vs-agent steps are summarized.
+        self.assertIn('Comparison summary', output)
+        no_comparisons = self.config([dict(id='fixed', command='evaluate_selfplay_ppo',
+                                           args={'checkpoint': str(first)})], output_root=str(self.path / 'none'))
+        quiet(rp.run, rp.parse_config(no_comparisons), runner=ReportRunner())
+        self.assertFalse((self.path / 'none' / rp.SUMMARY_FILE).exists())
+        clash = self.config([dict(id='e', command='evaluate_agent_vs_agent',
+                                  args={'output': str(self.path / 'out' / rp.SUMMARY_FILE)})])
+        with self.assertRaisesRegex(rp.PipelineError, 'comparison summary'):
+            rp.parse_config(clash)
 
 
 @unittest.skipUnless(TORCH, 'optional rl extra is not installed')

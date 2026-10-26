@@ -5,13 +5,132 @@ through the existing duplicate-deal arena. It changes neither training nor game
 rules. Each agent selects bidding, trump and play separately. Defaults are all
 heuristic; neural inference is greedy unless `--stochastic-neural` is supplied.
 
+## Agent catalogue
+
+**The common interface.** Every agent implements `reset(seat)` and
+`act(observation)`, which returns a permanent action ID 0–57. It sees only its own
+`Observation`: its hand plus the public history (calls, contract, trump, played
+dominoes, current trick, score). The engine supplies the legal mask. A hand asks
+each seat for:
+
+- one auction call;
+- a trump choice (auction winner only);
+- seven plays.
+
+Agents are compositions of three phase delegates: bid, trump and play.
+
+### Building blocks
+
+| Component | Code | What it does |
+| --- | --- | --- |
+| Heuristic V1 | `texas42/agents/simpleheuristic.py` | Deterministic rules, described below |
+| Random / conservative | `texas42/agents/random.py`, `conservative_random.py` | Random: uniform over legal moves. Conservative: pass when allowed, otherwise the minimum bid; uniform trump and play. |
+| Neural phase network | `research/ppo/model.py`, loaded by `composition.phase_network` | The 387-feature encoding (`texas42/encoding.py`) feeds two 256-unit ReLU layers. A policy head gives 58 logits, legal-masked; evaluation plays the argmax. A value head predicts the actor team's final signed marks (PPO's baseline). Version-2 checkpoints hold one network per phase, and only the trained ones are used. Version 1 is play only. |
+| PIMC search | `texas42/agents/pimc.py`, `texas42/belief.py` | For trump and play, described below. Bidding is always delegated to Heuristic V1. |
+
+**Heuristic V1:**
+
+- **Bid.**
+  - Take the "best suit": most tiles, then highest rank, then count points.
+  - Classify the hand from that suit's length and its counters:
+    - 7 tiles: 5 marks;
+    - 6 tiles and ≥5 counters: 2 marks;
+    - 5 tiles and ≥5 counters: 37;
+    - 6 tiles: 32;
+    - 5 tiles: 30;
+    - otherwise pass.
+  - Open at the bid, or raise minimally while it is affordable; if forced, bid
+    the minimum.
+- **Trump.** The same best suit.
+- **Play.**
+  - Lead the strongest domino, trumps first.
+  - If the partner is winning safely, give the most count.
+  - If the partner is winning but could be overtaken, discard cheaply.
+  - If an opponent is winning, win with the weakest winning domino when last to
+    play or when the trick holds ≥5 counters.
+  - Otherwise discard the cheapest domino.
+
+**PIMC search**, per decision:
+
+1. Build a belief from hard evidence (own hand, played dominoes, hand sizes,
+   revealed voids). Count the consistent deals exactly; enumerate them when there
+   are few, otherwise sample `--pimc-samples` of them uniformly.
+2. In each deal, play every legal move and then roll the hand out with a rollout
+   policy for all seats. Every move uses the same deals and seeds.
+3. Pick the highest mean points.
+
+Forced moves skip the search.
+
+### Assembled agents
+
+All flags are for agent A; agent B takes the same flags with `-b-`. Checkpoint
+paths are the study runs' (`runs/` is not committed). Substitute your own.
+
+| Agent | Bid | Trump | Play | `evaluate_agent_vs_agent` flags |
+| --- | --- | --- | --- | --- |
+| HHH (Heuristic V1) | Heuristic | Heuristic | Heuristic | none (the default) |
+| HHR / HRR | Heuristic | Heuristic / random | Random | `--agent-a-play random` (HHR); add `--agent-a-trump random` for HRR |
+| CHH / CRR | Conservative | Heuristic / random | Heuristic / random | `--agent-a-bid conservative` (CHH); add `--agent-a-trump random --agent-a-play random` for CRR |
+| RRR | Random | Random | Random | `--agent-a-bid random --agent-a-trump random --agent-a-play random` |
+| Plain PIMC | Heuristic | PIMC, HHH rollouts | PIMC, HHH rollouts | `--agent-a-trump pimc --agent-a-play pimc` |
+| Base model (play-only, version 1; the anchor) | Heuristic | Heuristic | Neural | `--agent-a-checkpoint runs/study-play-v1/checkpoints/best.pt --agent-a-play neural` |
+| Shared model (bid+play) | Neural | Heuristic | Neural | `--agent-a-checkpoint runs/study-shared/checkpoints/best.pt --agent-a-bid neural --agent-a-play neural` |
+| Paired models (two networks) | Neural, own per partner | Heuristic | Neural, own per partner | as Shared with `--agent-a-checkpoint .../partner-1/best.pt --agent-a-partner-checkpoint .../partner-2/best.pt` |
+| Distilled pilots (play network fine-tuned toward search) | Neural (as source) | Heuristic | Neural | as Shared with `--agent-a-checkpoint runs/model-guided/pilot/round2/distilled-c2.pt` ([pilots](search_training.md#62-one-step-distillation-pilot)) |
+| Model-guided PIMC | Heuristic | PIMC, model rollouts | PIMC, model rollouts | `--agent-a-trump pimc --agent-a-play pimc --agent-a-pimc-model runs/study-shared/checkpoints/best.pt` |
+| Model-guided PIMC with a value leaf | Heuristic | PIMC, short rollouts + value head | Same | add `--pimc-leaf value` or `value-turn`. Measured weaker; see [the ranking gate](search_training.md#6-evidence-the-move-ranking-gate). |
+
+**How hidden hands are handled:**
+
+- Heuristic and neural agents decide from the current observation alone. A
+  network can only learn implicit beliefs from the encoded history, such as
+  revealed voids and who played what.
+- PIMC agents reason explicitly over concrete hypothetical deals.
+- Model-guided PIMC also models how everyone continues by using the trained
+  model. Optionally, `--pimc-likelihood model` weights deals by how well they
+  explain the observed moves.
+
+**Measured strength:** plain PIMC beats every trained model (study round robin;
+see [the study](multiphase_selfplay.md#one-seed-study-base-shared-and-paired-262144-hands)).
+Model-guided PIMC beats plain PIMC
+([model-guided results](belief.md#model-guided-results)).
+
 ## Strategies and checkpoint resolution
 
 For each of `--agent-a-*` and `--agent-b-*`, bidding accepts `neural`, `heuristic`,
-`random` or `conservative`; trump/play accept the first three. Conservative bidding
-passes when legal and otherwise chooses the minimum legal bid. Existing agents
-implement all non-neural decisions. No checkpoint or PyTorch installation is
-needed for purely non-neural comparisons.
+`random` or `conservative`; trump/play accept `neural`, `heuristic`, `random` or
+`pimc`. Conservative bidding passes when legal and otherwise chooses the minimum
+legal bid. Existing agents implement all non-neural decisions. No checkpoint or
+PyTorch installation is needed for purely non-neural comparisons.
+
+`pimc` is the belief-based Monte Carlo agent (`texas42.agents.pimc.PIMCAgent`). It
+samples hidden deals consistent with the actor's observation, tries every legal
+move in each with Heuristic V1 rollouts, and picks the best expected points; see
+[belief modelling](belief.md). It is not offered for bidding, where expected points
+is a poor objective. `--pimc-samples` (default 32) sets sampled deals per decision;
+it is recorded in the JSON `composition` block only when PIMC is used, and is a
+run setting rather than part of the stored policy identity. PIMC costs roughly
+0.1–2 s per decision, so prefer `--deals 64`–`128` with `--threads` rather than the
+2048-deal default.
+
+**Model-guided PIMC.** `--agent-X-pimc-model PATH` gives that agent's `pimc`
+phases a trained checkpoint to guide the search. The model plays the simulated
+continuations for every seat, with its trained phases neural and the rest
+heuristic. Two run-level options apply to model-guided phases only; plain `pimc`
+phases ignore them:
+- `--pimc-likelihood model` weights hidden deals by the model's move probabilities.
+- `--pimc-leaf value` stops rollouts after the next trick and scores the rest with
+  the model's value head, using signed marks as the objective. `--pimc-leaf
+  value-turn` stops at the searcher's own next decision instead.
+  - Both need a guide trained with the local critic, whose value heads are
+    fitted.
+  - Both rank moves worse than full rollouts, so prefer the default (`none`) for
+    strength; see [the ranking gate](search_training.md#6-evidence-the-move-ranking-gate).
+
+The guide is stored as that phase's checkpoint in the composition JSON, and the
+run options as `pimc_leaf`, `pimc_likelihood` and `pimc_epsilon`. A default
+`--agent-X-checkpoint` never turns plain PIMC into model-guided PIMC. Method,
+costs and measured accuracy are in [belief modelling](belief.md#model-guided-pimc).
 
 Neural phases use `--agent-a-PHASE-checkpoint` before `--agent-a-checkpoint` (and
 likewise for B). Missing sources fail clearly. A phase override for a non-neural
@@ -54,6 +173,22 @@ joint bidding and playing sources while training trump. Use the
 [held-out trump comparison](command_reference.md#held-out-trump-ablation) to verify
 that only trump differs. Source selection for a new training stage copies weights;
 it never follows a moving snapshot file during training.
+
+## Two-spec teams: paired partners and cross-play
+
+By default one composition plays both seats of a team. Any
+`--agent-X-partner-*` flag gives the team's second seat (2 or 3) its own
+composition, while the first composition keeps seat 0 or 1. The arena seats
+agent A at 0/2 and then 1/3, so the first composition always plays the team's
+lower seat. This matches paired-partner training, where partner 1 is that seat.
+
+- **Paired models:** `--agent-a-checkpoint .../partner-1/best.pt --agent-a-partner-checkpoint .../partner-2/best.pt`.
+- **Cross-play:** a trained model beside a heuristic partner (`--agent-a-partner-play heuristic`), or models from different runs or seeds side by side (roadmap step 8).
+- **Inheritance:** unset partner phases inherit the first seat's strategy. Neural partner phases use partner checkpoints first, then the first seat's sources.
+- **Output:** the console reports whether the partners share neural parameters. JSON gains `partners`, `partner_comparisons` and `partner_seat_rule` only when a partner is configured.
+
+`research.ppo.composition.PairedAgentFactory` implements the seat rule for any
+arena factories, and training validation uses it for in-memory paired models.
 
 ## Non-neural comparisons
 

@@ -23,6 +23,10 @@ class Experience:
     episode_id: int
     # Privileged centralized-critic input; None for the local actor-critic.
     critic_features: tuple[float, ...] | None = None
+    # Search inside training (research.ppo.search, docs/search_training.md):
+    # every action ID's search estimate (points; 0.0 on illegal actions) when
+    # this decision was searched, else None. Never an actor input.
+    search_q: tuple[float, ...] | None = None
 
 
 def gae(rewards, values, gamma=1.0, gae_lambda=0.95, bootstrap_value=0.0):
@@ -122,6 +126,12 @@ class RolloutBuffer:
                     advantages=torch.tensor(self.advantages), returns=torch.tensor(self.returns))
         if central:
             data['critic_features'] = torch.tensor([x.critic_features for x in r], dtype=torch.float32)
+        searched = [x.search_q is not None for x in r]
+        if any(searched):  # Absent otherwise, so ordinary updates see exactly the same tensors.
+            blank = (0.0,) * len(r[0].legal_action_mask)
+            data['searched'] = torch.tensor(searched)
+            data['search_q'] = torch.tensor([x.search_q if x.search_q is not None else blank for x in r],
+                                            dtype=torch.float32)
         return data
 
     @staticmethod

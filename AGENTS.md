@@ -52,7 +52,7 @@ For larger refactors, give a short before/after map of modules and responsibilit
 ## Documentation: one home per topic
 
 - `README.md`: concise project overview, setup, and links to current workflows.
-- `docs/command_reference.md`: canonical copy-ready CLI usage and argument reference.
+- `docs/command_reference.md`: canonical copy-ready CLI usage and argument reference, including the test commands ([Testing](docs/command_reference.md#testing)).
 - `docs/ppo_training.md`: legacy play-only PPO method, checkpoint continuity, and baseline reproduction.
 - `docs/multiphase_selfplay.md`: current independent-phase training, historical opponents, snapshots, and resume.
 - `docs/phase_composable_evaluation.md`: current agent-vs-agent composition and phase-ablation recipes.
@@ -66,14 +66,22 @@ Other focused research documents may remain. Prefer cross-links to copying comma
 
 Use Python 3.11+, idiomatic type annotations, `snake_case` functions/modules, `PascalCase` classes, and focused immutable specifications where appropriate. Follow surrounding style. Keep performance-sensitive rollout code lean; avoid repeated model loading, unnecessary tensor copies, and excessive abstractions in inner loops.
 
-From the repository root:
+### Testing
+
+The canonical, copy-ready test commands are in [docs/command_reference.md#testing](docs/command_reference.md#testing). It covers the full suite, single modules and tests, a module-by-area coverage map, CI jobs and known platform failures. Keep that section current when test modules, CI or platform behaviour change. From the repository root:
 
 ```bash
 python -m pip install -e .
-python -m pip install -e '.[rl,openspiel]'  # when optional dependencies are needed
-python -m unittest discover -s tests -v
-git diff --check
+python -m pip install -e '.[rl,openspiel]'      # when optional dependencies are needed
+python -m unittest tests.test_<module> -v       # fast feedback on the area you changed
+python -m unittest discover -s tests -v         # full suite before every commit
+git diff --check                                # whitespace check before review
 ```
+
+- **Extras skip silently.** Tests needing PyTorch (`.[rl]`) or OpenSpiel skip when the extra is absent. A change to training, evaluation or model-guided search is not verified unless the `rl` tests actually ran; check the skip count.
+- **Known Windows-only failures.** `test_parallel.WorkerTests.test_quota_and_no_ml_imports` and the three `test_scratch_selfplay` invalid-configuration subtests fail on Windows (they also fail on `main`). Report them as known; treat any other failure as real.
+- **Don't run the suite beside timing runs.** Long training or evaluation jobs slow the suite, and the suite distorts the jobs' timing measurements.
+- **New test modules** go in `tests/` as `test_<area>.py`, use `unittest`, and skip cleanly when their optional dependency is missing. Add them to the coverage map in the testing reference.
 
 When changing evaluation, add deterministic tests for legacy and composable configurations, result schemas, checkpoint availability, matched duplicate groups, and 1-vs-N worker invariance. When changing training/checkpoint internals, add tiny seeded rollout/update/resume fixtures for both generations. Include small CLI smoke tests; do not substitute short tests for claims about policy strength. Benchmark only when relevant and report the actual hardware/workload and measurement limits.
 

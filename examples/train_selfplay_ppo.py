@@ -11,8 +11,8 @@ from research.ppo.trainer import Config
 from research.ppo.checkpoint import load_model
 from research.ppo.multiphase import phases, PhaseActorCritic, PHASES, LearnerPhaseSpec, resolve_learner_phases
 from research.ppo.opponents import PolicySpec, CheckpointIdentity, historical_pool, policy_registry
-from research.ppo.selfplay_trainer import SelfPlayConfig, SelfPlayTrainer
-from research.ppo.selfplay_checkpoint import save, resume, config_from_dict
+from research.ppo.selfplay_trainer import SelfPlayConfig, SelfPlayTrainer, PairedSelfPlayTrainer
+from research.ppo.selfplay_checkpoint import save, resume, config_from_dict, save_pair, resume_pair
 from research.ppo.selfplay_evaluation import evaluate_phases, frozen_model, evaluation_diagnostics
 from research.ppo.imitation import clone_bidding, teacher_data, playing_kl
 from research.ppo.seeds import stream_seed
@@ -87,6 +87,20 @@ def build_parser():
                         help='weight of the critic oracle-point interval loss; 0 disables it')
     parser.add_argument('--oracle-dataset', type=Path,
                         help='labels from examples.oracle_labels; requires --oracle-aux-coef > 0')
+    parser.add_argument('--paired-partners', action='store_true',
+                        help="train two separate learner networks: partner 1 plays the team's first seat "
+                             '(0/1), partner 2 its second seat (2/3); saved as checkpoints/partner-1 and partner-2')
+    search = parser.add_argument_group(
+        'search inside training', 'docs/search_training.md: a seeded fraction of learner play decisions is '
+        'searched with the current networks; a search loss is added to PPO. Fraction 0 (default) is off.')
+    search.add_argument('--search-fraction', type=float, default=0.0,
+                        help='share of learner play decisions searched (for example 0.01)')
+    search.add_argument('--search-samples', type=int, default=16, help='sampled worlds per search')
+    search.add_argument('--search-weight', type=float, default=0.25, help='weight of the search loss')
+    search.add_argument('--search-target', choices=('cmpo', 'advantage'), default='cmpo',
+                        help='cmpo: KL to the clipped MPO target; advantage: all-action clipped surrogate')
+    search.add_argument('--search-clip', type=float, default=2.0, help='CMPO clip c on normalized advantages')
+    search.add_argument('--search-warmup-hands', type=int, default=0, help='ordinary PPO before searching')
     parser.add_argument('--eval-threads', type=int, default=1)
     parser.add_argument('--output-dir', type=Path, default=Path('runs/ppo-selfplay'))
     add_output_arguments(parser)
@@ -210,7 +224,11 @@ def main(argv=None):
             oracle_aux_coef=args.oracle_aux_coef,
             from_scratch=args.from_scratch or bool(args.resume and saved.from_scratch),
             oracle_dataset=str(args.oracle_dataset.resolve()) if args.oracle_dataset else None,
-            oracle_dataset_sha256=dataset_sha256(args.oracle_dataset) if args.oracle_dataset else None)
+            oracle_dataset_sha256=dataset_sha256(args.oracle_dataset) if args.oracle_dataset else None,
+            partner_mode='paired' if args.paired_partners else 'shared',
+            search_fraction=args.search_fraction, search_samples=args.search_samples,
+            search_weight=args.search_weight, search_target=args.search_target,
+            search_clip=args.search_clip, search_warmup_hands=args.search_warmup_hands)
         if args.resume:
             if saved is None:
                 raise ValueError('Resume requires a multi-phase checkpoint; use --init-play-checkpoint for migration')
@@ -225,7 +243,8 @@ def main(argv=None):
                               ('--opponent-checkpoint', 'opponent_policies'),
                               ('--opponent-composition', 'opponent_policies'),
                               ('--eval-opponents', 'evaluation_names'), ('--selection-opponent', 'primary_opponent'),
-                              ('--oracle-dataset', 'oracle_dataset_sha256')):
+                              ('--oracle-dataset', 'oracle_dataset_sha256'),
+                              ('--paired-partners', 'partner_mode')):
                 if flag in explicit:
                     changes[key] = getattr(config, key)
             if configured:
@@ -248,18 +267,36 @@ def main(argv=None):
                 and data.get('critic') is not None
                 and data['config']['hidden_size'] == config.hidden_size):
             initial_critic = data['critic']
+        # Paired mode (saved in the config, so resume keeps it): two learner
+        # networks. `learners` lists every network-owning trainer, partner 1 first.
         # A from-scratch resume rebuilds the random architecture; resume() restores its weights.
-        trainer = SelfPlayTrainer(config, None if config.from_scratch else initial, initial_critic=initial_critic)
+        paired = config.partner_mode == 'paired'
+        source = None if config.from_scratch else initial
+        if paired:
+            # The config rejects a centralized critic in paired mode, so no initial critic applies.
+            trainer = PairedSelfPlayTrainer(config, source)
+        else:
+            trainer = SelfPlayTrainer(config, source, initial_critic=initial_critic)
+        learners = (trainer, trainer.partner) if paired else (trainer,)
         if args.resume:
-            resume(args.resume, trainer)
+            (resume_pair if paired else resume)(args.resume, trainer)
         else:
             # Provenance of a critic-mode change between stages; older checkpoints were local.
-            trainer.initial_critic_mode = data['metadata'].get('critic_mode', 'local') if data is not None else None
+            # Every network-owning trainer records it in its own checkpoint.
+            for learner in learners:
+                learner.initial_critic_mode = (data['metadata'].get('critic_mode', 'local')
+                                               if data is not None else None)
         if not args.resume and args.bid_bc_hands:
-            bc = clone_bidding(trainer, args.bid_bc_hands)
-            print(f'Bidding imitation: {bc["samples"]} samples; loss {bc["loss"]:.4f}; accuracy {bc["accuracy"]:.1%}')
+            for index, learner in enumerate(learners, start=1):
+                bc = clone_bidding(learner, args.bid_bc_hands)
+                who = f' (partner {index})' if paired else ''
+                print(f'Bidding imitation{who}: {bc["samples"]} samples; loss {bc["loss"]:.4f}; accuracy {bc["accuracy"]:.1%}')
     except (ValueError, OSError) as exc:
         parser.error(str(exc))
+
+    def save_checkpoint(name):
+        # Shared: checkpoints/<name>. Paired: checkpoints/partner-{1,2}/<name>.
+        return save_pair(checkpoints, name, trainer) if paired else save(checkpoints / name, trainer)
     directory.mkdir(parents=True, exist_ok=True)
     (directory / 'config.json').write_text(json.dumps(asdict(config), indent=2) + '\n')
     checkpoints = directory / 'checkpoints'
@@ -268,9 +305,13 @@ def main(argv=None):
     bootstrap_seed = stream_seed(config.seed, 'selfplay-validation-bootstrap-v1')
     # The forgetting diagnostic compares play with the original anchor; without one it is unavailable.
     reference = teacher_data(config.seed, config.forgetting_hands, anchor=anchor) if anchor is not None else None
-    frozen_states = {p: {k: v.detach().cpu().clone() for k, v in trainer.model.networks[p].state_dict().items()}
-                     for p in trainer.model.neural_phases if p not in config.learn_phases}
+    # One snapshot per learner network; frozen phases must stay bitwise equal in every partner.
+    frozen_states = [{p: {k: v.detach().cpu().clone() for k, v in t.model.networks[p].state_dict().items()}
+                      for p in t.model.neural_phases if p not in config.learn_phases} for t in learners]
     print(f'Multi-phase PPO: learn {",".join(config.learn_phases)}, neural {",".join(trainer.model.neural_phases)}')
+    if paired:
+        print('Partners: paired (partner 1 = team first seat 0/1, partner 2 = second seat 2/3; '
+              'no historical snapshots)')
     for phase, spec in zip(PHASES, trainer.learner_phases):
         print(f'  {phase}: {spec.state}; initialization={spec.initialization}; source={spec.source}')
     if config.from_scratch:
@@ -300,17 +341,20 @@ def main(argv=None):
     try:
         while trainer.hands < config.total_hands:
             before, update_started = trainer.hands, perf_counter()
+            # Paired collect() returns one buffer per partner; update() trains each separately.
             buffer, reward = trainer.collect()
-            sample_count = len(buffer)
+            sample_count = sum(len(b) for b in buffer) if paired else len(buffer)
             trainer.optimization_seconds = 0.0
             metrics = trainer.update(buffer) if sample_count else {}
-            frozen_verified = {p: all(torch.equal(v.detach().cpu(), frozen_states[p][k])
-                for k, v in trainer.model.networks[p].state_dict().items()) for p in frozen_states}
+            frozen_verified = {p: all(torch.equal(v.detach().cpu(), states[p][k])
+                for t, states in zip(learners, frozen_states)
+                for k, v in t.model.networks[p].state_dict().items()) for p in frozen_states[0]}
             if not all(frozen_verified.values()):
                 raise RuntimeError('Frozen phase parameters changed during training')
             frozen_play_verified = frozen_verified.get('play')
             final = trainer.hands == config.total_hands
-            row = dict(hands=trainer.hands, play_samples=trainer.samples, training_samples=trainer.samples,
+            total_samples = sum(t.samples for t in learners)  # Both partners when paired.
+            row = dict(hands=trainer.hands, play_samples=total_samples, training_samples=total_samples,
                 updates=trainer.updates, optimizer_steps=trainer.optimizer_steps, mean_reward=reward,
                 phase_samples=trainer.phase_counts, training_by_opponent=trainer.opponent_metrics,
                 train_opponents=config.opponent_probabilities, opponent_assignments=trainer.opponent_assignments,
@@ -330,16 +374,39 @@ def main(argv=None):
                 value_diagnostics=trainer.value_diagnostics if sample_count else None,
                 oracle_dataset=trainer.oracle_summary,
                 oracle_validation=trainer.oracle_validation_metrics() if sample_count else None)
+            # (label, trainer, metrics) per learner network. Paired metrics are
+            # {'partner_1': ..., 'partner_2': ...}; a partner without samples is absent.
+            groups = ([(f'partner {i} ', t, metrics.get(f'partner_{i}', {})) for i, t in enumerate(learners, start=1)]
+                      if paired else [('', trainer, metrics)])
+            if paired:
+                # Top-level fields keep partner 1 / combined values; per-partner detail here.
+                row['partners'] = {f'partner_{i}': dict(
+                    samples=t.samples, updates=t.updates, optimizer_steps=t.optimizer_steps,
+                    phase_samples=trainer.partner_phase_counts[i - 1],
+                    metrics=metrics.get(f'partner_{i}', {}),
+                    value_diagnostics=t.value_diagnostics if metrics.get(f'partner_{i}') else None,
+                    playing_anchor_kl=(playing_kl(t.model, anchor, reference)
+                                       if reference is not None and 'play' in t.model.neural_phases else None))
+                    for i, t in enumerate(learners, start=1)}
             print(f'Update {trainer.updates}: {trainer.hands}/{config.total_hands} hands; samples {trainer.phase_counts}; reward {reward:+.4f}')
-            if sample_count and config.critic_mode != 'none':
-                ev = trainer.value_diagnostics['explained_variance']
-                print(f'  critic: value loss {metrics["value_loss"]:.5f}; explained variance '
-                      + ('N/A' if ev is None else f'{ev:.4f}')
-                      + (f'; oracle interval loss {metrics["oracle_aux_loss"]:.5f} '
-                         f'({metrics["oracle_aux_point_error"]:.3f} points)' if 'oracle_aux_loss' in metrics else ''))
-            for phase in config.learn_phases:
-                print(f'  {phase}: policy {metrics.get(phase + "_policy_loss", 0):.5f}, entropy {metrics.get(phase + "_entropy", 0):.4f}, KL {metrics.get(phase + "_approx_kl", 0):.6f}')
-            if (sample_count and set(trainer.model.neural_phases) <= set(trainer.model.trained_phases)
+            for label, learner, values in groups:
+                if values and config.critic_mode != 'none':  # Policy-only PPO has no critic to report.
+                    ev = learner.value_diagnostics['explained_variance']
+                    print(f'  {label}critic: value loss {values["value_loss"]:.5f}; explained variance '
+                          + ('N/A' if ev is None else f'{ev:.4f}')
+                          + (f'; oracle interval loss {values["oracle_aux_loss"]:.5f} '
+                             f'({values["oracle_aux_point_error"]:.3f} points)' if 'oracle_aux_loss' in values else ''))
+                for phase in config.learn_phases:
+                    print(f'  {label}{phase}: policy {values.get(phase + "_policy_loss", 0):.5f}, entropy {values.get(phase + "_entropy", 0):.4f}, KL {values.get(phase + "_approx_kl", 0):.6f}')
+                if values.get('searched_states'):
+                    print(f'  {label}search: {values["searched_states"]} states; loss {values["search_loss"]:.5f}; '
+                          f'disagreement {values["search_disagreement"]:.1%}; '
+                          f'|A| {values["search_abs_advantage"]:.3f} points')
+            if 'search_seconds' in trainer.rollout_performance:
+                print(f'  search time: {trainer.rollout_performance["search_seconds"]:.1f} worker-s for '
+                      f'{trainer.rollout_performance["searched_decisions"]} decisions; search pass '
+                      f'{trainer.rollout_performance["search_wall_seconds"]:.1f} s wall')
+            if (not paired and sample_count and set(trainer.model.neural_phases) <= set(trainer.model.trained_phases)
                     and trainer.hands - trainer.last_snapshot >= config.snapshot_every_hands):
                 spec = trainer.publish_snapshot(directory / 'snapshots')
                 print(f'Historical snapshot: {spec.name} SHA256 {spec.sha256}')
@@ -347,9 +414,11 @@ def main(argv=None):
                 evaluation_started = perf_counter()
                 telemetry = {}
                 specs = tuple(next(p for p in config.opponent_policies if p.name == n) for n in config.evaluation_names)
+                # Paired: the two partners validate together as one team (seat-aware factory).
                 reports = evaluate_phases(trainer.model, specs, deals=config.eval_deals, seed=validation_seed,
                     bootstrap_seed=bootstrap_seed, bootstrap_samples=config.bootstrap_samples,
-                    threads=args.eval_threads, performance=telemetry)
+                    threads=args.eval_threads, performance=telemetry,
+                    partner_model=trainer.partner.model if paired else None)
                 row['evaluation_seconds'] = perf_counter() - evaluation_started
                 row['evaluations'] = {n: r.to_dict() for n, r in reports.items()}
                 row['evaluation_performances'] = telemetry
@@ -363,11 +432,11 @@ def main(argv=None):
                 score = reports[config.primary_opponent].metrics[0].mean_signed_marks
                 if score > trainer.best_score:
                     trainer.best_score = score
-                    saving_started = perf_counter(); save(checkpoints / 'best.pt', trainer)
+                    saving_started = perf_counter(); save_checkpoint('best.pt')
                     row['checkpoint_seconds'] += perf_counter() - saving_started
             if trainer.hands - trainer.last_checkpoint >= config.checkpoint_every_hands or final:
                 trainer.last_checkpoint = trainer.hands
-                saving_started = perf_counter(); save(checkpoints / 'latest.pt', trainer)
+                saving_started = perf_counter(); save_checkpoint('latest.pt')
                 row['checkpoint_seconds'] += perf_counter() - saving_started
             row['update_seconds'] = perf_counter() - update_started
             row['runtime_seconds'] = perf_counter() - started
@@ -379,7 +448,9 @@ def main(argv=None):
                 sink.write(json.dumps(row, allow_nan=False) + '\n')
     finally:
         trainer.close()
-    print(f'Complete: {trainer.hands} hands, {trainer.samples} training decisions, {trainer.updates} updates; elapsed {perf_counter() - started:.3f}s')
+    print(f'Complete: {trainer.hands} hands, {sum(t.samples for t in learners)} training decisions, {trainer.updates} updates; elapsed {perf_counter() - started:.3f}s')
+    if paired:
+        print(f'Paired models: {checkpoints / "partner-1"} (seat 0/1) and {checkpoints / "partner-2"} (seat 2/3)')
     return trainer
 
 

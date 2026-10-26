@@ -6,7 +6,7 @@ import torch
 from .agent import PPOAgent
 from .rollout import snapshot, from_snapshot
 from .opponents import evaluation_opponents, PolicySpec
-from .composition import evaluate_matchups
+from .composition import PairedAgentFactory, evaluate_matchups
 
 
 @dataclass
@@ -43,11 +43,13 @@ def evaluate_many(model, *, opponents=('HHH',), deals=128, seed=12345,
 
 
 def evaluate_policies(model, policies, *, deals=128, seed=12345, bootstrap_seed=0,
-                      bootstrap_samples=200, threads=1, performance=None):
+                      bootstrap_samples=200, threads=1, performance=None, partner_model=None):
     """Validate either in-memory architecture against variants or frozen archives.
 
     Preserve PPOAgent inference for the legacy APIs; per-phase composition has
     its own explicit routing and RNG scheme. Both use the same arena execution.
+    partner_model (paired-partner training) plays the team's second seat;
+    without it, `model` plays both seats as before.
     """
     previous_threads = torch.get_num_threads()
     if previous_threads != 1:
@@ -56,6 +58,10 @@ def evaluate_policies(model, policies, *, deals=128, seed=12345, bootstrap_seed=
     try:
         neural_phases = getattr(model, 'neural_phases', None)
         factory = PPOFactory(snapshot(model), model.hidden_size, neural_phases)
+        if partner_model is not None:
+            factory = PairedAgentFactory(factory, PPOFactory(
+                snapshot(partner_model), partner_model.hidden_size,
+                getattr(partner_model, 'neural_phases', None)))
         snapshot_seconds = perf_counter() - started
         telemetry = {}
         reports = evaluate_matchups(factory, ((s.name, s.factory()) for s in policies),

@@ -11,6 +11,7 @@ page owns *how to run things*.
 ## Contents
 
 - [Setup](#setup)
+- [Testing](#testing) — full suite, single modules and tests, which tests cover what, CI, known platform failures
 - [Command index](#command-index)
 - [Shared conventions](#shared-conventions) — duplicate deals, common flags, policy variants, outputs
 - [Console game](#console-game) — `texas42`, self-play examples
@@ -19,7 +20,7 @@ page owns *how to run things*.
 - [PPO training overview](#ppo-training-overview) — choosing a trainer, [workflow finder](#workflow-finder)
 - [Legacy trainer: train_ppo](#legacy-trainer-train_ppo) — Recipe 1, resume, mixed opponents
 - [Multi-phase trainer: train_selfplay_ppo](#multi-phase-trainer-train_selfplay_ppo) — Recipes 2–11 and 13–15 (from scratch, policy-only PPO), arguments, artifacts, troubleshooting
-- [Evaluation](#evaluation) — agent-vs-agent composition (Recipe 12), compatibility commands
+- [Evaluation](#evaluation) — agent-vs-agent composition (Recipe 12), [model comparisons and round robins](#model-comparisons-and-round-robins), compatibility commands
 - [Experiment pipelines](#experiment-pipelines) — JSON-defined step sequences ([full guide](experiment_pipelines.md))
 - [Performance benchmarks](#performance-benchmarks)
 - [Reproducibility checklist](#reproducibility-checklist)
@@ -30,8 +31,86 @@ page owns *how to run things*.
 python -m pip install -e .               # core package (no ML required)
 python -m pip install -e '.[rl]'         # PPO training and neural evaluation
 python -m pip install -e '.[openspiel]'  # optional OpenSpiel adapter
-python -m unittest discover -s tests -v  # verify the checkout
+python -m unittest discover -s tests -v  # verify the checkout (see Testing below)
 ```
+
+On Windows PowerShell, quote extras with double quotes: `python -m pip install -e ".[rl]"`.
+
+## Testing
+
+All tests are standard-library `unittest` modules in `tests/`, deterministic and
+seeded, run from the repository root. There is no separate test runner: these
+commands are the whole interface, and CI uses the same ones.
+
+### Commands
+
+| Goal | Command |
+| --- | --- |
+| Full suite | `python -m unittest discover -s tests -v` |
+| Full suite, summary only | `python -m unittest discover -s tests` |
+| Quick core check (engine, heuristic, arena, beliefs; about 12 s) | `python -m unittest tests.test_game tests.test_actions tests.test_validation tests.test_selfplay tests.test_encoding tests.test_simpleheuristic tests.test_arena tests.test_belief` |
+| One module | `python -m unittest tests.test_search_training -v` |
+| One test class or test | `python -m unittest tests.test_search_training.SearchTrainingTests.test_cli_smoke -v` |
+| A group of modules by file pattern | `python -m unittest discover -s tests -p "test_oracle*.py" -v` |
+| Stop at the first failure | add `-f` (for example `python -m unittest discover -s tests -f`) |
+| Whitespace check before review | `git diff --check` |
+
+**Optional dependencies.** Tests that need PyTorch (`.[rl]`) or OpenSpiel
+(`.[openspiel]`) skip themselves when the package is absent, and the summary
+reports them as skipped. Install the extra to run them.
+
+- **CPU-only PyTorch, as CI installs it:**
+  `python -m pip install "torch>=2.3" --index-url https://download.pytorch.org/whl/cpu`,
+  then `python -m pip install -e ".[rl]"`.
+- **Before trusting a full run,** check its skip count: an absent extra silently
+  removes whole groups.
+
+**Expected runtime.** With `.[rl]` installed and OpenSpiel absent, the full suite
+is about 390 tests (11 skipped) in 7.5–8 minutes on the development machine (20
+logical CPUs, Windows, otherwise idle). Running training or evaluation jobs at the
+same time can double or triple that.
+
+### What each module covers
+
+| Area | Modules | Needs |
+| --- | --- | --- |
+| Engine, rules, actions, observations | `test_game`, `test_actions`, `test_validation`, `test_episodes`, `test_selfplay`, `test_encoding`, `test_training_data`, `test_compatibility`, `test_bid_origins`, `test_bid_preferences`, `test_contract_timing` | — |
+| Heuristic and baseline agents | `test_agents`, `test_simpleheuristic`, `test_policy_ablation` | — |
+| Arena, statistics, parallel execution | `test_arena`, `test_bootstrap`, `test_parallel`, `test_counterfactual_bidding` | — |
+| Console and experiment pipelines | `test_cli`, `test_experiment_pipeline` | pipelines: `rl` |
+| Endgame oracle | `test_oracle`, `test_oracle_optimizations`, `test_oracle_parallel`, `test_oracle_points`, `test_oracle_positions` ([oracle tests](endgame_oracle.md)) | — |
+| Beliefs and Monte Carlo search | `test_belief`, `test_pimc_agent`, `test_model_guided_pimc` | model-guided: `rl` |
+| PPO models, buffers, legacy trainer | `test_ppo_model`, `test_ppo_buffer`, `test_ppo_agent`, `test_ppo_training`, `test_ppo_opponents`, `test_parallel_ppo` | `rl` |
+| Multi-phase self-play training | `test_ppo_multiphase`, `test_centralized_critic`, `test_policy_only_ppo`, `test_scratch_selfplay`, `test_paired_selfplay`, `test_search_training`, `test_evaluation_performance` | `rl` |
+| Phase-composable evaluation | `test_phase_composition` | `rl` |
+| OpenSpiel adapter | `test_openspiel` ([OpenSpiel](openspiel.md)) | `openspiel` |
+
+**After a change,** run the modules of the area you touched first (fast feedback),
+then the full suite before committing. AGENTS.md lists the required test kinds
+for evaluation and training changes.
+
+### Continuous integration
+
+`.github/workflows/tests.yml` runs on every push and pull request (Ubuntu) in
+three configurations:
+
+| Job | Python | Installs | Command |
+| --- | --- | --- | --- |
+| Core | 3.11 | `.` | `python -m unittest discover -s tests -v` |
+| OpenSpiel | 3.13 | `.[openspiel]` (and checks `import pyspiel`) | same |
+| PPO | 3.11 | CPU PyTorch, then `.[rl]` | same |
+
+### Known platform-specific failures
+
+On Windows, four results fail for platform reasons. They fail on `main` too and
+are not regressions:
+
+| Test | Reason |
+| --- | --- |
+| `test_parallel.WorkerTests.test_quota_and_no_ml_imports` | Simulates a Linux cgroup CPU quota by patching reads of `/sys/fs/cgroup/cpu.max`. On Windows that path renders with backslashes, so the quota is never seen and `available_cpus()` returns 8 instead of 2. |
+| `test_scratch_selfplay.ScratchTests.test_invalid_scratch_configurations` (3 subtests) | Builds a log-directory name from the flags. Names containing `:` (`anchor:1`, `HHH:1,HHH:1`, or a `C:\…` path) are rejected by Windows before the expected validation error. |
+
+Any other failure is a real one.
 
 ## Command index
 
@@ -46,6 +125,7 @@ python -m unittest discover -s tests -v  # verify the checkout
 | Train legacy play-only PPO | `python -m examples.train_ppo` | `rl` | [Legacy trainer](#legacy-trainer-train_ppo) |
 | Train independent-phase PPO / historical self-play | `python -m examples.train_selfplay_ppo` | `rl` | [Multi-phase trainer](#multi-phase-trainer-train_selfplay_ppo) |
 | Phase-composed agent-vs-agent evaluation (canonical) | `python -m examples.evaluate_agent_vs_agent` | `rl` only for neural phases | [Agent-vs-agent](#agent-vs-agent-composition) |
+| A model against each baseline, batches, round robins with a summary | `python -m examples.run_pipeline --config configs/pipelines/study_comparisons.json` | `rl` for neural agents | [Model comparisons](#model-comparisons-and-round-robins) |
 | Legacy checkpoint evaluation | `python -m examples.evaluate_ppo` | `rl` | [Compatibility evaluation](#compatibility-evaluation) |
 | Multi-opponent phase evaluation (anchors, archives) | `python -m examples.evaluate_selfplay_ppo` | `rl` | [Compatibility evaluation](#compatibility-evaluation) |
 | Agent API demo (no arguments) | `python -m examples.agent_selfplay` | — | [Self-play examples](#self-play-examples) |
@@ -814,6 +894,43 @@ Sources are copied once, not followed as their original experiments train furthe
 Do not overwrite files referenced by this experiment. Snapshot files can replace the
 named source paths when their metadata declares the needed trained phase.
 
+### Paired-partner training and evaluation
+
+Two separate networks for the learning team, each free to specialize. Both
+start from the same initialization and are optimized only on their own seat's
+decisions. Historical self-snapshots and the centralized critic are not supported
+in this mode; a `self-current` opponent is (the current pair plays the other team).
+
+```bash
+# Train the pair (bid + play) against HHH and the anchor
+python -m examples.train_selfplay_ppo \
+  --init-play-checkpoint runs/ppo-play-v1/checkpoints/best.pt \
+  --learn-phases bid,play --paired-partners \
+  --opponent-pool HHH:0.5,anchor:0.5 --eval-opponents HHH,anchor --selection-opponent HHH \
+  --total-hands 100000 --rollout-decisions 1024 --threads 4 \
+  --output-dir runs/ppo-paired --log-dir logs/experiments/ppo-paired
+# Resume: pass either partner file; its sibling is located automatically
+python -m examples.train_selfplay_ppo \
+  --resume runs/ppo-paired/checkpoints/partner-1/latest.pt --total-hands 200000 \
+  --output-dir runs/ppo-paired --log-dir logs/experiments/ppo-paired-resume
+# Evaluate the pair as one team (partner 1 in seat 0/1, partner 2 in seat 2/3)
+python -m examples.evaluate_agent_vs_agent \
+  --agent-a-bid neural --agent-a-play neural \
+  --agent-a-checkpoint runs/ppo-paired/checkpoints/partner-1/best.pt \
+  --agent-a-partner-checkpoint runs/ppo-paired/checkpoints/partner-2/best.pt \
+  --deals 2048 --threads 0
+# Cross-play: paired model 1 beside a heuristic partner
+python -m examples.evaluate_agent_vs_agent \
+  --agent-a-bid neural --agent-a-play neural \
+  --agent-a-checkpoint runs/ppo-paired/checkpoints/partner-1/best.pt \
+  --agent-a-partner-bid heuristic --agent-a-partner-play heuristic --deals 2048 --threads 0
+```
+
+Each partner file is an ordinary version-2 checkpoint. Use it alone anywhere a
+checkpoint is accepted, for example `--agent-a-checkpoint .../partner-2/best.pt`
+for a mirrored team of model 2. `best.pt` is selected by the pair's validation
+score and saved for both partners together.
+
 ### Recipe 10: composed training opponents
 
 Requires a trained joint bid/play checkpoint and its original anchor. Create
@@ -1190,6 +1307,13 @@ to learner-width compatibility. See
 | `--opponent-composition` | Repeatable `NAME=JSON_PATH` | No compositions | Register a frozen phase-composable opponent. Source checkpoint registrations are resolved before JSON definitions; earlier composed names cannot serve as single phase sources. See [Recipe 10](#recipe-10-composed-training-opponents). |
 | `--snapshot-every-hands` | Integer > 0 | `32768` | Publication threshold since last snapshot, checked at rollout/update boundaries. Publishes only following a nonempty batch when every routed neural phase is trained. Threshold may overshoot; not every exact multiple produces a filename. |
 | `--snapshot-pool-size` | Integer > 0 | `8` | Maximum active historical policies. Evicts oldest membership, not files. The separate anchor is never evicted. No CLI switch disables publication; snapshots can be produced even if the current pool does not sample them. |
+| `--paired-partners` | Flag | Off (shared) | Train two separate learner networks: partner 1 plays the team's first seat (0/1), partner 2 its second seat (2/3). Saves `checkpoints/partner-1/` and `partner-2/`. Not supported with `self-snapshots` or `--critic-mode centralized` / `none`; `self-current` seats the current pair as opponents. Stored as `partner_mode` and kept on resume. See [paired partners](multiphase_selfplay.md#paired-partner-training). |
+| `--search-fraction` | Float in [0, 1] | `0` (off) | Search inside training. This share of learner play decisions (forced moves excluded) is searched with full model rollouts by the current networks, and a search loss is added to PPO. `0` reproduces training exactly. Measured cost at 0.01: about 2.5× ordinary training per hand (about 1.75× at 0.005) ([P5](search_training.md#64-first-in-training-run-p5-one-seed)); it helps at equal hands but not yet at equal compute. Requires `play` in `--learn-phases`. See [search in training](multiphase_selfplay.md#search-inside-training). |
+| `--search-samples` | Positive integer | `16` | Sampled worlds per search (uniform belief from the learner's own observation) |
+| `--search-weight` | Nonnegative float | `0.25` | λ, the weight of the mean per-state search loss |
+| `--search-target` | `cmpo`, `advantage` | `cmpo` | `cmpo`: KL to the clipped MPO target π̄ ∝ π_old·exp(clip(Â/σ, −c, c)). `advantage`: PPO's clipped surrogate summed over all legal moves, weighted by π_old. |
+| `--search-clip` | Positive float | `2.0` | CMPO clip c; the target moves at most KL 2c from π_old |
+| `--search-warmup-hands` | Nonnegative integer | `0` | Ordinary PPO until this many hands have been trained |
 
 **Opponent names.** Built-in variants are defined in
 [the variant table](#built-in-policy-variants). `anchor` uses heuristic bid/trump and
@@ -1415,6 +1539,101 @@ python -m examples.evaluate_agent_vs_agent \
   --agent-b-trump random --agent-b-play random --deals 64
 ```
 
+#### Belief-based (PIMC) trump and play
+
+```bash
+# PIMC trump/play (heuristic bidding) against HHH; PIMC is slow, so use few deals
+python -m examples.evaluate_agent_vs_agent \
+  --agent-a-trump pimc --agent-a-play pimc --pimc-samples 32 \
+  --deals 128 --threads 0 --seed 42
+# PIMC play against a trained neural player, both with heuristic bid/trump
+python -m examples.evaluate_agent_vs_agent \
+  --agent-a-play pimc \
+  --agent-b-play neural --agent-b-checkpoint runs/ppo-play-v1/checkpoints/best.pt \
+  --deals 128 --threads 0
+```
+
+A PIMC decision takes roughly 0.1–2 s, and one team makes about 14 per hand, so
+start with small `--deals` and raise `--pimc-samples` only when time allows. See
+[belief modelling](belief.md) for the method and its limitations.
+
+#### Model-guided PIMC
+
+```bash
+# A trained model plays the rollouts; value leaf + model-weighted beliefs; vs plain PIMC
+python -m examples.evaluate_agent_vs_agent \
+  --agent-a-trump pimc --agent-a-play pimc \
+  --agent-a-pimc-model runs/ppo-joint-v1/checkpoints/best.pt \
+  --pimc-leaf value --pimc-likelihood model \
+  --agent-b-trump pimc --agent-b-play pimc \
+  --pimc-samples 16 --deals 128 --threads 0
+# Estimation accuracy and cost of each search mode (beliefs, values, timing)
+python -m examples.search_accuracy --model runs/ppo-joint-v1/checkpoints/best.pt \
+  --table model --games 100 --positions-per-game 2 --samples 16 \
+  --output runs/search-accuracy/model-table.json
+# Move-ranking gate: do cheap search modes rank ALL legal moves like full rollouts?
+# A paired-partner pair guides search as a pair (seats 0/1 partner-1, 2/3 partner-2)
+python -m examples.search_accuracy --model runs/study-paired/checkpoints/partner-1/best.pt \
+  --partner-model runs/study-paired/checkpoints/partner-2/best.pt \
+  --table heuristic --games 75 --positions-per-game 2 --samples 16 --rank-check \
+  --output runs/model-guided/rank-paired.json
+```
+
+`--pimc-leaf` and `--pimc-likelihood` affect only `pimc` phases that have a
+`--agent-X-pimc-model`; agent B above stays plain PIMC. `search_accuracy` scores
+model-guided and heuristic search against the true hidden hands and the realized
+outcomes. It plays hands with the model (`--table model`) or Heuristic V1
+(`--table heuristic`) at every seat. See
+[model-guided PIMC](belief.md#model-guided-pimc).
+
+| `search_accuracy` argument | Default | Meaning |
+| --- | --- | --- |
+| `--model` | required | Trained checkpoint guiding search (trained phases neural, others heuristic) |
+| `--partner-model` | unset | Paired-partner second network: seats 0/1 play `--model`, seats 2/3 play this one, in rollouts, likelihoods and the value leaf |
+| `--rank-check` | off | Also run points-objective full rollouts (plus a replicate with independent worlds for the noise scale) and the own-turn value leaf, store every legal move's estimate (`q`), and compare move rankings between modes: concordance, top-1, Spearman, ranking regret. See [the ranking gate](search_training.md#6-evidence-the-move-ranking-gate) |
+| `--table` | `model` | Policy at all four seats in the evaluated hands: `model` or `heuristic`. With `--partner-model`, `model` means the pair |
+| `--games`, `--positions-per-game` | `50`, `2` | Hands played and play decisions sampled from each |
+| `--samples` | `16` | Sampled deals per belief and per search |
+| `--seed` | `20261022` | Deals, table seats, position sampling and search streams |
+| `--output` | unset | JSON with per-position rows and the summary; `--log-dir` also gets a per-position CSV |
+
+**Offline search distillation (pilot).** `examples.search_distillation_pilot`
+runs one regularized improvement step offline:
+
+1. Search positions from the source model's own self-play.
+2. Build CMPO targets from the search.
+3. Fine-tune only the play network toward them.
+
+The output is an ordinary version-2 checkpoint with a `derivation` record. These
+commands reproduce the pilots exactly. Method and results are in
+[search in training](search_training.md#62-one-step-distillation-pilot).
+
+```bash
+# Round 1 (one search, two step sizes), then round 2 from the round-1 c=2 model
+python -m examples.search_distillation_pilot --source runs/study-shared/checkpoints/best.pt \
+  --output-dir runs/model-guided/pilot --clip 1 2 --threads 8
+python -m examples.search_distillation_pilot --source runs/model-guided/pilot/distilled-c2.pt \
+  --output-dir runs/model-guided/pilot/round2 --seed 20261027 --clip 2 --threads 8
+# Evaluate a distilled model against its source on held-out deals
+python -m examples.evaluate_agent_vs_agent \
+  --agent-a-checkpoint runs/model-guided/pilot/round2/distilled-c2.pt --agent-a-bid neural --agent-a-play neural \
+  --agent-b-checkpoint runs/study-shared/checkpoints/best.pt --agent-b-bid neural --agent-b-play neural \
+  --deals 4096 --seed 20261026 --threads 0 --output runs/model-guided/pilot/round2/arena-r2-vs-shared.json
+```
+
+| `search_distillation_pilot` argument | Default | Meaning |
+| --- | --- | --- |
+| `--source` | required | Version-2 checkpoint with a trained play network: the policy improved and the search guide |
+| `--output-dir` | required | `searched.pt` (search cache, reused when the settings match), `distilled-c{C}.pt` and `.json` diagnostics |
+| `--clip` | `2` | CMPO clip c (one or more values; one checkpoint each, sharing one search) |
+| `--games`, `--positions-per-game` | `1000`, `4` | Self-play hands, and play decisions (with at least two legal moves) sampled from each |
+| `--samples` | `16` | Sampled worlds per search (full model rollouts, points objective) |
+| `--seed` | `20261025` | Positions, search streams and fine-tuning |
+| `--validation-every` | `10` | Hold out every N-th hand for early stopping and diagnostics |
+| `--learning-rate`, `--batch-size`, `--max-epochs`, `--patience` | `1e-4`, `256`, `50`, `5` | Adam fine-tuning of the play network, with early stopping on the held-out KL |
+| `--value-weight` | `1.0` | Weight of the term that keeps the shared trunk's value outputs |
+| `--threads` | `0` | Search processes: `0` auto (capped at 8), `1` sequential. Results do not depend on it. |
+
 #### Recipe 12: held-out phase ablations
 
 Prerequisites: the trained checkpoints in each comparison, including all requested
@@ -1470,13 +1689,20 @@ optimizer/device or trainability flag here.
 | Argument | Type / accepted values | Default | Meaning |
 | --- | --- | --- | --- |
 | `--agent-a-bid`, `--agent-b-bid` | neural, heuristic, random, conservative | heuristic | Bidding strategy; conservative passes when legal, otherwise minimum bid. |
-| `--agent-a-trump`, `--agent-b-trump` | neural, heuristic, random | heuristic | Independent trump strategy. |
-| `--agent-a-play`, `--agent-b-play` | neural, heuristic, random | heuristic | Independent playing strategy. |
+| `--agent-a-trump`, `--agent-b-trump` | neural, heuristic, random, pimc | heuristic | Independent trump strategy; pimc = belief-based Monte Carlo. |
+| `--agent-a-play`, `--agent-b-play` | neural, heuristic, random, pimc | heuristic | Independent playing strategy; pimc = belief-based Monte Carlo. |
 | `--agent-a-checkpoint`, `--agent-b-checkpoint` | Compatible checkpoint path | Unset | Default neural source for that agent; ignored when no phase needs it. Version 1 supplies play only. |
 | `--agent-{a,b}-bid-checkpoint` | Trained bid source path | Unset | Overrides only that agent's neural bidding source. |
 | `--agent-{a,b}-trump-checkpoint` | Trained trump source path | Unset | Overrides only that agent's neural trump source. |
 | `--agent-{a,b}-play-checkpoint` | Trained play source path | Unset | Overrides only that agent's neural playing source. |
 | `--stochastic-neural` | Flag | Off (greedy) | Seeded phase-local sampling, independent between seats/phases; still frozen inference. |
+| `--agent-{a,b}-partner-{bid,trump,play}` | Same choices as the first seat | First seat's strategy | Second-seat (2/3) strategy. Any partner flag turns on a two-spec team; without them both seats use one spec, as before. |
+| `--agent-{a,b}-partner-checkpoint`, `--agent-{a,b}-partner-{phase}-checkpoint` | Checkpoint path | First seat's sources | Second-seat neural sources, e.g. partner-2 of a paired run. Partner phase override, then partner default, then (only if neither is given) the first seat's sources. |
+| `--pimc-samples` | Integer > 0 | `32` | Sampled hidden deals per PIMC decision (every deal when few remain). Cost grows linearly; recorded in JSON only when PIMC is used. |
+| `--agent-{a,b}-pimc-model` | Checkpoint path | Unset | Model guiding that agent's `pimc` phases: it plays every seat's rollouts (trained phases neural, others heuristic). Partner seats inherit it. Separate from `--agent-X-checkpoint` on purpose. |
+| `--pimc-leaf` | `none`, `value`, `value-turn` | `none` | Model-guided `pimc` only: `value` stops rollouts after the next trick and scores the rest with the model's value head (signed-marks objective). `value-turn` stops at the searcher's own next decision instead, so the value head scores from the searcher's viewpoint ([leaf viewpoint](search_training.md#46-bias-of-the-search-target-term-by-term)). Both need a guide trained with the local critic; centralized-critic and policy-only checkpoints are rejected. |
+| `--pimc-likelihood` | `uniform`, `model` | `uniform` | Model-guided `pimc` only: `model` weights hidden deals by the model's probabilities for the observed moves. |
+| `--pimc-epsilon` | Float in [0, 1] | `0.1` | Likelihood softening for unexpected moves (with `--pimc-likelihood model`). |
 | `--deals` | Integer > 0 | `2048` | Complete duplicate groups; two games/group. |
 | `--seed` | Integer | `42` | Arena deal/agent seed; choose independent final seeds. |
 | `--bootstrap-seed` | Integer | `0` | Separate resampling seed. |
@@ -1492,6 +1718,106 @@ a non-neural strategy is rejected. Different neural files are allowed per phase,
 including archived snapshots. Each selected network must satisfy metadata and
 trained-phase checks. Actual network tensors, not just paths/hashes, determine
 shared-parameter assertions. See [composition semantics](phase_composable_evaluation.md).
+
+### Model comparisons and round robins
+
+Every comparison is one `evaluate_agent_vs_agent` run: agent A's flags plus
+agent B's flags, on duplicate deals. Use the same `--deals`/`--seed` for every
+comparison in a set so they share deals, and keep evaluation seeds distinct from
+training seeds.
+
+**Agent flags.** These are written for side A; replace `-a-` with `-b-` for side B.
+Checkpoint paths are the study runs'; substitute your own. Components and
+strengths are in the [agent catalogue](phase_composable_evaluation.md#agent-catalogue).
+
+| Agent | Flags |
+| --- | --- |
+| HHH (Heuristic V1) | none |
+| HHR | `--agent-a-play random` |
+| HRR | `--agent-a-trump random --agent-a-play random` |
+| CHH | `--agent-a-bid conservative` |
+| CRR | `--agent-a-bid conservative --agent-a-trump random --agent-a-play random` |
+| RRR | `--agent-a-bid random --agent-a-trump random --agent-a-play random` |
+| Plain PIMC | `--agent-a-trump pimc --agent-a-play pimc` (add `--pimc-samples N`; default 32) |
+| Base (play-only) model | `--agent-a-checkpoint runs/study-play-v1/checkpoints/best.pt --agent-a-play neural` |
+| Shared (bid+play) model | `--agent-a-checkpoint runs/study-shared/checkpoints/best.pt --agent-a-bid neural --agent-a-play neural` |
+| Paired pair | `--agent-a-checkpoint runs/study-paired/checkpoints/partner-1/best.pt --agent-a-partner-checkpoint runs/study-paired/checkpoints/partner-2/best.pt --agent-a-bid neural --agent-a-play neural` |
+| Model-guided PIMC | `--agent-a-trump pimc --agent-a-play pimc --agent-a-pimc-model runs/study-shared/checkpoints/best.pt` |
+
+**One comparison: the paired pair against CHH.**
+
+```bash
+python -m examples.evaluate_agent_vs_agent \
+  --agent-a-checkpoint runs/study-paired/checkpoints/partner-1/best.pt \
+  --agent-a-partner-checkpoint runs/study-paired/checkpoints/partner-2/best.pt \
+  --agent-a-bid neural --agent-a-play neural \
+  --agent-b-bid conservative \
+  --deals 2048 --seed 20261019 --bootstrap-samples 2000 --threads 0 \
+  --output runs/compare/paired-vs-chh.json --log-dir logs/experiments/paired-vs-chh
+```
+
+The console report and the JSON give A's signed marks per hand and win rate with
+95% intervals (whole duplicate groups resampled), plus contract and role
+breakdowns. B's results are the mirror image.
+
+**Many comparisons: pipelines.** A pipeline runs a list of comparisons in one
+command, resumes after interruption, hashes every checkpoint it reads, and on
+completion writes `OUTPUT_ROOT/summary.md` with one table row per comparison
+([pipelines](experiment_pipelines.md)). Two tracked configurations reproduce the
+one-seed study ([results](multiphase_selfplay.md#one-seed-study-base-shared-and-paired-262144-hands)):
+
+| Configuration | Comparisons |
+| --- | --- |
+| `configs/pipelines/study_comparisons.json` | Shared and Paired each against HHH, HHR, HRR, CHH, CRR and RRR, then Paired against Shared: 13 steps, 2,048 deals |
+| `configs/pipelines/study_round_robin.json` | Every pair of Base, Shared, Paired, RRR, HHH and plain PIMC: 15 steps, 1,024 deals. The PIMC steps take the longest. |
+
+```bash
+python -m examples.run_pipeline --config configs/pipelines/study_comparisons.json --dry-run  # check paths first
+python -m examples.run_pipeline --config configs/pipelines/study_comparisons.json            # run all 13
+python -m examples.run_pipeline --config configs/pipelines/study_comparisons.json --resume   # after an interruption
+# Results: runs/pipelines/study-comparisons-v1/summary.md (and <step>/result.json per comparison)
+```
+
+To compare your own models:
+
+1. Copy a configuration.
+2. Change `name` and `output_root`.
+3. Edit each step's `args`, which are the flags above without the leading `--`.
+4. Dry-run it.
+
+A new `output_root` is needed for every changed configuration.
+
+**Ad hoc batches without a pipeline** (no resume or summary; each run writes its
+own JSON):
+
+```bash
+# bash: one model against every fixed variant
+MODEL="--agent-a-checkpoint runs/study-shared/checkpoints/best.pt --agent-a-bid neural --agent-a-play neural"
+declare -A OPPONENT=( [hhh]="" [hhr]="--agent-b-play random" [hrr]="--agent-b-trump random --agent-b-play random"
+  [chh]="--agent-b-bid conservative" [crr]="--agent-b-bid conservative --agent-b-trump random --agent-b-play random"
+  [rrr]="--agent-b-bid random --agent-b-trump random --agent-b-play random" )
+for NAME in "${!OPPONENT[@]}"; do
+  python -m examples.evaluate_agent_vs_agent $MODEL ${OPPONENT[$NAME]} \
+    --deals 2048 --seed 20261019 --threads 0 --output runs/compare/shared-vs-$NAME.json
+done
+```
+
+```powershell
+# PowerShell: the same loop
+$model = '--agent-a-checkpoint', 'runs/study-shared/checkpoints/best.pt', '--agent-a-bid', 'neural', '--agent-a-play', 'neural'
+$opponents = @{ hhh = @(); hhr = @('--agent-b-play', 'random'); hrr = @('--agent-b-trump', 'random', '--agent-b-play', 'random');
+  chh = @('--agent-b-bid', 'conservative'); crr = @('--agent-b-bid', 'conservative', '--agent-b-trump', 'random', '--agent-b-play', 'random');
+  rrr = @('--agent-b-bid', 'random', '--agent-b-trump', 'random', '--agent-b-play', 'random') }
+foreach ($name in $opponents.Keys) {
+  python -m examples.evaluate_agent_vs_agent @model @($opponents[$name]) --deals 2048 --seed 20261019 --threads 0 --output "runs/compare/shared-vs-$name.json"
+}
+```
+
+For a single shared-mode checkpoint against several built-in variants in one
+process, `evaluate_selfplay_ppo --checkpoint PATH --opponents HHH,CHH,HHR` also
+works ([compatibility commands](#compatibility-evaluation)). It does not take a
+paired partner; use `evaluate_agent_vs_agent` for pairs, PIMC and mixed
+compositions.
 
 ### Compatibility evaluation
 

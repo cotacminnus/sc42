@@ -22,8 +22,8 @@ Step numbers match the team's live planning document.
 | 4 | Common agent interface | Done | `agents/`: protocols, RandomAgent, AgentPlayer |
 | 5 | Baseline agents | V1 baselines done | HeuristicAgent, RandomAgent, ConservativeRandomAgent, HybridAgent; [phase ablations](policy_ablation.md) |
 | 6 | Self-play training | Play-only and multi-phase historical PPO implemented | [legacy baseline](ppo_training.md), [current training](multiphase_selfplay.md) |
-| 7 | Hidden-information reasoning | Belief toolkit implemented: exact counting, sampling, policy likelihoods, rollouts, PIMC action values | [belief modelling](belief.md); PIMC agent and arena study next |
-| 8 | Partnership behavior | Not started | uses the arena (step 11) |
+| 7 | Hidden-information reasoning | Belief toolkit, PIMC agent and model-guided PIMC (model rollouts, model likelihoods, value leaf) implemented, with an accuracy experiment | [belief modelling](belief.md); [search in training](search_training.md): theory, ranking gate, pilots, and `--search-fraction` implemented; experiments pending |
+| 8 | Partnership behavior | Paired-partner training and two-spec team evaluation implemented; studies not started | [paired partners](multiphase_selfplay.md#paired-partner-training) |
 | 9 | Bidding | Neural bid-only/joint PPO and counterfactual tools implemented; strength to evaluate | [multi-phase PPO](multiphase_selfplay.md), [counterfactuals](counterfactual_bidding.md) |
 | 10 | Special contracts (Nello) | IDs reserved | `actions.py` IDs 55–57 |
 | 11 | Evaluation | Paired arena and phase composition implemented | [methodology](arena.md), [agent composition](phase_composable_evaluation.md) |
@@ -91,7 +91,9 @@ Frozen Heuristic V1, conservative random bidding, and composable phase policies
 are implemented. HHH/HHR/HRR/CHH/CRR/RRR factories support reproducible duplicate
 hand and match experiments with independent per-phase RNG streams. See
 [policy_ablation.md](policy_ablation.md) for commands, methodology and limits.
-PIMC remains future work; Stage-1 PPO provides a learned trick-play baseline.
+A PIMC trump/play baseline (`texas42.agents.pimc`, strategy `pimc` in agent-vs-agent
+composition) is implemented; see [belief modelling](belief.md#the-pimc-agent). Stage-1
+PPO provides a learned trick-play baseline.
 
 - **Random:** choose uniformly from `legal_action_ids` (bids too).
 - **Heuristic:** bid on trump length, doubles, and counters; call the longest
@@ -121,6 +123,27 @@ Next experiments:
 - Study opponent-pool curricula and cross-play partners before introducing live
   self-play, recurrent policies or match-level PPO.
 - Deep Monte Carlo remains an alternative algorithm to compare under equal budgets.
+- Search inside training (Monte Carlo search as a policy-improvement signal) has a
+  [theory, evidence and plan document](search_training.md): the theoretical case
+  (policy improvement, performance difference, all-action variance reduction,
+  regularized improvement), related methods, measured compute and an enumerated
+  plan (P0–P6). Its first gate, move ranking, has been measured for the base,
+  shared and paired guides. Both the trick and the own-turn value leaf fail it,
+  so training-time search must start with full rollouts or a better-trained leaf
+  (P2). Two offline distillation rounds gave small gains that add up (+0.009, then
+  +0.015 marks/hand in total vs the source model; no change vs HHH).
+  - **Implementation:** `train_selfplay_ppo --search-fraction`, off by default
+    ([operation](multiphase_selfplay.md#search-inside-training)).
+  - **First in-training run** (one seed,
+    [results](search_training.md#64-first-in-training-run-p5-one-seed)):
+    - at equal hands, search beats ordinary PPO (+0.022 marks/hand) and doubles
+      the gain over the starting model;
+    - but it costs about 2.5× per hand after load balancing, and a control with
+      twice the hands (81% of the compute) beats it (−0.034).
+  - **Next:**
+    - test a smaller fraction (*p* = 0.5%, about 1.75×);
+    - cut the search cost further (cheaper positions, a leaf that ranks);
+    - then run the 3-seed equal-CPU comparison.
 
 Short smoke tests establish mechanics, not competitive gains or generalization.
 
@@ -148,13 +171,19 @@ Implemented in `texas42/belief.py` ([belief modelling](belief.md)):
 - Optional policy-likelihood weighting (Bayes over observed actions), using the
   new pure `ActionProbabilities` agent query, with ε-softening and an
   effective-sample-size diagnostic.
-- Rollouts from index-chosen decision branches until a trick, phase or hand ends.
+- Rollouts from index-chosen decision branches until a trick, phase or hand
+  ends, or until the searcher's own next decision.
 - Paired PIMC estimates of expected points per legal action, with a leaf hook
   for a future perfect-information oracle (kept separate from this module).
+- Model-guided PIMC (`research/ppo/search.py`): a trained checkpoint can play the
+  rollouts, weight beliefs by its move probabilities, and score truncated
+  rollouts with its value head. `examples.search_accuracy` measures belief and
+  value accuracy against true hands and outcomes
+  ([model-guided PIMC](belief.md#model-guided-pimc)).
 
 Observed so far: deterministic Heuristic likelihoods collapse the effective
 sample size to about 1 by trick 3–4, so policy-weighted beliefs need softer
-models or resampling. Next: a PIMC `Agent` wrapper and duplicate-arena
+models or resampling. Next: duplicate-arena
 comparisons against HHH; uniform vs policy belief log-loss on logged deals
 (`TrainingCollector(include_initial_deal=True)`); then learned beliefs (B/C).
 
@@ -163,6 +192,17 @@ comparisons against HHH; uniform vs policy belief log-loss on logged deals
 Train several seeds per method. Compare self-play (a seed with itself) against
 cross-play (seed i partnered with seed j). A large gap indicates arbitrary
 private conventions; Other-Play is a known mitigation.
+
+Paired-partner training (`--paired-partners`) trains two separate networks for
+the learning team. Two-spec team evaluation (`--agent-X-partner-*`) supports
+pair, mirrored and cross-play comparisons; see
+[paired partners](multiphase_selfplay.md#paired-partner-training).
+- **Measured so far:** a one-seed study at 262,144 hands. Paired trails Shared
+  by −0.066 marks/hand
+  ([study](multiphase_selfplay.md#one-seed-study-base-shared-and-paired-262144-hands)),
+  but each paired network saw about half the samples.
+- **Next:** compare at equal samples per network over several seeds, and
+  cross-play each partner with heuristic and other-seed partners.
 
 ### 9. Bidding
 

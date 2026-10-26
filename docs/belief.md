@@ -30,6 +30,8 @@ tools. No learning code is involved.
 - [Evaluating actions](#7-evaluating-actions)
 - [The ActionProbabilities agent query](#the-actionprobabilities-agent-query)
 - [Measured behaviour](#measured-behaviour)
+- [The PIMC agent](#the-pimc-agent)
+- [Model-guided PIMC](#model-guided-pimc)
 - [Choosing settings](#choosing-settings)
 - [Limitations and next steps](#limitations-and-next-steps)
 - [Research background](#research-background)
@@ -252,7 +254,7 @@ PIMC and of Recursive Monte Carlo search (Furtak & Buro 2013).
 | --- | --- |
 | `choices` | Leading decisions as **indices** into the sorted legal action IDs at each step (0 = lowest ID). This walks a chosen "decision-tree branch". |
 | `policies` | Four arena-style factories `factory(seat, seed) -> Agent` for the remaining steps. `None` means uniformly random legal moves. Agents are built fresh and see observations only from this point, so agents with memory lack earlier history. |
-| `until` | `"trick"`: next completed trick. `"phase"`: bid/trump/play phase change (for play, the end of the hand). `"hand"`: end of the hand. The hand ending always stops. |
+| `until` | `"trick"`: next completed trick. `"phase"`: bid/trump/play phase change (for play, the end of the hand). `"hand"`: end of the hand. `"turn"`: the seat that acted first is to act again (in `evaluate_actions`, the observer's own next decision). The hand ending always stops. |
 | `track_probability` | Compute `rollout_probability` (policy steps then also call `action_probabilities`). |
 
 | `Rollout` field | Meaning |
@@ -261,7 +263,7 @@ PIMC and of Recursive Monte Carlo search (Furtak & Buro 2013).
 | `explicit_steps` | How many came from `choices` |
 | `rollout_probability` | Product of the modelled probabilities of the non-explicit steps (1/\|legal\| for random steps). Explicit choices are interventions ("what if I play X"), so they add no factor. `None` if not tracked or a policy cannot report probabilities. |
 | `start_points`, `end_points`, `points_delta` | Team points (team 0, team 1), and the change |
-| `stop_reason` | `"trick"`, `"phase"` or `"hand"` |
+| `stop_reason` | `"trick"`, `"phase"`, `"turn"` or `"hand"` |
 | `hand_result` | Engine `HandResult` when the hand finished |
 | `final_state` | Private `HandState` where it stopped |
 
@@ -364,6 +366,305 @@ particle filters and Loki-style weighting. Options: larger ε, more samples,
 stochastic models, or resampling. Check `effective_sample_size` before trusting
 policy-weighted estimates.
 
+## The PIMC agent
+
+`texas42.agents.pimc.PIMCAgent(seed, *, samples=32, enumerate_below=256)` wraps
+`evaluate_actions` as an ordinary `Agent` (`reset(seat)`, `act(obs) -> int`).
+
+| Phase | Decision |
+| --- | --- |
+| Bid | Delegated to `HeuristicAgent` (expected points is a poor bidding objective) |
+| Trump, play | `evaluate_actions` with Heuristic V1 rollouts for all seats and a uniform belief, choosing `best_action_id` |
+| Forced move | Returned directly; no search, no random draws |
+
+- **Randomness:** one `random.Random(seed)` per instance supplies belief sampling
+  and rollout seeds, so equal seeds and equal observation sequences give equal
+  actions. `reset` does not rewind the stream.
+- **Diagnostics:** `last_evaluation` keeps the latest `ActionEvaluation` for
+  inspection.
+- **No `action_probabilities`:** decisions consume RNG, so the agent cannot
+  answer the pure query and cannot serve as a likelihood model.
+- **Import path:** import it from `texas42.agents.pimc`, not the package root.
+  `texas42.belief` imports `texas42.agents`, so a root-level import would be
+  circular.
+
+To compare it with heuristic or trained policies, use the `pimc` trump/play
+strategy of `examples.evaluate_agent_vs_agent` ([composition](phase_composable_evaluation.md),
+[commands](command_reference.md#belief-based-pimc-trump-and-play)), with
+`--pimc-samples` and modest `--deals`. Expect a few seconds per hand.
+
+**Measured strength.** In the study round robin (1,024 deals per pairing, 32
+samples, heuristic bidding), plain PIMC beat every other agent:
+
+| Opponent | PIMC's margin (marks/hand) |
+| --- | --- |
+| HHH | +0.297 |
+| Base model | +0.337 |
+| Shared model | +0.278 |
+| Paired model | +0.313 |
+
+Details are in [the study](multiphase_selfplay.md#one-seed-study-base-shared-and-paired-262144-hands).
+Model-guided PIMC beats plain PIMC in turn (next section).
+
+## Model-guided PIMC
+
+Plain PIMC models every player as Heuristic V1. Its estimates are only as good
+as that assumption. A trained checkpoint can replace the heuristic in three
+independent places (`research/ppo/search.py`, wired through the `pimc`
+composition strategy):
+
+| Option | What the model does | Theory | Flag |
+| --- | --- | --- | --- |
+| Rollout policy | Plays every seat's simulated continuation | The estimate becomes Q<sub>π</sub>(s, a) for the model's policy π: "play a, then everyone plays like the model". Choosing the best such action is one step of policy improvement (Tesauro & Galperin 1996; Furtak & Buro 2013). | `--agent-X-pimc-model PATH` |
+| Likelihood model | Weights hidden deals by P(observed move \| that player's view in the deal) | Policy-Based Inference (Rebstock et al. 2019) with a learned, stochastic policy | `--pimc-likelihood model` |
+| Value leaf | Rollouts stop early; the value head estimates the rest. `value` stops after the next trick (the trick winner's viewpoint). `value-turn` stops at the searcher's own next decision (the searcher's viewpoint). Both rank moves worse than full rollouts ([ranking gate](search_training.md#6-evidence-the-move-ranking-gate)). | AlphaZero-style truncated search: a learned evaluation replaces the long tail of each rollout | `--pimc-leaf value` or `value-turn` |
+
+### Data flow
+
+```text
+Observation ── build_belief(likelihood = model softmax, optional) ──> weighted worlds
+  for each world, each legal move a (same rollout seed for every a):
+    world_state ──> simulate(choices=(a,), policies = model at all four seats,
+                             until = 'hand' | 'trick' | 'turn')
+      hand finished ──> value = signed marks (or points)
+      stopped early ──> value = ValueLeaf(state, observer)
+          = value head of the acting seat's network on ITS observation,
+            sign-flipped if that seat is on the other team
+            ('turn' stops at the observer's own decision, so the actor is the observer)
+  estimate(a) = belief-weighted mean; best move = argmax
+```
+
+- **Model as a player:** `search.model_policy_spec` turns a checkpoint into a full
+  player. Trained phases are neural; the rest are Heuristic V1. For example, the
+  study's shared model plays neural bid and play and heuristic trump, exactly as
+  in training.
+- **Rollout determinism:** model rollouts are greedy by default, which gives low
+  variance. With `--stochastic-neural` they sample the model's softmax from
+  seeded, seat-local streams.
+- **Likelihood uses the full distribution:** belief weighting always uses the
+  model's full softmax (`action_probabilities`), whichever rollout mode is set.
+
+### Objective
+
+- **Without a value leaf:** expected points, as in plain PIMC.
+- **With `--pimc-leaf value` or `value-turn`:** signed marks
+  (`evaluate_actions(objective='marks')`).
+  - The guide must have trained its local value heads.
+  - Centralized-critic and policy-only training leave them unfitted, so such
+    checkpoints are rejected (`search.value_heads_trained`).
+  - PPO value heads predict the acting team's final signed marks, so the leaf
+    and the rollout outcomes share units.
+  - Marks also suit trump decisions better than points, because they include
+    whether the contract is made.
+
+### Privacy
+
+The value leaf builds another seat's `Observation` inside a hypothetical world.
+That is a guess derived from public information, not the real hand, which keeps
+the search honest. It is also exactly the input the network saw in training, so
+the value is an information-set value rather than a perfect-information one.
+
+### Inference speed and validity
+
+- **Fast greedy path:** greedy neural decisions now take the masked argmax of the
+  logits directly instead of building a `Categorical` distribution. This
+  measured about 6× faster (≈160 µs vs ≈960 µs per call on one CPU thread), with
+  identical actions on 4,800 real observations and in the regression test.
+  Stochastic decisions are unchanged.
+- **Probabilities in double precision:** `action_probabilities` computes the
+  softmax in 64-bit precision.
+- **Relaxed validity check:** `policy_likelihood`'s check now allows a 1e-6
+  rounding tolerance, appropriate for learned policies.
+
+### Measuring estimation accuracy
+
+`python -m examples.search_accuracy --model PATH` plays hands with a fixed table
+(the model at all seats, or `--table heuristic`) and samples play decisions. For
+each one it scores:
+
+- **Belief accuracy:** the probability on the true owner of each unseen domino.
+  Hidden hands come from the documented privileged label channel and are never
+  passed to search.
+- **Value accuracy:** the estimate for the move actually played vs. the realized
+  signed marks.
+- **Cost:** per-search time.
+
+The modes compared are uniform, heuristic-likelihood and model-likelihood
+beliefs; and heuristic rollouts, model rollouts and model rollouts with a value
+leaf. Measured results are in [Model-guided results](#model-guided-results).
+
+`--rank-check` adds a **move-ranking** comparison. Calibration for the move
+actually played does not show whether a search orders the *alternatives*
+correctly, and that ordering is what chooses moves and what training on search
+advantages would learn from. The check stores every legal move's estimate in
+every mode and adds full rollouts scored in points, a replicate of them with
+independent worlds (the noise scale) and the own-turn value leaf. For each
+position it then
+compares a candidate mode with a reference mode on the same worlds and seeds:
+pairwise order concordance, top-1 agreement, Spearman rank correlation, and
+**ranking regret**, the reference's value of its own best move minus its value
+of the candidate's best move. `--partner-model` makes a paired-partner pair the
+guide.
+
+### Limitations
+
+- **Imperfect guides:** a weak model is a weak guide. Model-guided search
+  inherits its policy and value errors.
+- **Cost:** model rollouts cost several times more than heuristic ones, even with
+  the fast path. The value leaf recovers most of the difference.
+- **Remaining PIMC flaws:** policy rollouts avoid the strongest form of strategy
+  fusion (section 7). The value leaf is an information-set value, so it adds no
+  perfect-information bias. But it is the **acting** seat's value, not the
+  searcher's: whenever another seat acts at the leaf, it ignores the searcher's
+  private hand ([leaf viewpoint](search_training.md#46-bias-of-the-search-target-term-by-term)).
+  The [ranking check](#move-ranking-across-guide-models) measures the combined
+  effect.
+- **Run-level settings:** leaf and likelihood apply to every model-guided agent in
+  a run. To compare two leaf settings, use separate runs against a common
+  baseline.
+
+### Model-guided results
+
+**Setup:**
+- Guide model: the shared bid+play study model (`runs/study-shared`, neural bid
+  and play, heuristic trump, 262,144 training hands, one seed).
+- 16 sampled worlds per search.
+- Measured on one Windows machine.
+- These are single-model, single-seed results. Treat them as evidence about this
+  checkpoint, not general claims.
+
+**Estimation accuracy** (`examples.search_accuracy`): 200 play decisions from 100
+hands per table.
+
+*Belief accuracy*: P(true owner) is the mean probability on each unseen domino's
+true owner (higher is better). Log-loss uses 1% uniform smoothing.
+
+| Belief | P(true owner), model table | Log-loss | ESS | P(true owner), heuristic table | Log-loss | ESS |
+| --- | --- | --- | --- | --- | --- | --- |
+| Uniform (exact) | 0.403 | **0.965** | – | 0.377 | **1.016** | – |
+| Heuristic likelihood | 0.459 | 1.474 | 4.6 | **0.497** | 1.272 | 7.0 |
+| Model likelihood | **0.551** | 1.079 | 4.8 | 0.429 | 1.474 | 5.5 |
+
+*Value estimates*: for the move actually played, vs. the realized signed marks.
+Correlation is the comparable column; RMSE includes outcome noise.
+
+| Rollouts | Corr. (model table) | RMSE | s/search | Corr. (heuristic table) | RMSE | s/search |
+| --- | --- | --- | --- | --- | --- | --- |
+| Heuristic, full hand | 0.584 | 0.817 | 0.148 | **0.625** | 0.799 | 0.160 |
+| Model, full hand | 0.588 | 0.814 | 0.576 | 0.607 | 0.815 | 0.630 |
+| Model + value leaf | **0.597** | 0.803 | **0.123** | 0.542 | 0.862 | 0.145 |
+
+Readings:
+- **A matching likelihood model is what makes beliefs more accurate.** Each
+  weighted belief is most accurate when its likelihood model matches the table:
+  model likelihood for the model table, heuristic likelihood for the heuristic
+  table.
+- **Weighted beliefs are overconfident at 16 samples.** With an effective sample
+  size of about 5, they put more mass on the truth on average but sometimes miss
+  it entirely. That is why uniform has the best log-loss. More samples or softer
+  likelihoods (higher ε) would help.
+- **Value accuracy also follows the table:** model rollouts and the value leaf
+  are best on the model table, heuristic rollouts on the heuristic table.
+- **The value leaf is fast and calibrated:** it is about 4.7× faster than full
+  model rollouts, with similar calibration on the model table.
+
+**Playing strength** (`evaluate_agent_vs_agent`): 128 duplicate deals (256 games)
+per row, seed 20261022, heuristic bidding for every PIMC agent; A's signed
+marks/hand with 95% paired bootstrap CI.
+
+| A | B | A marks/hand | A win rate |
+| --- | --- | --- | --- |
+| Model-guided PIMC (full rollouts) | Plain PIMC | +0.094 [−0.016, +0.203] | 54.7% |
+| Model-guided PIMC + value leaf | Plain PIMC | **−0.141** [−0.250, −0.031] | 43.4% |
+| Model-guided PIMC + value leaf + model likelihood | Plain PIMC | **−0.133** [−0.234, −0.031] | 43.8% |
+| Model-guided PIMC (full rollouts) | Shared model | **+0.340** [+0.234, +0.449] | 66.8% |
+| Model-guided PIMC + value leaf | Shared model | +0.059 [−0.059, +0.176] | 53.1% |
+| Plain PIMC | Shared model | **+0.160** [+0.047, +0.266] | 57.8% |
+
+What the strength results show:
+- **Full model rollouts are the strongest configuration.**
+  - They beat the guide model itself by +0.34 marks/hand, about twice plain
+    PIMC's margin over the same model (+0.16).
+  - Head-to-head they lead plain PIMC by +0.094, but that interval includes 0 at
+    128 deals. The 1,024-deal confirmation below settles it: smaller, but
+    significant.
+
+**Confirmation at 1,024 deals.** 2,048 games per row, fresh seed 20261030, the same
+settings as above: heuristic bidding for every PIMC agent, 16 samples, full
+rollouts, uniform belief. Outputs are in `runs/model-guided/arena-1024/`.
+
+| A | B | A marks/hand | A win rate |
+| --- | --- | --- | --- |
+| Model-guided PIMC (shared guide) | Plain PIMC | **+0.045** [+0.009, +0.081] | 52.2% |
+| Model-guided PIMC (shared guide) | Base model (heuristic bid and trump, neural play) | **+0.381** [+0.348, +0.415] | 69.0% |
+| Model-guided PIMC (round-2 distilled guide) | Plain PIMC | **+0.044** [+0.006, +0.081] | 52.2% |
+| Model-guided PIMC (round-2 distilled guide) | Model-guided PIMC (shared guide) | +0.027 [−0.004, +0.061] | 51.4% |
+
+- **Model-guided search is the strongest agent measured.** It beats plain PIMC
+  significantly, though by about half the 128-deal estimate. It beats the
+  play-only base model by +0.38 marks/hand.
+- **A better guide makes at most a slightly better search, so far.** The round-2
+  distilled network beats its source by +0.015 on its own
+  ([search in training](search_training.md#63-second-distillation-round-do-the-gains-compound)).
+  As a guide:
+  - it leads the shared-guided search head-to-head by +0.027, an interval that
+    includes 0;
+  - it ties it against plain PIMC (+0.044 vs +0.045 on the same deals).
+- **The value leaf loses strength, despite accurate value estimates for the
+  move actually played.** An objective ablation (64 deals, scratch script
+  recorded in `runs/model-guided/objective-ablation.json`) separates the two
+  changes the leaf mode makes:
+
+  | Model-guided PIMC vs plain PIMC | Marks/hand |
+  | --- | --- |
+  | Full rollouts, points objective | +0.094 [−0.016, +0.203] (128 deals) |
+  | Full rollouts, **marks** objective | +0.031 [−0.125, +0.188] (64 deals) |
+  | Value leaf, marks objective | −0.141 [−0.250, −0.031] (128 deals) |
+
+  - **Objective:** the point estimates suggest switching to marks costs a little.
+    Marks mostly reflect whether the contract is made, so they separate play moves
+    less sharply than points.
+  - **Leaf:** truncating with the value head costs more. A value head can be
+    calibrated on average yet rank *alternative* moves poorly. It was trained
+    only as PPO's baseline on the moves the policy actually takes.
+  - **Caveat:** the intervals overlap, so this split is indicative, not conclusive.
+- **Practical guidance:**
+  - For decision quality, use full model rollouts with the points objective.
+  - Do not rely on the value leaf to rank moves (next section).
+  - The value leaf's present strength is cheap value estimation;
+    [search in training](search_training.md) discusses what this means for
+    training-time search.
+
+#### Move ranking across guide models
+
+`search_accuracy --rank-check` compares how search modes order **all** legal
+moves. It was run on the same 150 heuristic-table positions with three guides:
+play-only base, shared bid+play, and the paired-partner pair (`--partner-model`).
+The full tables, noise scale and bootstrap intervals are in
+[the ranking gate](search_training.md#6-evidence-the-move-ranking-gate). In short:
+
+- **The leaf ranks moves poorly, for every guide.** Value-leaf search picks the
+  same best move as full model rollouts (points) in only 44–50% of positions.
+  Plain heuristic rollouts manage 53–57%. The leaf's regret is also higher:
+  0.92–1.19 vs 0.78–0.89 points, where a random legal move would cost about
+  1.95.
+- **Truncation, not the objective, is the main cause.** With both scored in
+  marks, the leaf matches full model rollouts on the best move only 37–42% of
+  the time.
+- **The leaf's error is systematic, not sampling noise.** Two independent
+  full-rollout searches agree on the best move in only 58–66% of positions at
+  16 worlds. The leaf falls well below that, even though it shares the
+  reference's worlds.
+- **The guide's training doesn't change the picture.** The paired pair is
+  slightly better and the base model worst, within noise.
+- **The leaf's viewpoint is only a minor cause.** The leaf scores positions from
+  the acting seat's viewpoint, not the searcher's
+  ([leaf viewpoint](search_training.md#46-bias-of-the-search-target-term-by-term)).
+  The own-turn leaf (`until='turn'`, `--pimc-leaf value-turn`) removes that bias
+  and ranks only a little better: its best-move agreement with full rollouts is
+  42–46%. It still fails the gate, so the value head's own error dominates
+  ([own-turn results](search_training.md#61-the-own-turn-leaf-p2a)).
+
 ## Choosing settings
 
 | Situation | Suggested settings |
@@ -376,8 +677,8 @@ policy-weighted estimates.
 
 ## Limitations and next steps
 
-- **No agent wrapper yet.** An `Agent` that calls `evaluate_actions` (a PIMC
-  baseline) and arena comparisons against HHH are the natural next step.
+- **Strength not yet measured.** The PIMC agent exists, but no multi-seed arena
+  study against HHH or PPO has been run; smoke tests show mechanics only.
 - **Single-hand objective.** Match marks and future hands are not modelled.
 - **Strategy fusion** remains (see section 7); ISMCTS or EPIMC are possible
   extensions.
