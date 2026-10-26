@@ -30,7 +30,12 @@ heuristic. Two run-level options apply to model-guided phases only; plain `pimc`
 phases ignore them:
 - `--pimc-likelihood model` weights hidden deals by the model's move probabilities.
 - `--pimc-leaf value` stops rollouts after the next trick and scores the rest with
-  the model's value head, using signed marks as the objective.
+  the model's value head, using signed marks as the objective. `--pimc-leaf
+  value-turn` stops at the searcher's own next decision instead.
+  - Both need a guide trained with the local critic, whose value heads are
+    fitted.
+  - Both rank moves worse than full rollouts, so prefer the default (`none`) for
+    strength; see [the ranking gate](search_training.md#6-evidence-the-move-ranking-gate).
 
 The guide is stored as that phase's checkpoint in the composition JSON, and the
 run options as `pimc_leaf`, `pimc_likelihood` and `pimc_epsilon`. A default

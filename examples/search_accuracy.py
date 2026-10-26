@@ -63,7 +63,7 @@ from time import perf_counter
 
 from examples.experiment_output import add_output_arguments, record_output
 from research.ppo.opponents import CheckpointIdentity
-from research.ppo.search import ValueLeaf, model_factories
+from research.ppo.search import ValueLeaf, model_factories, value_heads_trained
 from research.ppo.seeds import stream_seed
 from texas42.agents import variant_factory
 from texas42.belief import build_belief, evaluate_actions, hidden_constraints, tile_marginals
@@ -309,6 +309,10 @@ def main(argv=None):
     partner = CheckpointIdentity.from_path(args.partner_model) if args.partner_model else None
     factories = dict(heuristic=(variant_factory('HHH'),) * 4, model=model_factories(identity, partner=partner))
     factories['model'][0].prepare()
+    for guide in (identity, partner):
+        if guide is not None and not value_heads_trained(guide):
+            p.error(f'{guide.path} was trained with a centralized or no critic; its local value heads '
+                    'are unfitted, so the value-leaf modes cannot use it')
     leaf = ValueLeaf(identity, partner)
     table = factories['model'] if args.table == 'model' else factories['heuristic']
     if partner is not None:

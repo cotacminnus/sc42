@@ -161,7 +161,8 @@ Implemented in `texas42/belief.py` ([belief modelling](belief.md)):
 - Optional policy-likelihood weighting (Bayes over observed actions), using the
   new pure `ActionProbabilities` agent query, with ε-softening and an
   effective-sample-size diagnostic.
-- Rollouts from index-chosen decision branches until a trick, phase or hand ends.
+- Rollouts from index-chosen decision branches until a trick, phase or hand
+  ends, or until the searcher's own next decision.
 - Paired PIMC estimates of expected points per legal action, with a leaf hook
   for a future perfect-information oracle (kept separate from this module).
 - Model-guided PIMC (`research/ppo/search.py`): a trained checkpoint can play the

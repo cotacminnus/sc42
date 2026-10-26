@@ -24,7 +24,8 @@ if TORCH:
     from research.ppo.composition import (CompositeAgentFactory, CompositePolicySpec, PhasePolicySpec,
                                           _pimc_delegate, phase_network, resolve_policy_spec)
     from research.ppo.opponents import CheckpointIdentity, PolicySpec
-    from research.ppo.search import ValueLeaf, model_factories, model_policy_spec, trained_phases
+    from dataclasses import replace
+    from research.ppo.search import ValueLeaf, model_factories, model_policy_spec, trained_phases, value_heads_trained
     from research.ppo.selfplay_checkpoint import save as save_phase
     from research.ppo.selfplay_trainer import SelfPlayConfig, SelfPlayTrainer
     from research.ppo.trainer import Config, Trainer
@@ -62,6 +63,13 @@ class ModelGuidedPIMCTests(unittest.TestCase):
         cls.joint = root / 'joint.pt'
         save_phase(cls.joint, trainer)
         trainer.close()
+        # Centralized critic: the privileged critic replaces the local value heads
+        # in the value loss, so those heads are never fitted.
+        central = SelfPlayTrainer(replace(config, critic_mode='centralized'), load_model(cls.legacy)[0])
+        central.model.trained_phases = ('bid', 'trump', 'play')
+        cls.central = root / 'central.pt'
+        save_phase(cls.central, central)
+        central.close()
         cls.identity = CheckpointIdentity.from_path(cls.joint)
         cls.legacy_identity = CheckpointIdentity.from_path(cls.legacy)
 
@@ -117,6 +125,21 @@ class ModelGuidedPIMCTests(unittest.TestCase):
         self.assertEqual(trained_phases(self.legacy_identity), ('play',))
         spec = model_policy_spec(self.legacy_identity)
         self.assertEqual([s.strategy for _, s in spec.items()], ['heuristic', 'heuristic', 'neural'])
+
+    def test_value_leaf_requires_fitted_local_value_heads(self):
+        central = CheckpointIdentity.from_path(self.central)
+        self.assertTrue(value_heads_trained(self.identity))
+        self.assertTrue(value_heads_trained(self.legacy_identity))  # Predates critic modes: local.
+        self.assertFalse(value_heads_trained(central))
+        obs = observations(4, lambda o: o.phase == 'play' and len(o.view.completed_tricks) == 2)[0]
+        state = world_state(obs, sample_world(hidden_constraints(obs), random.Random(0)))
+        with self.assertRaisesRegex(ValueError, 'local value heads'):
+            ValueLeaf(central)(state, obs.seat)
+        spec = resolve_policy_spec('A', ('heuristic', 'pimc', 'pimc'), pimc_checkpoint=self.central)
+        for leaf in ('value', 'value-turn'):
+            with self.assertRaisesRegex(ValueError, 'local value heads'):
+                CompositeAgentFactory(spec, pimc_leaf=leaf).prepare()
+        CompositeAgentFactory(spec).prepare()  # Full rollouts never read the value heads.
 
     def test_marks_objective(self):
         obs = observations(5, lambda o: o.phase == 'play' and len(o.view.completed_tricks) == 4)[0]

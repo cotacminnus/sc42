@@ -317,10 +317,13 @@ class CompositeAgentFactory:
             if policy.strategy == 'neural':
                 phase_network(policy, phase)
             elif policy.strategy == 'pimc' and policy.checkpoint is not None:
-                from .search import model_policy_spec, trained_phases
+                from .search import model_policy_spec, trained_phases, value_heads_trained
                 model_policy_spec(policy.checkpoint)  # The guide must have a trained phase.
                 if self.pimc_leaf != 'none' and 'play' not in trained_phases(policy.checkpoint):
                     raise ValueError(f'Value leaf needs a trained play network in {policy.checkpoint.path}')
+                if self.pimc_leaf != 'none' and not value_heads_trained(policy.checkpoint):
+                    raise ValueError(f'Value leaf needs trained local value heads; {policy.checkpoint.path} '
+                                     'was trained with a centralized or no critic')
 
     def __call__(self, seat, seed):
         return CompositeAgent(self.spec, seed, greedy=self.greedy, pimc_samples=self.pimc_samples,

@@ -54,6 +54,20 @@ def trained_phases(identity: CheckpointIdentity) -> tuple[str, ...]:
     return tuple(p for p in PHASES if p in metadata['neural_phases'] and p in metadata['trained_phases'])
 
 
+def value_heads_trained(identity: CheckpointIdentity) -> bool:
+    """Whether the checkpoint's local value heads were fitted as PPO's baseline.
+
+    Only the local actor-critic trains them. Centralized-critic training uses
+    the privileged critic in their place in the value loss, so they keep their
+    initial weights. Policy-only training (critic_mode 'none') never fits them.
+    Neither may score search leaves. Checkpoints that predate critic modes
+    trained the local heads.
+    """
+    from .checkpoint import load_frozen
+    _, metadata = load_frozen(identity)
+    return (metadata.get('critic_mode') or 'local') == 'local'
+
+
 def model_policy_spec(identity: CheckpointIdentity, name: str = 'model') -> CompositePolicySpec:
     """The checkpoint as a full player: its trained phases neural, the rest Heuristic V1.
 
@@ -107,9 +121,11 @@ class ValueLeaf:
          estimate, i.e. expected final signed marks for the acting seat's team.
       3. Return it unchanged if the actor is on the observer's team, negated
          otherwise (the hand is zero-sum between the partnerships).
-    The phase must be one the checkpoint trained. A value head for an untrained
-    phase was never fitted. With until='trick', every stop happens in the play
-    phase (or the hand has ended, and then no leaf is needed).
+    The phase must be one the checkpoint trained, and the checkpoint must have
+    trained its local value heads (value_heads_trained): an unfitted head
+    would silently score every leaf with its initial weights. With
+    until='trick' or 'turn', every stop happens in the play phase (or the hand
+    has ended, and then no leaf is needed).
 
     partner (optional, paired-partner runs): the acting seat's own network
     answers, i.e. `identity` for a team's first seat (0/1) and `partner` for its
@@ -129,6 +145,9 @@ class ValueLeaf:
         if key not in _VALUE_NETWORKS:
             if obs.phase not in trained_phases(identity):
                 raise ValueError(f'Value leaf needs a trained {obs.phase} network in {identity.path}')
+            if not value_heads_trained(identity):
+                raise ValueError(f'Value leaf needs trained local value heads; {identity.path} was trained '
+                                 'with a centralized or no critic')
             _VALUE_NETWORKS[key] = phase_network(PhasePolicySpec('neural', identity), obs.phase)
         with torch.inference_mode():
             _, value = _VALUE_NETWORKS[key](torch.tensor([encode(obs)], dtype=torch.float32))
@@ -136,4 +155,4 @@ class ValueLeaf:
         return value if obs.seat % 2 == observer % 2 else -value
 
 
-__all__ = ['ValueLeaf', 'model_factories', 'model_policy_spec', 'trained_phases']
+__all__ = ['ValueLeaf', 'model_factories', 'model_policy_spec', 'trained_phases', 'value_heads_trained']

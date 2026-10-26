@@ -70,7 +70,7 @@ python -m examples.run_pipeline --config configs/pipelines/progressive_training.
 | Bid-versus-pass replay experiments | [Counterfactual bidding](docs/counterfactual_bidding.md) |
 | Exact open-hand contract/point endgames and complete-deal bid benchmarks | [Endgame oracle](docs/endgame_oracle.md) |
 | Hidden-deal beliefs, world counting/sampling, rollouts, PIMC action values, model-guided PIMC | [Belief modelling](docs/belief.md) |
-| Whether and how to use Monte Carlo search inside training (theory, ranking gate and plan; not implemented) | [Search in training](docs/search_training.md) |
+| Whether and how to use Monte Carlo search inside training (theory, ranking gate, offline distillation pilots and plan; training integration not implemented) | [Search in training](docs/search_training.md) |
 | Observations, public history and training-data validation | [Encoding](docs/encoding.md) |
 | Permanent global actions and reserved contracts | [Action space](docs/action-space.md) |
 | Process workers and evaluation profiling | [Parallel execution](docs/parallel_execution.md), [evaluation performance](docs/evaluation_performance.md) |
@@ -173,10 +173,14 @@ or hidden-hand labels.
 Agents may also implement the optional pure query
 `action_probabilities(obs) -> {action_id: probability}`, the distribution `act`
 samples from (the `ActionProbabilities` protocol). It must not consume RNG or
-change memory. All built-in agents implement it. [Belief modelling](docs/belief.md)
-uses it to weight hypothetical deals and to compute rollout probabilities.
+change memory. All built-in agents implement it except the PIMC search agent, whose
+decisions consume RNG. [Belief modelling](docs/belief.md) uses it to weight
+hypothetical deals and to compute rollout probabilities.
 `texas42.agents.pimc.PIMCAgent` is a search baseline built on those beliefs; compare
 it through the `pimc` trump/play strategy of `examples.evaluate_agent_vs_agent`.
+`--agent-X-pimc-model PATH` lets a trained model play the search's rollouts
+(model-guided PIMC, the strongest agent measured; see
+[model-guided results](docs/belief.md#model-guided-results)).
 
 ## Self-play and data contracts
 

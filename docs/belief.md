@@ -254,7 +254,7 @@ PIMC and of Recursive Monte Carlo search (Furtak & Buro 2013).
 | --- | --- |
 | `choices` | Leading decisions as **indices** into the sorted legal action IDs at each step (0 = lowest ID). This walks a chosen "decision-tree branch". |
 | `policies` | Four arena-style factories `factory(seat, seed) -> Agent` for the remaining steps. `None` means uniformly random legal moves. Agents are built fresh and see observations only from this point, so agents with memory lack earlier history. |
-| `until` | `"trick"`: next completed trick. `"phase"`: bid/trump/play phase change (for play, the end of the hand). `"hand"`: end of the hand. The hand ending always stops. |
+| `until` | `"trick"`: next completed trick. `"phase"`: bid/trump/play phase change (for play, the end of the hand). `"hand"`: end of the hand. `"turn"`: the seat that acted first is to act again (in `evaluate_actions`, the observer's own next decision). The hand ending always stops. |
 | `track_probability` | Compute `rollout_probability` (policy steps then also call `action_probabilities`). |
 
 | `Rollout` field | Meaning |
@@ -263,7 +263,7 @@ PIMC and of Recursive Monte Carlo search (Furtak & Buro 2013).
 | `explicit_steps` | How many came from `choices` |
 | `rollout_probability` | Product of the modelled probabilities of the non-explicit steps (1/\|legal\| for random steps). Explicit choices are interventions ("what if I play X"), so they add no factor. `None` if not tracked or a policy cannot report probabilities. |
 | `start_points`, `end_points`, `points_delta` | Team points (team 0, team 1), and the change |
-| `stop_reason` | `"trick"`, `"phase"` or `"hand"` |
+| `stop_reason` | `"trick"`, `"phase"`, `"turn"` or `"hand"` |
 | `hand_result` | Engine `HandResult` when the hand finished |
 | `final_state` | Private `HandState` where it stopped |
 
@@ -404,7 +404,7 @@ composition strategy):
 | --- | --- | --- | --- |
 | Rollout policy | Plays every seat's simulated continuation | The estimate becomes Q<sub>π</sub>(s, a) for the model's policy π: "play a, then everyone plays like the model". Choosing the best such action is one step of policy improvement (Tesauro & Galperin 1996; Furtak & Buro 2013). | `--agent-X-pimc-model PATH` |
 | Likelihood model | Weights hidden deals by P(observed move \| that player's view in the deal) | Policy-Based Inference (Rebstock et al. 2019) with a learned, stochastic policy | `--pimc-likelihood model` |
-| Value leaf | Rollouts stop after the next trick; the value head estimates the rest | AlphaZero-style truncated search: a learned evaluation replaces the long tail of each rollout | `--pimc-leaf value` |
+| Value leaf | Rollouts stop early; the value head estimates the rest. `value` stops after the next trick (the trick winner's viewpoint). `value-turn` stops at the searcher's own next decision (the searcher's viewpoint). Both rank moves worse than full rollouts ([ranking gate](search_training.md#6-evidence-the-move-ranking-gate)). | AlphaZero-style truncated search: a learned evaluation replaces the long tail of each rollout | `--pimc-leaf value` or `value-turn` |
 
 ### Data flow
 
@@ -412,11 +412,12 @@ composition strategy):
 Observation ── build_belief(likelihood = model softmax, optional) ──> weighted worlds
   for each world, each legal move a (same rollout seed for every a):
     world_state ──> simulate(choices=(a,), policies = model at all four seats,
-                             until = 'hand' | 'trick')
+                             until = 'hand' | 'trick' | 'turn')
       hand finished ──> value = signed marks (or points)
       stopped early ──> value = ValueLeaf(state, observer)
           = value head of the acting seat's network on ITS observation,
             sign-flipped if that seat is on the other team
+            ('turn' stops at the observer's own decision, so the actor is the observer)
   estimate(a) = belief-weighted mean; best move = argmax
 ```
 
@@ -433,7 +434,11 @@ Observation ── build_belief(likelihood = model softmax, optional) ──> we
 ### Objective
 
 - **Without a value leaf:** expected points, as in plain PIMC.
-- **With `--pimc-leaf value`:** signed marks (`evaluate_actions(objective='marks')`).
+- **With `--pimc-leaf value` or `value-turn`:** signed marks
+  (`evaluate_actions(objective='marks')`).
+  - The guide must have trained its local value heads.
+  - Centralized-critic and policy-only training leave them unfitted, so such
+    checkpoints are rejected (`search.value_heads_trained`).
   - PPO value heads predict the acting team's final signed marks, so the leaf
     and the rollout outcomes share units.
   - Marks also suit trump decisions better than points, because they include
