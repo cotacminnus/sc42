@@ -130,8 +130,10 @@ Next experiments:
   plan (P0–P6). Its first gate, move ranking, has been measured for the base,
   shared and paired guides. Both the trick and the own-turn value leaf fail it,
   so training-time search must start with full rollouts (about 1.4–1.8× cost) or
-  a better-trained leaf (P2). An offline one-step distillation pilot gave a small
-  positive effect (+0.009 marks/hand vs its source). Not implemented yet.
+  a better-trained leaf (P2). Two offline distillation rounds gave small gains
+  that add up (+0.009, then +0.015 marks/hand in total vs the source model; no
+  change vs HHH), which justifies building in-training search as an experiment.
+  Not implemented yet.
 
 Short smoke tests establish mechanics, not competitive gains or generalization.
 

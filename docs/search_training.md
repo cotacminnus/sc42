@@ -32,16 +32,18 @@ already exist; see [belief modelling](belief.md#model-guided-pimc).
     leaf taking the trick winner's viewpoint. Stopping at the searcher's own turn
     instead removes that bias and helps only a little; it still fails the gate
     (section 6.1). The value head's own error dominates.
-  - **One offline distillation step is a weak positive** (section 6.2): +0.009
-    [+0.001, +0.018] marks/hand against the source model for the larger step, and
-    no change against HHH.
+  - **Offline distillation helps, slowly** (sections 6.2–6.3).
+    - One round gave +0.009 [+0.001, +0.018] marks/hand against the source
+      model; a second round, guided by the improved model, gave +0.015
+      [+0.005, +0.027] in total.
+    - The gains add up roughly per round, but at about +0.005–0.009 each, with no
+      change yet against HHH.
 - **Plan (section 10).**
   - Build in-memory search guides (P1).
   - Then train with full model rollouts on about 0.5–1% of play decisions (about
-    1.4–1.8× current cost, section 9). A cheap leaf needs a better value
-    estimate first (P2 option 3).
-  - A second offline distillation round is the cheapest test of whether the
-    gains compound.
+    1.4–1.8× current cost, section 9).
+  - A cheap leaf needs a better value estimate first (P2 option 3).
+  - Expect a modest effect, and confirm it at equal compute (P5).
 - **Decision-time search is already strong.** Model-guided search with full
   rollouts is the strongest agent measured: +0.34 marks/hand over its own guide
   model.
@@ -830,7 +832,72 @@ more searched states:
   from each improved policy.
 - The cheapest next test of compounding is a second offline round: search again
   with the distilled model as guide, distill again, and compare round 2 with
-  round 1 and with the shared model. That needs no new training code.
+  round 1 and with the shared model. That needs no new training code. (Done:
+  section 6.3.)
+
+### 6.3 Second distillation round: do the gains compound?
+
+**Protocol.** Identical to round 1 except for the starting point and the data:
+
+- The round-1 c = 2 model is both the policy being improved and the search
+  guide. That is the integrated loop: a better policy plays the rollouts.
+- Its states come from its **own** greedy self-play: 1,000 new hands, seed
+  20261027, 4,000 states, 400 of them held out.
+- Fine-tuning uses the same c = 2 CMPO step.
+- Arena: the same 4,096 deals (seed 20261026), so round-1 and round-2 results
+  are measured on identical deals.
+- **Pre-registered rule:** the gains compound if round 2 beats round 1
+  head-to-head and beats the shared model by more than round 1 did.
+
+Outputs are in `runs/model-guided/pilot/round2/`.
+
+**Diagnostics:**
+
+- Early stopping chose epoch 2, so the step was smaller than in round 1. Play
+  choices changed on 3.5% of training states and 1.5% of held-out states.
+  KL(π<sub>new</sub> ‖ π<sub>old</sub>) on held-out states was 0.0044, half of
+  round 1's 0.0089.
+- The search still disagrees with the policy on 63–64% of states. That is no
+  fewer than in round 1, which supports reading most of the disagreement as
+  16-world search noise rather than policy error.
+
+**Results:**
+
+| A | B | A marks/hand (95% CI) | A win rate |
+| --- | --- | --- | --- |
+| Round 2 | Round 1 (c = 2) | +0.005 [−0.002, +0.014] | 50.3% |
+| Round 2 | Shared model | **+0.015 [+0.005, +0.027]** | 50.8% |
+| Round 1 (c = 2), for reference | Shared model | +0.009 [+0.001, +0.018] | 50.5% |
+| Round 2 | HHH | +0.116 [+0.097, +0.135] | 55.8% |
+| Shared model, for reference | HHH | +0.114 [+0.094, +0.132] | 55.7% |
+
+**Readings:**
+
+- **The gains add up, roughly.** Round 2's margin over the shared model
+  (+0.015) is close to the sum of the two steps (+0.009 then +0.005). Its
+  interval now clearly excludes zero, a more robust result than round 1's.
+- **The rule is half met.** Round 2 does beat the shared model by more than
+  round 1 did. But its head-to-head step over round 1 is positive with an
+  interval that includes zero. This is evidence *consistent with* compounding,
+  not proof of it.
+- **Still no transfer to HHH.** +0.116 vs +0.114 is within noise. The
+  improvements so far are against the self-play policy family that was searched,
+  as section 4.1 predicts.
+- **The rate is slow.** About +0.005–0.009 marks/hand per round of 3,600
+  searched states, with the step size limited by early stopping and the
+  policy's peakedness.
+  - In-training search at *p* = 1% searches about 3,600 states every 100
+    updates, roughly one pilot round's worth, so a 1,024-update run would supply
+    about ten rounds of searched states.
+  - If the per-round gain held, that would be on the order of +0.05–0.1
+    marks/hand against the source policy. This is an extrapolation, not a
+    measurement. PPO's own updates may overlap with or wash out part of it.
+
+**Decision.** Building the training integration (P1, P3, P4) with full rollouts
+at *p* ≈ 1% is justified as an experiment. The expected effect is modest and
+must be confirmed at equal compute (P5). Cheaper ways to get larger steps per
+searched state are open questions: more worlds per search to cut target noise,
+and searching only high-entropy states.
 
 ## 7. Options compared
 
@@ -1044,10 +1111,13 @@ when the previous gate passes. Defaults must reproduce current training exactly
   - The world-value leaf (centralized critic) is untested.
   - A head trained to separate alternative moves (for example on search values,
     or in points) is the remaining route.
-- **Do distilled improvements compound?** One offline step gave about +0.01
-  marks/hand (section 6.2). Whether repeated rounds, or many more searched
-  states, approach the +0.34 of test-time search is the main open question for
-  training-time search.
+- **How far do distilled improvements compound?** Two offline rounds gave +0.009,
+  then +0.015 in total (sections 6.2–6.3).
+  - Whether many rounds, or in-training search with about ten rounds' worth of
+    searched states per run, approach a meaningful share of test-time search's
+    +0.34 is the main open question.
+  - So is whether the gains ever transfer to opponents outside the self-play
+    family (HHH).
 - **How many worlds per training search?**
   - At 16 worlds, two independent searches agree on the best move only about 60%
     of the time (section 6).
