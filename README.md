@@ -14,7 +14,7 @@ dependencies. From the repository root:
 ```bash
 python -m pip install -e .
 python -m texas42
-python -m unittest discover -s tests -v
+python -m unittest discover -s tests -v   # see Testing below
 ```
 
 Optional extras are `.[rl]` (PyTorch/NumPy training and neural evaluation) and
@@ -60,6 +60,7 @@ python -m examples.run_pipeline --config configs/pipelines/progressive_training.
 | Topic | Authoritative guide |
 | --- | --- |
 | Commands, arguments, JSON/log/CSV paths | [Command reference](docs/command_reference.md) |
+| Running the tests: full suite, single modules, coverage map, CI, platform notes | [Testing](docs/command_reference.md#testing) |
 | JSON-defined multi-stage experiments, checkpoint chaining and resume | [Experiment pipelines](docs/experiment_pipelines.md) |
 | Original play-only PPO and version-1 reproduction | [Legacy PPO](docs/ppo_training.md) |
 | Independently train/freeze bidding, trump and play; composed/historical opponents | [Multi-phase PPO](docs/multiphase_selfplay.md) |
@@ -203,12 +204,38 @@ See [encoding and collection](docs/encoding.md) for deserialization, validation,
 feature layouts and privacy; [action compatibility](docs/action-space.md) owns
 ID mappings and old-log migration.
 
+## Testing
+
+Tests are standard-library `unittest` modules in `tests/`, run from the repository
+root:
+
+```bash
+python -m unittest discover -s tests -v                       # full suite
+python -m unittest tests.test_belief -v                       # one module
+python -m unittest tests.test_belief.SimulationTests -v       # one test class (or Class.test_name)
+python -m unittest discover -s tests -p "test_oracle*.py" -v  # modules matching a pattern
+git diff --check                                              # whitespace check before review
+```
+
+- **Optional extras.** Tests that need PyTorch (`.[rl]`) or OpenSpiel
+  (`.[openspiel]`) skip themselves when the extra is missing. Check the skip
+  count in the summary.
+- **Runtime.** With `.[rl]` installed, the full suite runs about 390 tests in
+  roughly 8 minutes.
+- **Windows.** Four results fail for platform reasons: one CPU-quota test and
+  three subtests that build directory names containing `:`. They are not
+  regressions.
+
+The [testing reference](docs/command_reference.md#testing) is the canonical list.
+It has a quick 12-second core check, which module covers which area, the CI jobs
+and the details of the platform failures.
+
 ## Development
 
-Read [AGENTS.md](AGENTS.md) before contributing. Tests use standard-library
-`unittest`; optional RL/OpenSpiel tests skip if their dependencies are absent.
-GitHub Actions checks core and optional integrations. Run `git diff --check`
-before review, and preserve seeded behavior when refactoring research code.
+Read [AGENTS.md](AGENTS.md) before contributing. GitHub Actions
+(`.github/workflows/tests.yml`) runs the suite on every push and pull request,
+for the core package, OpenSpiel and PyTorch configurations. Preserve seeded
+behavior when refactoring research code.
 
 ## License
 

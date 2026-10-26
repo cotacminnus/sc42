@@ -11,6 +11,7 @@ page owns *how to run things*.
 ## Contents
 
 - [Setup](#setup)
+- [Testing](#testing) — full suite, single modules and tests, which tests cover what, CI, known platform failures
 - [Command index](#command-index)
 - [Shared conventions](#shared-conventions) — duplicate deals, common flags, policy variants, outputs
 - [Console game](#console-game) — `texas42`, self-play examples
@@ -30,8 +31,86 @@ page owns *how to run things*.
 python -m pip install -e .               # core package (no ML required)
 python -m pip install -e '.[rl]'         # PPO training and neural evaluation
 python -m pip install -e '.[openspiel]'  # optional OpenSpiel adapter
-python -m unittest discover -s tests -v  # verify the checkout
+python -m unittest discover -s tests -v  # verify the checkout (see Testing below)
 ```
+
+On Windows PowerShell, quote extras with double quotes: `python -m pip install -e ".[rl]"`.
+
+## Testing
+
+All tests are standard-library `unittest` modules in `tests/`, deterministic and
+seeded, run from the repository root. There is no separate test runner: these
+commands are the whole interface, and CI uses the same ones.
+
+### Commands
+
+| Goal | Command |
+| --- | --- |
+| Full suite | `python -m unittest discover -s tests -v` |
+| Full suite, summary only | `python -m unittest discover -s tests` |
+| Quick core check (engine, heuristic, arena, beliefs; about 12 s) | `python -m unittest tests.test_game tests.test_actions tests.test_validation tests.test_selfplay tests.test_encoding tests.test_simpleheuristic tests.test_arena tests.test_belief` |
+| One module | `python -m unittest tests.test_search_training -v` |
+| One test class or test | `python -m unittest tests.test_search_training.SearchTrainingTests.test_cli_smoke -v` |
+| A group of modules by file pattern | `python -m unittest discover -s tests -p "test_oracle*.py" -v` |
+| Stop at the first failure | add `-f` (for example `python -m unittest discover -s tests -f`) |
+| Whitespace check before review | `git diff --check` |
+
+**Optional dependencies.** Tests that need PyTorch (`.[rl]`) or OpenSpiel
+(`.[openspiel]`) skip themselves when the package is absent, and the summary
+reports them as skipped. Install the extra to run them.
+
+- **CPU-only PyTorch, as CI installs it:**
+  `python -m pip install "torch>=2.3" --index-url https://download.pytorch.org/whl/cpu`,
+  then `python -m pip install -e ".[rl]"`.
+- **Before trusting a full run,** check its skip count: an absent extra silently
+  removes whole groups.
+
+**Expected runtime.** With `.[rl]` installed and OpenSpiel absent, the full suite
+is about 390 tests (11 skipped) in 7.5–8 minutes on the development machine (20
+logical CPUs, Windows, otherwise idle). Running training or evaluation jobs at the
+same time can double or triple that.
+
+### What each module covers
+
+| Area | Modules | Needs |
+| --- | --- | --- |
+| Engine, rules, actions, observations | `test_game`, `test_actions`, `test_validation`, `test_episodes`, `test_selfplay`, `test_encoding`, `test_training_data`, `test_compatibility`, `test_bid_origins`, `test_bid_preferences`, `test_contract_timing` | — |
+| Heuristic and baseline agents | `test_agents`, `test_simpleheuristic`, `test_policy_ablation` | — |
+| Arena, statistics, parallel execution | `test_arena`, `test_bootstrap`, `test_parallel`, `test_counterfactual_bidding` | — |
+| Console and experiment pipelines | `test_cli`, `test_experiment_pipeline` | pipelines: `rl` |
+| Endgame oracle | `test_oracle`, `test_oracle_optimizations`, `test_oracle_parallel`, `test_oracle_points`, `test_oracle_positions` ([oracle tests](endgame_oracle.md)) | — |
+| Beliefs and Monte Carlo search | `test_belief`, `test_pimc_agent`, `test_model_guided_pimc` | model-guided: `rl` |
+| PPO models, buffers, legacy trainer | `test_ppo_model`, `test_ppo_buffer`, `test_ppo_agent`, `test_ppo_training`, `test_ppo_opponents`, `test_parallel_ppo` | `rl` |
+| Multi-phase self-play training | `test_ppo_multiphase`, `test_centralized_critic`, `test_policy_only_ppo`, `test_scratch_selfplay`, `test_paired_selfplay`, `test_search_training`, `test_evaluation_performance` | `rl` |
+| Phase-composable evaluation | `test_phase_composition` | `rl` |
+| OpenSpiel adapter | `test_openspiel` ([OpenSpiel](openspiel.md)) | `openspiel` |
+
+**After a change,** run the modules of the area you touched first (fast feedback),
+then the full suite before committing. AGENTS.md lists the required test kinds
+for evaluation and training changes.
+
+### Continuous integration
+
+`.github/workflows/tests.yml` runs on every push and pull request (Ubuntu) in
+three configurations:
+
+| Job | Python | Installs | Command |
+| --- | --- | --- | --- |
+| Core | 3.11 | `.` | `python -m unittest discover -s tests -v` |
+| OpenSpiel | 3.13 | `.[openspiel]` (and checks `import pyspiel`) | same |
+| PPO | 3.11 | CPU PyTorch, then `.[rl]` | same |
+
+### Known platform-specific failures
+
+On Windows, four results fail for platform reasons. They fail on `main` too and
+are not regressions:
+
+| Test | Reason |
+| --- | --- |
+| `test_parallel.WorkerTests.test_quota_and_no_ml_imports` | Simulates a Linux cgroup CPU quota by patching reads of `/sys/fs/cgroup/cpu.max`. On Windows that path renders with backslashes, so the quota is never seen and `available_cpus()` returns 8 instead of 2. |
+| `test_scratch_selfplay.ScratchTests.test_invalid_scratch_configurations` (3 subtests) | Builds a log-directory name from the flags. Names containing `:` (`anchor:1`, `HHH:1,HHH:1`, or a `C:\…` path) are rejected by Windows before the expected validation error. |
+
+Any other failure is a real one.
 
 ## Command index
 
