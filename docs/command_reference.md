@@ -1743,6 +1743,8 @@ strengths are in the [agent catalogue](phase_composable_evaluation.md#agent-cata
 | Shared (bid+play) model | `--agent-a-checkpoint runs/study-shared/checkpoints/best.pt --agent-a-bid neural --agent-a-play neural` |
 | Paired pair | `--agent-a-checkpoint runs/study-paired/checkpoints/partner-1/best.pt --agent-a-partner-checkpoint runs/study-paired/checkpoints/partner-2/best.pt --agent-a-bid neural --agent-a-play neural` |
 | Model-guided PIMC | `--agent-a-trump pimc --agent-a-play pimc --agent-a-pimc-model runs/study-shared/checkpoints/best.pt` |
+| Distilled pilot (round 2) | `--agent-a-checkpoint runs/model-guided/pilot/round2/distilled-c2.pt --agent-a-bid neural --agent-a-play neural` |
+| Search-trained model (P5) | `--agent-a-checkpoint runs/search-p5/search-balanced/snapshots/policy-000065536.pt --agent-a-bid neural --agent-a-play neural` |
 
 **One comparison: the paired pair against CHH.**
 
@@ -1770,6 +1772,7 @@ one-seed study ([results](multiphase_selfplay.md#one-seed-study-base-shared-and-
 | --- | --- |
 | `configs/pipelines/study_comparisons.json` | Shared and Paired each against HHH, HHR, HRR, CHH, CRR and RRR, then Paired against Shared: 13 steps, 2,048 deals |
 | `configs/pipelines/study_round_robin.json` | Every pair of Base, Shared, Paired, RRR, HHH and plain PIMC: 15 steps, 1,024 deals. The PIMC steps take the longest. |
+| `configs/pipelines/all_agents_round_robin.json` | **Every currently functional agent** against every other once: the 6 heuristic/random variants, plain and model-guided PIMC, Base, Shared, Paired, the round-2 distilled pilot and the P5 search-trained model. 13 agents, 78 steps at smoke scale (64 deals, about 1 hour). For conclusions, copy it and raise `deals` to 1,024 (roughly 10+ hours). |
 
 ```bash
 python -m examples.run_pipeline --config configs/pipelines/study_comparisons.json --dry-run  # check paths first

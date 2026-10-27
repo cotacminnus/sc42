@@ -1,0 +1,1249 @@
+{
+  "schema_version": 1,
+  "name": "all-agents-round-robin-quick-v1",
+  "description": "Every currently functional agent against every other once (13 agents, 78 comparisons) at smoke scale: 64 duplicate deals per comparison (seed 20261201), 16 samples for every PIMC agent. Intervals are wide at this size; for conclusions copy this file, raise \"deals\" to 1024 and change name and output_root (roughly 10+ hours, mostly the model-guided PIMC comparisons). Needs the study, pilot and P5 checkpoints under runs/. Not included: model-guided PIMC with a value leaf (measured weaker, and --pimc-leaf is a run-level setting, so it cannot meet full-rollout model-guided PIMC in one comparison).",
+  "output_root": "runs/pipelines/all-agents-round-robin-quick-v1",
+  "steps": [
+    {
+      "id": "hhh-vs-hhr",
+      "command": "evaluate_agent_vs_agent",
+      "description": "HHH (Heuristic V1) vs HHR (heuristic bid/trump, random play)",
+      "args": {
+        "agent-b-play": "random",
+        "deals": 64,
+        "seed": 20261201,
+        "bootstrap-samples": 2000,
+        "threads": 0
+      }
+    },
+    {
+      "id": "hhh-vs-hrr",
+      "command": "evaluate_agent_vs_agent",
+      "description": "HHH (Heuristic V1) vs HRR (heuristic bid, random trump/play)",
+      "args": {
+        "agent-b-trump": "random",
+        "agent-b-play": "random",
+        "deals": 64,
+        "seed": 20261201,
+        "bootstrap-samples": 2000,
+        "threads": 0
+      }
+    },
+    {
+      "id": "hhh-vs-chh",
+      "command": "evaluate_agent_vs_agent",
+      "description": "HHH (Heuristic V1) vs CHH (conservative bid, heuristic trump/play)",
+      "args": {
+        "agent-b-bid": "conservative",
+        "deals": 64,
+        "seed": 20261201,
+        "bootstrap-samples": 2000,
+        "threads": 0
+      }
+    },
+    {
+      "id": "hhh-vs-crr",
+      "command": "evaluate_agent_vs_agent",
+      "description": "HHH (Heuristic V1) vs CRR (conservative bid, random trump/play)",
+      "args": {
+        "agent-b-bid": "conservative",
+        "agent-b-trump": "random",
+        "agent-b-play": "random",
+        "deals": 64,
+        "seed": 20261201,
+        "bootstrap-samples": 2000,
+        "threads": 0
+      }
+    },
+    {
+      "id": "hhh-vs-rrr",
+      "command": "evaluate_agent_vs_agent",
+      "description": "HHH (Heuristic V1) vs RRR (uniform random)",
+      "args": {
+        "agent-b-bid": "random",
+        "agent-b-trump": "random",
+        "agent-b-play": "random",
+        "deals": 64,
+        "seed": 20261201,
+        "bootstrap-samples": 2000,
+        "threads": 0
+      }
+    },
+    {
+      "id": "hhh-vs-pimc",
+      "command": "evaluate_agent_vs_agent",
+      "description": "HHH (Heuristic V1) vs Plain PIMC (heuristic bidding, HHH rollouts)",
+      "args": {
+        "agent-b-trump": "pimc",
+        "agent-b-play": "pimc",
+        "deals": 64,
+        "seed": 20261201,
+        "bootstrap-samples": 2000,
+        "threads": 0,
+        "pimc-samples": 16
+      }
+    },
+    {
+      "id": "hhh-vs-guided",
+      "command": "evaluate_agent_vs_agent",
+      "description": "HHH (Heuristic V1) vs Model-guided PIMC (shared model plays the rollouts; full rollouts)",
+      "args": {
+        "agent-b-trump": "pimc",
+        "agent-b-play": "pimc",
+        "agent-b-pimc-model": "runs/study-shared/checkpoints/best.pt",
+        "deals": 64,
+        "seed": 20261201,
+        "bootstrap-samples": 2000,
+        "threads": 0,
+        "pimc-samples": 16
+      }
+    },
+    {
+      "id": "hhh-vs-base",
+      "command": "evaluate_agent_vs_agent",
+      "description": "HHH (Heuristic V1) vs Base model (play-only; heuristic bid and trump)",
+      "args": {
+        "agent-b-play": "neural",
+        "agent-b-checkpoint": "runs/study-play-v1/checkpoints/best.pt",
+        "deals": 64,
+        "seed": 20261201,
+        "bootstrap-samples": 2000,
+        "threads": 0
+      }
+    },
+    {
+      "id": "hhh-vs-shared",
+      "command": "evaluate_agent_vs_agent",
+      "description": "HHH (Heuristic V1) vs Shared model (neural bid and play)",
+      "args": {
+        "agent-b-bid": "neural",
+        "agent-b-play": "neural",
+        "agent-b-checkpoint": "runs/study-shared/checkpoints/best.pt",
+        "deals": 64,
+        "seed": 20261201,
+        "bootstrap-samples": 2000,
+        "threads": 0
+      }
+    },
+    {
+      "id": "hhh-vs-paired",
+      "command": "evaluate_agent_vs_agent",
+      "description": "HHH (Heuristic V1) vs Paired pair (partner 1 seats 0/1, partner 2 seats 2/3)",
+      "args": {
+        "agent-b-bid": "neural",
+        "agent-b-play": "neural",
+        "agent-b-checkpoint": "runs/study-paired/checkpoints/partner-1/best.pt",
+        "agent-b-partner-checkpoint": "runs/study-paired/checkpoints/partner-2/best.pt",
+        "deals": 64,
+        "seed": 20261201,
+        "bootstrap-samples": 2000,
+        "threads": 0
+      }
+    },
+    {
+      "id": "hhh-vs-distilled",
+      "command": "evaluate_agent_vs_agent",
+      "description": "HHH (Heuristic V1) vs Distilled pilot, round 2 (play fine-tuned toward search)",
+      "args": {
+        "agent-b-bid": "neural",
+        "agent-b-play": "neural",
+        "agent-b-checkpoint": "runs/model-guided/pilot/round2/distilled-c2.pt",
+        "deals": 64,
+        "seed": 20261201,
+        "bootstrap-samples": 2000,
+        "threads": 0
+      }
+    },
+    {
+      "id": "hhh-vs-search-trained",
+      "command": "evaluate_agent_vs_agent",
+      "description": "HHH (Heuristic V1) vs Search-trained model (P5: 1% of play decisions searched in training)",
+      "args": {
+        "agent-b-bid": "neural",
+        "agent-b-play": "neural",
+        "agent-b-checkpoint": "runs/search-p5/search-balanced/snapshots/policy-000065536.pt",
+        "deals": 64,
+        "seed": 20261201,
+        "bootstrap-samples": 2000,
+        "threads": 0
+      }
+    },
+    {
+      "id": "hhr-vs-hrr",
+      "command": "evaluate_agent_vs_agent",
+      "description": "HHR (heuristic bid/trump, random play) vs HRR (heuristic bid, random trump/play)",
+      "args": {
+        "agent-a-play": "random",
+        "agent-b-trump": "random",
+        "agent-b-play": "random",
+        "deals": 64,
+        "seed": 20261201,
+        "bootstrap-samples": 2000,
+        "threads": 0
+      }
+    },
+    {
+      "id": "hhr-vs-chh",
+      "command": "evaluate_agent_vs_agent",
+      "description": "HHR (heuristic bid/trump, random play) vs CHH (conservative bid, heuristic trump/play)",
+      "args": {
+        "agent-a-play": "random",
+        "agent-b-bid": "conservative",
+        "deals": 64,
+        "seed": 20261201,
+        "bootstrap-samples": 2000,
+        "threads": 0
+      }
+    },
+    {
+      "id": "hhr-vs-crr",
+      "command": "evaluate_agent_vs_agent",
+      "description": "HHR (heuristic bid/trump, random play) vs CRR (conservative bid, random trump/play)",
+      "args": {
+        "agent-a-play": "random",
+        "agent-b-bid": "conservative",
+        "agent-b-trump": "random",
+        "agent-b-play": "random",
+        "deals": 64,
+        "seed": 20261201,
+        "bootstrap-samples": 2000,
+        "threads": 0
+      }
+    },
+    {
+      "id": "hhr-vs-rrr",
+      "command": "evaluate_agent_vs_agent",
+      "description": "HHR (heuristic bid/trump, random play) vs RRR (uniform random)",
+      "args": {
+        "agent-a-play": "random",
+        "agent-b-bid": "random",
+        "agent-b-trump": "random",
+        "agent-b-play": "random",
+        "deals": 64,
+        "seed": 20261201,
+        "bootstrap-samples": 2000,
+        "threads": 0
+      }
+    },
+    {
+      "id": "hhr-vs-pimc",
+      "command": "evaluate_agent_vs_agent",
+      "description": "HHR (heuristic bid/trump, random play) vs Plain PIMC (heuristic bidding, HHH rollouts)",
+      "args": {
+        "agent-a-play": "random",
+        "agent-b-trump": "pimc",
+        "agent-b-play": "pimc",
+        "deals": 64,
+        "seed": 20261201,
+        "bootstrap-samples": 2000,
+        "threads": 0,
+        "pimc-samples": 16
+      }
+    },
+    {
+      "id": "hhr-vs-guided",
+      "command": "evaluate_agent_vs_agent",
+      "description": "HHR (heuristic bid/trump, random play) vs Model-guided PIMC (shared model plays the rollouts; full rollouts)",
+      "args": {
+        "agent-a-play": "random",
+        "agent-b-trump": "pimc",
+        "agent-b-play": "pimc",
+        "agent-b-pimc-model": "runs/study-shared/checkpoints/best.pt",
+        "deals": 64,
+        "seed": 20261201,
+        "bootstrap-samples": 2000,
+        "threads": 0,
+        "pimc-samples": 16
+      }
+    },
+    {
+      "id": "hhr-vs-base",
+      "command": "evaluate_agent_vs_agent",
+      "description": "HHR (heuristic bid/trump, random play) vs Base model (play-only; heuristic bid and trump)",
+      "args": {
+        "agent-a-play": "random",
+        "agent-b-play": "neural",
+        "agent-b-checkpoint": "runs/study-play-v1/checkpoints/best.pt",
+        "deals": 64,
+        "seed": 20261201,
+        "bootstrap-samples": 2000,
+        "threads": 0
+      }
+    },
+    {
+      "id": "hhr-vs-shared",
+      "command": "evaluate_agent_vs_agent",
+      "description": "HHR (heuristic bid/trump, random play) vs Shared model (neural bid and play)",
+      "args": {
+        "agent-a-play": "random",
+        "agent-b-bid": "neural",
+        "agent-b-play": "neural",
+        "agent-b-checkpoint": "runs/study-shared/checkpoints/best.pt",
+        "deals": 64,
+        "seed": 20261201,
+        "bootstrap-samples": 2000,
+        "threads": 0
+      }
+    },
+    {
+      "id": "hhr-vs-paired",
+      "command": "evaluate_agent_vs_agent",
+      "description": "HHR (heuristic bid/trump, random play) vs Paired pair (partner 1 seats 0/1, partner 2 seats 2/3)",
+      "args": {
+        "agent-a-play": "random",
+        "agent-b-bid": "neural",
+        "agent-b-play": "neural",
+        "agent-b-checkpoint": "runs/study-paired/checkpoints/partner-1/best.pt",
+        "agent-b-partner-checkpoint": "runs/study-paired/checkpoints/partner-2/best.pt",
+        "deals": 64,
+        "seed": 20261201,
+        "bootstrap-samples": 2000,
+        "threads": 0
+      }
+    },
+    {
+      "id": "hhr-vs-distilled",
+      "command": "evaluate_agent_vs_agent",
+      "description": "HHR (heuristic bid/trump, random play) vs Distilled pilot, round 2 (play fine-tuned toward search)",
+      "args": {
+        "agent-a-play": "random",
+        "agent-b-bid": "neural",
+        "agent-b-play": "neural",
+        "agent-b-checkpoint": "runs/model-guided/pilot/round2/distilled-c2.pt",
+        "deals": 64,
+        "seed": 20261201,
+        "bootstrap-samples": 2000,
+        "threads": 0
+      }
+    },
+    {
+      "id": "hhr-vs-search-trained",
+      "command": "evaluate_agent_vs_agent",
+      "description": "HHR (heuristic bid/trump, random play) vs Search-trained model (P5: 1% of play decisions searched in training)",
+      "args": {
+        "agent-a-play": "random",
+        "agent-b-bid": "neural",
+        "agent-b-play": "neural",
+        "agent-b-checkpoint": "runs/search-p5/search-balanced/snapshots/policy-000065536.pt",
+        "deals": 64,
+        "seed": 20261201,
+        "bootstrap-samples": 2000,
+        "threads": 0
+      }
+    },
+    {
+      "id": "hrr-vs-chh",
+      "command": "evaluate_agent_vs_agent",
+      "description": "HRR (heuristic bid, random trump/play) vs CHH (conservative bid, heuristic trump/play)",
+      "args": {
+        "agent-a-trump": "random",
+        "agent-a-play": "random",
+        "agent-b-bid": "conservative",
+        "deals": 64,
+        "seed": 20261201,
+        "bootstrap-samples": 2000,
+        "threads": 0
+      }
+    },
+    {
+      "id": "hrr-vs-crr",
+      "command": "evaluate_agent_vs_agent",
+      "description": "HRR (heuristic bid, random trump/play) vs CRR (conservative bid, random trump/play)",
+      "args": {
+        "agent-a-trump": "random",
+        "agent-a-play": "random",
+        "agent-b-bid": "conservative",
+        "agent-b-trump": "random",
+        "agent-b-play": "random",
+        "deals": 64,
+        "seed": 20261201,
+        "bootstrap-samples": 2000,
+        "threads": 0
+      }
+    },
+    {
+      "id": "hrr-vs-rrr",
+      "command": "evaluate_agent_vs_agent",
+      "description": "HRR (heuristic bid, random trump/play) vs RRR (uniform random)",
+      "args": {
+        "agent-a-trump": "random",
+        "agent-a-play": "random",
+        "agent-b-bid": "random",
+        "agent-b-trump": "random",
+        "agent-b-play": "random",
+        "deals": 64,
+        "seed": 20261201,
+        "bootstrap-samples": 2000,
+        "threads": 0
+      }
+    },
+    {
+      "id": "hrr-vs-pimc",
+      "command": "evaluate_agent_vs_agent",
+      "description": "HRR (heuristic bid, random trump/play) vs Plain PIMC (heuristic bidding, HHH rollouts)",
+      "args": {
+        "agent-a-trump": "random",
+        "agent-a-play": "random",
+        "agent-b-trump": "pimc",
+        "agent-b-play": "pimc",
+        "deals": 64,
+        "seed": 20261201,
+        "bootstrap-samples": 2000,
+        "threads": 0,
+        "pimc-samples": 16
+      }
+    },
+    {
+      "id": "hrr-vs-guided",
+      "command": "evaluate_agent_vs_agent",
+      "description": "HRR (heuristic bid, random trump/play) vs Model-guided PIMC (shared model plays the rollouts; full rollouts)",
+      "args": {
+        "agent-a-trump": "random",
+        "agent-a-play": "random",
+        "agent-b-trump": "pimc",
+        "agent-b-play": "pimc",
+        "agent-b-pimc-model": "runs/study-shared/checkpoints/best.pt",
+        "deals": 64,
+        "seed": 20261201,
+        "bootstrap-samples": 2000,
+        "threads": 0,
+        "pimc-samples": 16
+      }
+    },
+    {
+      "id": "hrr-vs-base",
+      "command": "evaluate_agent_vs_agent",
+      "description": "HRR (heuristic bid, random trump/play) vs Base model (play-only; heuristic bid and trump)",
+      "args": {
+        "agent-a-trump": "random",
+        "agent-a-play": "random",
+        "agent-b-play": "neural",
+        "agent-b-checkpoint": "runs/study-play-v1/checkpoints/best.pt",
+        "deals": 64,
+        "seed": 20261201,
+        "bootstrap-samples": 2000,
+        "threads": 0
+      }
+    },
+    {
+      "id": "hrr-vs-shared",
+      "command": "evaluate_agent_vs_agent",
+      "description": "HRR (heuristic bid, random trump/play) vs Shared model (neural bid and play)",
+      "args": {
+        "agent-a-trump": "random",
+        "agent-a-play": "random",
+        "agent-b-bid": "neural",
+        "agent-b-play": "neural",
+        "agent-b-checkpoint": "runs/study-shared/checkpoints/best.pt",
+        "deals": 64,
+        "seed": 20261201,
+        "bootstrap-samples": 2000,
+        "threads": 0
+      }
+    },
+    {
+      "id": "hrr-vs-paired",
+      "command": "evaluate_agent_vs_agent",
+      "description": "HRR (heuristic bid, random trump/play) vs Paired pair (partner 1 seats 0/1, partner 2 seats 2/3)",
+      "args": {
+        "agent-a-trump": "random",
+        "agent-a-play": "random",
+        "agent-b-bid": "neural",
+        "agent-b-play": "neural",
+        "agent-b-checkpoint": "runs/study-paired/checkpoints/partner-1/best.pt",
+        "agent-b-partner-checkpoint": "runs/study-paired/checkpoints/partner-2/best.pt",
+        "deals": 64,
+        "seed": 20261201,
+        "bootstrap-samples": 2000,
+        "threads": 0
+      }
+    },
+    {
+      "id": "hrr-vs-distilled",
+      "command": "evaluate_agent_vs_agent",
+      "description": "HRR (heuristic bid, random trump/play) vs Distilled pilot, round 2 (play fine-tuned toward search)",
+      "args": {
+        "agent-a-trump": "random",
+        "agent-a-play": "random",
+        "agent-b-bid": "neural",
+        "agent-b-play": "neural",
+        "agent-b-checkpoint": "runs/model-guided/pilot/round2/distilled-c2.pt",
+        "deals": 64,
+        "seed": 20261201,
+        "bootstrap-samples": 2000,
+        "threads": 0
+      }
+    },
+    {
+      "id": "hrr-vs-search-trained",
+      "command": "evaluate_agent_vs_agent",
+      "description": "HRR (heuristic bid, random trump/play) vs Search-trained model (P5: 1% of play decisions searched in training)",
+      "args": {
+        "agent-a-trump": "random",
+        "agent-a-play": "random",
+        "agent-b-bid": "neural",
+        "agent-b-play": "neural",
+        "agent-b-checkpoint": "runs/search-p5/search-balanced/snapshots/policy-000065536.pt",
+        "deals": 64,
+        "seed": 20261201,
+        "bootstrap-samples": 2000,
+        "threads": 0
+      }
+    },
+    {
+      "id": "chh-vs-crr",
+      "command": "evaluate_agent_vs_agent",
+      "description": "CHH (conservative bid, heuristic trump/play) vs CRR (conservative bid, random trump/play)",
+      "args": {
+        "agent-a-bid": "conservative",
+        "agent-b-bid": "conservative",
+        "agent-b-trump": "random",
+        "agent-b-play": "random",
+        "deals": 64,
+        "seed": 20261201,
+        "bootstrap-samples": 2000,
+        "threads": 0
+      }
+    },
+    {
+      "id": "chh-vs-rrr",
+      "command": "evaluate_agent_vs_agent",
+      "description": "CHH (conservative bid, heuristic trump/play) vs RRR (uniform random)",
+      "args": {
+        "agent-a-bid": "conservative",
+        "agent-b-bid": "random",
+        "agent-b-trump": "random",
+        "agent-b-play": "random",
+        "deals": 64,
+        "seed": 20261201,
+        "bootstrap-samples": 2000,
+        "threads": 0
+      }
+    },
+    {
+      "id": "chh-vs-pimc",
+      "command": "evaluate_agent_vs_agent",
+      "description": "CHH (conservative bid, heuristic trump/play) vs Plain PIMC (heuristic bidding, HHH rollouts)",
+      "args": {
+        "agent-a-bid": "conservative",
+        "agent-b-trump": "pimc",
+        "agent-b-play": "pimc",
+        "deals": 64,
+        "seed": 20261201,
+        "bootstrap-samples": 2000,
+        "threads": 0,
+        "pimc-samples": 16
+      }
+    },
+    {
+      "id": "chh-vs-guided",
+      "command": "evaluate_agent_vs_agent",
+      "description": "CHH (conservative bid, heuristic trump/play) vs Model-guided PIMC (shared model plays the rollouts; full rollouts)",
+      "args": {
+        "agent-a-bid": "conservative",
+        "agent-b-trump": "pimc",
+        "agent-b-play": "pimc",
+        "agent-b-pimc-model": "runs/study-shared/checkpoints/best.pt",
+        "deals": 64,
+        "seed": 20261201,
+        "bootstrap-samples": 2000,
+        "threads": 0,
+        "pimc-samples": 16
+      }
+    },
+    {
+      "id": "chh-vs-base",
+      "command": "evaluate_agent_vs_agent",
+      "description": "CHH (conservative bid, heuristic trump/play) vs Base model (play-only; heuristic bid and trump)",
+      "args": {
+        "agent-a-bid": "conservative",
+        "agent-b-play": "neural",
+        "agent-b-checkpoint": "runs/study-play-v1/checkpoints/best.pt",
+        "deals": 64,
+        "seed": 20261201,
+        "bootstrap-samples": 2000,
+        "threads": 0
+      }
+    },
+    {
+      "id": "chh-vs-shared",
+      "command": "evaluate_agent_vs_agent",
+      "description": "CHH (conservative bid, heuristic trump/play) vs Shared model (neural bid and play)",
+      "args": {
+        "agent-a-bid": "conservative",
+        "agent-b-bid": "neural",
+        "agent-b-play": "neural",
+        "agent-b-checkpoint": "runs/study-shared/checkpoints/best.pt",
+        "deals": 64,
+        "seed": 20261201,
+        "bootstrap-samples": 2000,
+        "threads": 0
+      }
+    },
+    {
+      "id": "chh-vs-paired",
+      "command": "evaluate_agent_vs_agent",
+      "description": "CHH (conservative bid, heuristic trump/play) vs Paired pair (partner 1 seats 0/1, partner 2 seats 2/3)",
+      "args": {
+        "agent-a-bid": "conservative",
+        "agent-b-bid": "neural",
+        "agent-b-play": "neural",
+        "agent-b-checkpoint": "runs/study-paired/checkpoints/partner-1/best.pt",
+        "agent-b-partner-checkpoint": "runs/study-paired/checkpoints/partner-2/best.pt",
+        "deals": 64,
+        "seed": 20261201,
+        "bootstrap-samples": 2000,
+        "threads": 0
+      }
+    },
+    {
+      "id": "chh-vs-distilled",
+      "command": "evaluate_agent_vs_agent",
+      "description": "CHH (conservative bid, heuristic trump/play) vs Distilled pilot, round 2 (play fine-tuned toward search)",
+      "args": {
+        "agent-a-bid": "conservative",
+        "agent-b-bid": "neural",
+        "agent-b-play": "neural",
+        "agent-b-checkpoint": "runs/model-guided/pilot/round2/distilled-c2.pt",
+        "deals": 64,
+        "seed": 20261201,
+        "bootstrap-samples": 2000,
+        "threads": 0
+      }
+    },
+    {
+      "id": "chh-vs-search-trained",
+      "command": "evaluate_agent_vs_agent",
+      "description": "CHH (conservative bid, heuristic trump/play) vs Search-trained model (P5: 1% of play decisions searched in training)",
+      "args": {
+        "agent-a-bid": "conservative",
+        "agent-b-bid": "neural",
+        "agent-b-play": "neural",
+        "agent-b-checkpoint": "runs/search-p5/search-balanced/snapshots/policy-000065536.pt",
+        "deals": 64,
+        "seed": 20261201,
+        "bootstrap-samples": 2000,
+        "threads": 0
+      }
+    },
+    {
+      "id": "crr-vs-rrr",
+      "command": "evaluate_agent_vs_agent",
+      "description": "CRR (conservative bid, random trump/play) vs RRR (uniform random)",
+      "args": {
+        "agent-a-bid": "conservative",
+        "agent-a-trump": "random",
+        "agent-a-play": "random",
+        "agent-b-bid": "random",
+        "agent-b-trump": "random",
+        "agent-b-play": "random",
+        "deals": 64,
+        "seed": 20261201,
+        "bootstrap-samples": 2000,
+        "threads": 0
+      }
+    },
+    {
+      "id": "crr-vs-pimc",
+      "command": "evaluate_agent_vs_agent",
+      "description": "CRR (conservative bid, random trump/play) vs Plain PIMC (heuristic bidding, HHH rollouts)",
+      "args": {
+        "agent-a-bid": "conservative",
+        "agent-a-trump": "random",
+        "agent-a-play": "random",
+        "agent-b-trump": "pimc",
+        "agent-b-play": "pimc",
+        "deals": 64,
+        "seed": 20261201,
+        "bootstrap-samples": 2000,
+        "threads": 0,
+        "pimc-samples": 16
+      }
+    },
+    {
+      "id": "crr-vs-guided",
+      "command": "evaluate_agent_vs_agent",
+      "description": "CRR (conservative bid, random trump/play) vs Model-guided PIMC (shared model plays the rollouts; full rollouts)",
+      "args": {
+        "agent-a-bid": "conservative",
+        "agent-a-trump": "random",
+        "agent-a-play": "random",
+        "agent-b-trump": "pimc",
+        "agent-b-play": "pimc",
+        "agent-b-pimc-model": "runs/study-shared/checkpoints/best.pt",
+        "deals": 64,
+        "seed": 20261201,
+        "bootstrap-samples": 2000,
+        "threads": 0,
+        "pimc-samples": 16
+      }
+    },
+    {
+      "id": "crr-vs-base",
+      "command": "evaluate_agent_vs_agent",
+      "description": "CRR (conservative bid, random trump/play) vs Base model (play-only; heuristic bid and trump)",
+      "args": {
+        "agent-a-bid": "conservative",
+        "agent-a-trump": "random",
+        "agent-a-play": "random",
+        "agent-b-play": "neural",
+        "agent-b-checkpoint": "runs/study-play-v1/checkpoints/best.pt",
+        "deals": 64,
+        "seed": 20261201,
+        "bootstrap-samples": 2000,
+        "threads": 0
+      }
+    },
+    {
+      "id": "crr-vs-shared",
+      "command": "evaluate_agent_vs_agent",
+      "description": "CRR (conservative bid, random trump/play) vs Shared model (neural bid and play)",
+      "args": {
+        "agent-a-bid": "conservative",
+        "agent-a-trump": "random",
+        "agent-a-play": "random",
+        "agent-b-bid": "neural",
+        "agent-b-play": "neural",
+        "agent-b-checkpoint": "runs/study-shared/checkpoints/best.pt",
+        "deals": 64,
+        "seed": 20261201,
+        "bootstrap-samples": 2000,
+        "threads": 0
+      }
+    },
+    {
+      "id": "crr-vs-paired",
+      "command": "evaluate_agent_vs_agent",
+      "description": "CRR (conservative bid, random trump/play) vs Paired pair (partner 1 seats 0/1, partner 2 seats 2/3)",
+      "args": {
+        "agent-a-bid": "conservative",
+        "agent-a-trump": "random",
+        "agent-a-play": "random",
+        "agent-b-bid": "neural",
+        "agent-b-play": "neural",
+        "agent-b-checkpoint": "runs/study-paired/checkpoints/partner-1/best.pt",
+        "agent-b-partner-checkpoint": "runs/study-paired/checkpoints/partner-2/best.pt",
+        "deals": 64,
+        "seed": 20261201,
+        "bootstrap-samples": 2000,
+        "threads": 0
+      }
+    },
+    {
+      "id": "crr-vs-distilled",
+      "command": "evaluate_agent_vs_agent",
+      "description": "CRR (conservative bid, random trump/play) vs Distilled pilot, round 2 (play fine-tuned toward search)",
+      "args": {
+        "agent-a-bid": "conservative",
+        "agent-a-trump": "random",
+        "agent-a-play": "random",
+        "agent-b-bid": "neural",
+        "agent-b-play": "neural",
+        "agent-b-checkpoint": "runs/model-guided/pilot/round2/distilled-c2.pt",
+        "deals": 64,
+        "seed": 20261201,
+        "bootstrap-samples": 2000,
+        "threads": 0
+      }
+    },
+    {
+      "id": "crr-vs-search-trained",
+      "command": "evaluate_agent_vs_agent",
+      "description": "CRR (conservative bid, random trump/play) vs Search-trained model (P5: 1% of play decisions searched in training)",
+      "args": {
+        "agent-a-bid": "conservative",
+        "agent-a-trump": "random",
+        "agent-a-play": "random",
+        "agent-b-bid": "neural",
+        "agent-b-play": "neural",
+        "agent-b-checkpoint": "runs/search-p5/search-balanced/snapshots/policy-000065536.pt",
+        "deals": 64,
+        "seed": 20261201,
+        "bootstrap-samples": 2000,
+        "threads": 0
+      }
+    },
+    {
+      "id": "rrr-vs-pimc",
+      "command": "evaluate_agent_vs_agent",
+      "description": "RRR (uniform random) vs Plain PIMC (heuristic bidding, HHH rollouts)",
+      "args": {
+        "agent-a-bid": "random",
+        "agent-a-trump": "random",
+        "agent-a-play": "random",
+        "agent-b-trump": "pimc",
+        "agent-b-play": "pimc",
+        "deals": 64,
+        "seed": 20261201,
+        "bootstrap-samples": 2000,
+        "threads": 0,
+        "pimc-samples": 16
+      }
+    },
+    {
+      "id": "rrr-vs-guided",
+      "command": "evaluate_agent_vs_agent",
+      "description": "RRR (uniform random) vs Model-guided PIMC (shared model plays the rollouts; full rollouts)",
+      "args": {
+        "agent-a-bid": "random",
+        "agent-a-trump": "random",
+        "agent-a-play": "random",
+        "agent-b-trump": "pimc",
+        "agent-b-play": "pimc",
+        "agent-b-pimc-model": "runs/study-shared/checkpoints/best.pt",
+        "deals": 64,
+        "seed": 20261201,
+        "bootstrap-samples": 2000,
+        "threads": 0,
+        "pimc-samples": 16
+      }
+    },
+    {
+      "id": "rrr-vs-base",
+      "command": "evaluate_agent_vs_agent",
+      "description": "RRR (uniform random) vs Base model (play-only; heuristic bid and trump)",
+      "args": {
+        "agent-a-bid": "random",
+        "agent-a-trump": "random",
+        "agent-a-play": "random",
+        "agent-b-play": "neural",
+        "agent-b-checkpoint": "runs/study-play-v1/checkpoints/best.pt",
+        "deals": 64,
+        "seed": 20261201,
+        "bootstrap-samples": 2000,
+        "threads": 0
+      }
+    },
+    {
+      "id": "rrr-vs-shared",
+      "command": "evaluate_agent_vs_agent",
+      "description": "RRR (uniform random) vs Shared model (neural bid and play)",
+      "args": {
+        "agent-a-bid": "random",
+        "agent-a-trump": "random",
+        "agent-a-play": "random",
+        "agent-b-bid": "neural",
+        "agent-b-play": "neural",
+        "agent-b-checkpoint": "runs/study-shared/checkpoints/best.pt",
+        "deals": 64,
+        "seed": 20261201,
+        "bootstrap-samples": 2000,
+        "threads": 0
+      }
+    },
+    {
+      "id": "rrr-vs-paired",
+      "command": "evaluate_agent_vs_agent",
+      "description": "RRR (uniform random) vs Paired pair (partner 1 seats 0/1, partner 2 seats 2/3)",
+      "args": {
+        "agent-a-bid": "random",
+        "agent-a-trump": "random",
+        "agent-a-play": "random",
+        "agent-b-bid": "neural",
+        "agent-b-play": "neural",
+        "agent-b-checkpoint": "runs/study-paired/checkpoints/partner-1/best.pt",
+        "agent-b-partner-checkpoint": "runs/study-paired/checkpoints/partner-2/best.pt",
+        "deals": 64,
+        "seed": 20261201,
+        "bootstrap-samples": 2000,
+        "threads": 0
+      }
+    },
+    {
+      "id": "rrr-vs-distilled",
+      "command": "evaluate_agent_vs_agent",
+      "description": "RRR (uniform random) vs Distilled pilot, round 2 (play fine-tuned toward search)",
+      "args": {
+        "agent-a-bid": "random",
+        "agent-a-trump": "random",
+        "agent-a-play": "random",
+        "agent-b-bid": "neural",
+        "agent-b-play": "neural",
+        "agent-b-checkpoint": "runs/model-guided/pilot/round2/distilled-c2.pt",
+        "deals": 64,
+        "seed": 20261201,
+        "bootstrap-samples": 2000,
+        "threads": 0
+      }
+    },
+    {
+      "id": "rrr-vs-search-trained",
+      "command": "evaluate_agent_vs_agent",
+      "description": "RRR (uniform random) vs Search-trained model (P5: 1% of play decisions searched in training)",
+      "args": {
+        "agent-a-bid": "random",
+        "agent-a-trump": "random",
+        "agent-a-play": "random",
+        "agent-b-bid": "neural",
+        "agent-b-play": "neural",
+        "agent-b-checkpoint": "runs/search-p5/search-balanced/snapshots/policy-000065536.pt",
+        "deals": 64,
+        "seed": 20261201,
+        "bootstrap-samples": 2000,
+        "threads": 0
+      }
+    },
+    {
+      "id": "pimc-vs-guided",
+      "command": "evaluate_agent_vs_agent",
+      "description": "Plain PIMC (heuristic bidding, HHH rollouts) vs Model-guided PIMC (shared model plays the rollouts; full rollouts)",
+      "args": {
+        "agent-a-trump": "pimc",
+        "agent-a-play": "pimc",
+        "agent-b-trump": "pimc",
+        "agent-b-play": "pimc",
+        "agent-b-pimc-model": "runs/study-shared/checkpoints/best.pt",
+        "deals": 64,
+        "seed": 20261201,
+        "bootstrap-samples": 2000,
+        "threads": 0,
+        "pimc-samples": 16
+      }
+    },
+    {
+      "id": "pimc-vs-base",
+      "command": "evaluate_agent_vs_agent",
+      "description": "Plain PIMC (heuristic bidding, HHH rollouts) vs Base model (play-only; heuristic bid and trump)",
+      "args": {
+        "agent-a-trump": "pimc",
+        "agent-a-play": "pimc",
+        "agent-b-play": "neural",
+        "agent-b-checkpoint": "runs/study-play-v1/checkpoints/best.pt",
+        "deals": 64,
+        "seed": 20261201,
+        "bootstrap-samples": 2000,
+        "threads": 0,
+        "pimc-samples": 16
+      }
+    },
+    {
+      "id": "pimc-vs-shared",
+      "command": "evaluate_agent_vs_agent",
+      "description": "Plain PIMC (heuristic bidding, HHH rollouts) vs Shared model (neural bid and play)",
+      "args": {
+        "agent-a-trump": "pimc",
+        "agent-a-play": "pimc",
+        "agent-b-bid": "neural",
+        "agent-b-play": "neural",
+        "agent-b-checkpoint": "runs/study-shared/checkpoints/best.pt",
+        "deals": 64,
+        "seed": 20261201,
+        "bootstrap-samples": 2000,
+        "threads": 0,
+        "pimc-samples": 16
+      }
+    },
+    {
+      "id": "pimc-vs-paired",
+      "command": "evaluate_agent_vs_agent",
+      "description": "Plain PIMC (heuristic bidding, HHH rollouts) vs Paired pair (partner 1 seats 0/1, partner 2 seats 2/3)",
+      "args": {
+        "agent-a-trump": "pimc",
+        "agent-a-play": "pimc",
+        "agent-b-bid": "neural",
+        "agent-b-play": "neural",
+        "agent-b-checkpoint": "runs/study-paired/checkpoints/partner-1/best.pt",
+        "agent-b-partner-checkpoint": "runs/study-paired/checkpoints/partner-2/best.pt",
+        "deals": 64,
+        "seed": 20261201,
+        "bootstrap-samples": 2000,
+        "threads": 0,
+        "pimc-samples": 16
+      }
+    },
+    {
+      "id": "pimc-vs-distilled",
+      "command": "evaluate_agent_vs_agent",
+      "description": "Plain PIMC (heuristic bidding, HHH rollouts) vs Distilled pilot, round 2 (play fine-tuned toward search)",
+      "args": {
+        "agent-a-trump": "pimc",
+        "agent-a-play": "pimc",
+        "agent-b-bid": "neural",
+        "agent-b-play": "neural",
+        "agent-b-checkpoint": "runs/model-guided/pilot/round2/distilled-c2.pt",
+        "deals": 64,
+        "seed": 20261201,
+        "bootstrap-samples": 2000,
+        "threads": 0,
+        "pimc-samples": 16
+      }
+    },
+    {
+      "id": "pimc-vs-search-trained",
+      "command": "evaluate_agent_vs_agent",
+      "description": "Plain PIMC (heuristic bidding, HHH rollouts) vs Search-trained model (P5: 1% of play decisions searched in training)",
+      "args": {
+        "agent-a-trump": "pimc",
+        "agent-a-play": "pimc",
+        "agent-b-bid": "neural",
+        "agent-b-play": "neural",
+        "agent-b-checkpoint": "runs/search-p5/search-balanced/snapshots/policy-000065536.pt",
+        "deals": 64,
+        "seed": 20261201,
+        "bootstrap-samples": 2000,
+        "threads": 0,
+        "pimc-samples": 16
+      }
+    },
+    {
+      "id": "guided-vs-base",
+      "command": "evaluate_agent_vs_agent",
+      "description": "Model-guided PIMC (shared model plays the rollouts; full rollouts) vs Base model (play-only; heuristic bid and trump)",
+      "args": {
+        "agent-a-trump": "pimc",
+        "agent-a-play": "pimc",
+        "agent-a-pimc-model": "runs/study-shared/checkpoints/best.pt",
+        "agent-b-play": "neural",
+        "agent-b-checkpoint": "runs/study-play-v1/checkpoints/best.pt",
+        "deals": 64,
+        "seed": 20261201,
+        "bootstrap-samples": 2000,
+        "threads": 0,
+        "pimc-samples": 16
+      }
+    },
+    {
+      "id": "guided-vs-shared",
+      "command": "evaluate_agent_vs_agent",
+      "description": "Model-guided PIMC (shared model plays the rollouts; full rollouts) vs Shared model (neural bid and play)",
+      "args": {
+        "agent-a-trump": "pimc",
+        "agent-a-play": "pimc",
+        "agent-a-pimc-model": "runs/study-shared/checkpoints/best.pt",
+        "agent-b-bid": "neural",
+        "agent-b-play": "neural",
+        "agent-b-checkpoint": "runs/study-shared/checkpoints/best.pt",
+        "deals": 64,
+        "seed": 20261201,
+        "bootstrap-samples": 2000,
+        "threads": 0,
+        "pimc-samples": 16
+      }
+    },
+    {
+      "id": "guided-vs-paired",
+      "command": "evaluate_agent_vs_agent",
+      "description": "Model-guided PIMC (shared model plays the rollouts; full rollouts) vs Paired pair (partner 1 seats 0/1, partner 2 seats 2/3)",
+      "args": {
+        "agent-a-trump": "pimc",
+        "agent-a-play": "pimc",
+        "agent-a-pimc-model": "runs/study-shared/checkpoints/best.pt",
+        "agent-b-bid": "neural",
+        "agent-b-play": "neural",
+        "agent-b-checkpoint": "runs/study-paired/checkpoints/partner-1/best.pt",
+        "agent-b-partner-checkpoint": "runs/study-paired/checkpoints/partner-2/best.pt",
+        "deals": 64,
+        "seed": 20261201,
+        "bootstrap-samples": 2000,
+        "threads": 0,
+        "pimc-samples": 16
+      }
+    },
+    {
+      "id": "guided-vs-distilled",
+      "command": "evaluate_agent_vs_agent",
+      "description": "Model-guided PIMC (shared model plays the rollouts; full rollouts) vs Distilled pilot, round 2 (play fine-tuned toward search)",
+      "args": {
+        "agent-a-trump": "pimc",
+        "agent-a-play": "pimc",
+        "agent-a-pimc-model": "runs/study-shared/checkpoints/best.pt",
+        "agent-b-bid": "neural",
+        "agent-b-play": "neural",
+        "agent-b-checkpoint": "runs/model-guided/pilot/round2/distilled-c2.pt",
+        "deals": 64,
+        "seed": 20261201,
+        "bootstrap-samples": 2000,
+        "threads": 0,
+        "pimc-samples": 16
+      }
+    },
+    {
+      "id": "guided-vs-search-trained",
+      "command": "evaluate_agent_vs_agent",
+      "description": "Model-guided PIMC (shared model plays the rollouts; full rollouts) vs Search-trained model (P5: 1% of play decisions searched in training)",
+      "args": {
+        "agent-a-trump": "pimc",
+        "agent-a-play": "pimc",
+        "agent-a-pimc-model": "runs/study-shared/checkpoints/best.pt",
+        "agent-b-bid": "neural",
+        "agent-b-play": "neural",
+        "agent-b-checkpoint": "runs/search-p5/search-balanced/snapshots/policy-000065536.pt",
+        "deals": 64,
+        "seed": 20261201,
+        "bootstrap-samples": 2000,
+        "threads": 0,
+        "pimc-samples": 16
+      }
+    },
+    {
+      "id": "base-vs-shared",
+      "command": "evaluate_agent_vs_agent",
+      "description": "Base model (play-only; heuristic bid and trump) vs Shared model (neural bid and play)",
+      "args": {
+        "agent-a-play": "neural",
+        "agent-a-checkpoint": "runs/study-play-v1/checkpoints/best.pt",
+        "agent-b-bid": "neural",
+        "agent-b-play": "neural",
+        "agent-b-checkpoint": "runs/study-shared/checkpoints/best.pt",
+        "deals": 64,
+        "seed": 20261201,
+        "bootstrap-samples": 2000,
+        "threads": 0
+      }
+    },
+    {
+      "id": "base-vs-paired",
+      "command": "evaluate_agent_vs_agent",
+      "description": "Base model (play-only; heuristic bid and trump) vs Paired pair (partner 1 seats 0/1, partner 2 seats 2/3)",
+      "args": {
+        "agent-a-play": "neural",
+        "agent-a-checkpoint": "runs/study-play-v1/checkpoints/best.pt",
+        "agent-b-bid": "neural",
+        "agent-b-play": "neural",
+        "agent-b-checkpoint": "runs/study-paired/checkpoints/partner-1/best.pt",
+        "agent-b-partner-checkpoint": "runs/study-paired/checkpoints/partner-2/best.pt",
+        "deals": 64,
+        "seed": 20261201,
+        "bootstrap-samples": 2000,
+        "threads": 0
+      }
+    },
+    {
+      "id": "base-vs-distilled",
+      "command": "evaluate_agent_vs_agent",
+      "description": "Base model (play-only; heuristic bid and trump) vs Distilled pilot, round 2 (play fine-tuned toward search)",
+      "args": {
+        "agent-a-play": "neural",
+        "agent-a-checkpoint": "runs/study-play-v1/checkpoints/best.pt",
+        "agent-b-bid": "neural",
+        "agent-b-play": "neural",
+        "agent-b-checkpoint": "runs/model-guided/pilot/round2/distilled-c2.pt",
+        "deals": 64,
+        "seed": 20261201,
+        "bootstrap-samples": 2000,
+        "threads": 0
+      }
+    },
+    {
+      "id": "base-vs-search-trained",
+      "command": "evaluate_agent_vs_agent",
+      "description": "Base model (play-only; heuristic bid and trump) vs Search-trained model (P5: 1% of play decisions searched in training)",
+      "args": {
+        "agent-a-play": "neural",
+        "agent-a-checkpoint": "runs/study-play-v1/checkpoints/best.pt",
+        "agent-b-bid": "neural",
+        "agent-b-play": "neural",
+        "agent-b-checkpoint": "runs/search-p5/search-balanced/snapshots/policy-000065536.pt",
+        "deals": 64,
+        "seed": 20261201,
+        "bootstrap-samples": 2000,
+        "threads": 0
+      }
+    },
+    {
+      "id": "shared-vs-paired",
+      "command": "evaluate_agent_vs_agent",
+      "description": "Shared model (neural bid and play) vs Paired pair (partner 1 seats 0/1, partner 2 seats 2/3)",
+      "args": {
+        "agent-a-bid": "neural",
+        "agent-a-play": "neural",
+        "agent-a-checkpoint": "runs/study-shared/checkpoints/best.pt",
+        "agent-b-bid": "neural",
+        "agent-b-play": "neural",
+        "agent-b-checkpoint": "runs/study-paired/checkpoints/partner-1/best.pt",
+        "agent-b-partner-checkpoint": "runs/study-paired/checkpoints/partner-2/best.pt",
+        "deals": 64,
+        "seed": 20261201,
+        "bootstrap-samples": 2000,
+        "threads": 0
+      }
+    },
+    {
+      "id": "shared-vs-distilled",
+      "command": "evaluate_agent_vs_agent",
+      "description": "Shared model (neural bid and play) vs Distilled pilot, round 2 (play fine-tuned toward search)",
+      "args": {
+        "agent-a-bid": "neural",
+        "agent-a-play": "neural",
+        "agent-a-checkpoint": "runs/study-shared/checkpoints/best.pt",
+        "agent-b-bid": "neural",
+        "agent-b-play": "neural",
+        "agent-b-checkpoint": "runs/model-guided/pilot/round2/distilled-c2.pt",
+        "deals": 64,
+        "seed": 20261201,
+        "bootstrap-samples": 2000,
+        "threads": 0
+      }
+    },
+    {
+      "id": "shared-vs-search-trained",
+      "command": "evaluate_agent_vs_agent",
+      "description": "Shared model (neural bid and play) vs Search-trained model (P5: 1% of play decisions searched in training)",
+      "args": {
+        "agent-a-bid": "neural",
+        "agent-a-play": "neural",
+        "agent-a-checkpoint": "runs/study-shared/checkpoints/best.pt",
+        "agent-b-bid": "neural",
+        "agent-b-play": "neural",
+        "agent-b-checkpoint": "runs/search-p5/search-balanced/snapshots/policy-000065536.pt",
+        "deals": 64,
+        "seed": 20261201,
+        "bootstrap-samples": 2000,
+        "threads": 0
+      }
+    },
+    {
+      "id": "paired-vs-distilled",
+      "command": "evaluate_agent_vs_agent",
+      "description": "Paired pair (partner 1 seats 0/1, partner 2 seats 2/3) vs Distilled pilot, round 2 (play fine-tuned toward search)",
+      "args": {
+        "agent-a-bid": "neural",
+        "agent-a-play": "neural",
+        "agent-a-checkpoint": "runs/study-paired/checkpoints/partner-1/best.pt",
+        "agent-a-partner-checkpoint": "runs/study-paired/checkpoints/partner-2/best.pt",
+        "agent-b-bid": "neural",
+        "agent-b-play": "neural",
+        "agent-b-checkpoint": "runs/model-guided/pilot/round2/distilled-c2.pt",
+        "deals": 64,
+        "seed": 20261201,
+        "bootstrap-samples": 2000,
+        "threads": 0
+      }
+    },
+    {
+      "id": "paired-vs-search-trained",
+      "command": "evaluate_agent_vs_agent",
+      "description": "Paired pair (partner 1 seats 0/1, partner 2 seats 2/3) vs Search-trained model (P5: 1% of play decisions searched in training)",
+      "args": {
+        "agent-a-bid": "neural",
+        "agent-a-play": "neural",
+        "agent-a-checkpoint": "runs/study-paired/checkpoints/partner-1/best.pt",
+        "agent-a-partner-checkpoint": "runs/study-paired/checkpoints/partner-2/best.pt",
+        "agent-b-bid": "neural",
+        "agent-b-play": "neural",
+        "agent-b-checkpoint": "runs/search-p5/search-balanced/snapshots/policy-000065536.pt",
+        "deals": 64,
+        "seed": 20261201,
+        "bootstrap-samples": 2000,
+        "threads": 0
+      }
+    },
+    {
+      "id": "distilled-vs-search-trained",
+      "command": "evaluate_agent_vs_agent",
+      "description": "Distilled pilot, round 2 (play fine-tuned toward search) vs Search-trained model (P5: 1% of play decisions searched in training)",
+      "args": {
+        "agent-a-bid": "neural",
+        "agent-a-play": "neural",
+        "agent-a-checkpoint": "runs/model-guided/pilot/round2/distilled-c2.pt",
+        "agent-b-bid": "neural",
+        "agent-b-play": "neural",
+        "agent-b-checkpoint": "runs/search-p5/search-balanced/snapshots/policy-000065536.pt",
+        "deals": 64,
+        "seed": 20261201,
+        "bootstrap-samples": 2000,
+        "threads": 0
+      }
+    }
+  ]
+}

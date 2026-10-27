@@ -17,5 +17,6 @@ configs/pipelines/*.json
 !configs/pipelines/critic_comparison.json
 !configs/pipelines/study_comparisons.json
 !configs/pipelines/study_round_robin.json
+!configs/pipelines/all_agents_round_robin.json
 runs/
 *.pt

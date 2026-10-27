@@ -18,7 +18,7 @@ CONFIGS = Path(__file__).resolve().parents[1] / 'configs' / 'pipelines'
 # Tracked examples only; .gitignore leaves other (personal) pipeline files in this directory.
 EXAMPLES = tuple(CONFIGS / name for name in ('template.json', 'progressive_training.json', 'scratch_selfplay.json',
                                              'critic_comparison.json', 'study_comparisons.json',
-                                             'study_round_robin.json'))
+                                             'study_round_robin.json', 'all_agents_round_robin.json'))
 
 
 def quiet(function, *args, **kwargs):
@@ -329,6 +329,27 @@ class ExecutionTests(PipelineTestCase):
         record = json.loads((self.path / 'given' / rp.STATE_FILE).read_text())['steps'][0]
         self.assertEqual(record['inputs'], [dict(argument='checkpoint', path=str(external),
                                                  sha256=rp.sha256_file(external))])
+
+    def test_manifest_write_retries_a_briefly_locked_file(self):
+        # Windows: a sync client or scanner holding the manifest open makes os.replace fail for a moment.
+        pipeline = rp.parse_config(self.config())
+        real_replace, calls = rp.os.replace, []
+
+        def locked_twice(source, target):
+            calls.append(target)
+            if len(calls) <= 2:
+                raise PermissionError('[WinError 5] Access is denied')
+            return real_replace(source, target)
+
+        with unittest.mock.patch.object(rp.os, 'replace', locked_twice), \
+                unittest.mock.patch.object(rp.time, 'sleep') as sleep:
+            rp.write_manifest(pipeline, dict(steps=[]))
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(sleep.call_count, 2)
+        self.assertIn('updated', json.loads((self.path / 'out' / rp.STATE_FILE).read_text()))
+        with unittest.mock.patch.object(rp.os, 'replace', side_effect=PermissionError('locked')), \
+                unittest.mock.patch.object(rp.time, 'sleep'), self.assertRaises(PermissionError):
+            rp.write_manifest(pipeline, dict(steps=[]))  # A file that stays locked still fails.
 
     def test_comparison_summary_and_pair_and_guide_inputs(self):
         first, second = self.path / 'partner-1.pt', self.path / 'partner-2.pt'

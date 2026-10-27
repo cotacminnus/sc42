@@ -27,6 +27,7 @@ import re
 import shlex
 import subprocess
 import sys
+import time
 
 SCHEMA_VERSION = 1
 MANIFEST_VERSION = 1
@@ -387,13 +388,31 @@ def git_state():
         return dict(sha=None, dirty=None)
 
 
+MANIFEST_REPLACE_ATTEMPTS = 8  # About 6 s of back-off in total.
+
+
 def write_manifest(pipeline, manifest):
+    """Atomically rewrite the manifest (temporary file, then os.replace).
+
+    On Windows, os.replace fails with PermissionError while another process
+    briefly holds the target open. Sync clients (OneDrive), indexers and
+    antivirus scanners do this to a file rewritten after every step. The
+    replace is retried with exponential back-off before giving up; the
+    manifest is never left half-written either way.
+    """
     manifest['updated'] = now()
     path = pipeline.output_root / STATE_FILE
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(path.name + '.tmp')
     temporary.write_text(json.dumps(manifest, indent=2, default=str) + '\n', encoding='utf-8')
-    os.replace(temporary, path)
+    for attempt in range(MANIFEST_REPLACE_ATTEMPTS):
+        try:
+            os.replace(temporary, path)
+            return
+        except PermissionError:
+            if attempt == MANIFEST_REPLACE_ATTEMPTS - 1:
+                raise
+            time.sleep(0.05 * 2 ** attempt)
 
 
 def new_manifest(pipeline):

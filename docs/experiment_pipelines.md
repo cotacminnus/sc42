@@ -48,6 +48,7 @@ anything starts.
 | `critic_comparison.json` | Three independent from-scratch branches that differ only in `critic-mode` (`none`, `local`, `centralized`), each evaluated on the same held-out deals. |
 | `study_comparisons.json` | Evaluation only. The one-seed study's Shared and Paired models each against HHH, HHR, HRR, CHH, CRR and RRR, then Paired against Shared (13 comparisons). Needs the study checkpoints in `runs/study-*`, or your own paths. |
 | `study_round_robin.json` | Evaluation only. Every pair of Base, Shared, Paired, RRR, HHH and plain PIMC (15 comparisons). |
+| `all_agents_round_robin.json` | Evaluation only, at smoke scale. Every currently functional agent against every other once: 13 agents, 78 comparisons, 64 deals each. Raise `deals` for conclusions. |
 
 These examples use full-size budgets (hundreds of thousands of hands, 8 workers).
 For a quick trial, copy one and shrink `total-hands`, `rollout-decisions`,
@@ -457,6 +458,7 @@ complete examples. The flags for every agent and opponent are in
 | `output was modified` / `output is missing` / `dependency ... changed after use` | A recorded file changed after it was produced or used; restore it, or rerun into a new `output_root`. |
 | `has partial outputs but no latest.pt` | The step stopped before its first checkpoint; inspect, then remove its directory to restart that step. |
 | `needs an optional dependency that is not installed` | Install the `rl` extra. |
+| `PermissionError: [WinError 5] Access is denied: ...pipeline_state.json.tmp' -> ...pipeline_state.json` | Windows only: another process (OneDrive sync, an indexer or an antivirus scanner) held the manifest open. The runner retries for about 6 s first, so this means a longer lock. Rerun with `--resume`: completed steps are verified and skipped. If it recurs, pause syncing for `runs/` or use an `output_root` outside the synced folder. |
 
 ## Limitations
 
