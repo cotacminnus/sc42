@@ -69,6 +69,8 @@ def clone_bidding(trainer, hands, epochs=4):
 
 @torch.no_grad()
 def playing_kl(model, anchor, data):
+    # data is teacher_data(anchor=...): play positions from the anchor's own games,
+    # so this is drift on the anchor's state distribution; bidding is not covered.
     device = next(model.parameters()).device
     features, masks = data['features'].to(device), data['masks'].to(device)
     current, _ = model.networks['play'].distribution(features, masks)

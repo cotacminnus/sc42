@@ -343,6 +343,9 @@ update boundaries, remain frozen, and do not follow later optimizer changes.
 The original anchor is separate and never evicted. The roster retains at most its
 configured capacity; evicted files remain on disk because old resumes may need them.
 Publication may overshoot its threshold and can occur even in HHH-only training.
+The opponent log keeps the pool name (`self-snapshots`) during the fallback; the
+logged SHA says what was played. The [convergence report](convergence.md)
+classifies training hands by that SHA and measures drift between snapshots.
 
 Starting a [new historical stage](command_reference.md#recipe-6-joint-training-with-historical-opponents)
 from an HHH-trained checkpoint copies its trained phase weights, not its historical
@@ -443,6 +446,8 @@ not optimal bidding. Its temporary Adam optimizer is discarded before PPO.
 - **Historical self-play:** snapshot diversity does not guarantee monotonic strength,
   convergence, protection against forgetting or equilibrium behavior. A bounded
   roster and its anchor fallback determine the actual opponent distribution.
+  [Convergence diagnostics](convergence.md) measure policy drift, recurrence,
+  snapshot cross-play and forgetting from the recorded runs.
 - **Selection bias:** the primary opponent and fixed validation schedule determine
   which model becomes best.pt. Repeated selection can overfit that schedule; report
   independent final results and avoid retroactively selecting from held-out tests.

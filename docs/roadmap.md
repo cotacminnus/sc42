@@ -21,7 +21,7 @@ Step numbers match the team's live planning document.
 | 3 | Perfect-information oracle | Endgame, complete-deal and arbitrary-position bounds implemented | `texas42/oracle.py`, [oracle guide](endgame_oracle.md) |
 | 4 | Common agent interface | Done | `agents/`: protocols, RandomAgent, AgentPlayer |
 | 5 | Baseline agents | V1 baselines done | HeuristicAgent, RandomAgent, ConservativeRandomAgent, HybridAgent; [phase ablations](policy_ablation.md) |
-| 6 | Self-play training | Play-only and multi-phase historical PPO implemented | [legacy baseline](ppo_training.md), [current training](multiphase_selfplay.md) |
+| 6 | Self-play training | Play-only and multi-phase historical PPO implemented; convergence diagnostics (drift, exposure, cross-play) implemented, opponent-arm experiment pending | [legacy baseline](ppo_training.md), [current training](multiphase_selfplay.md), [convergence](convergence.md) |
 | 7 | Hidden-information reasoning | Belief toolkit, PIMC agent and model-guided PIMC (model rollouts, model likelihoods, value leaf) implemented, with an accuracy experiment | [belief modelling](belief.md); [search in training](search_training.md): theory, ranking gate, pilots, and `--search-fraction` implemented; experiments pending |
 | 8 | Partnership behavior | Paired-partner training and two-spec team evaluation implemented; studies not started | [paired partners](multiphase_selfplay.md#paired-partner-training) |
 | 9 | Bidding | Neural bid-only/joint PPO and counterfactual tools implemented; strength to evaluate | [multi-phase PPO](multiphase_selfplay.md), [counterfactuals](counterfactual_bidding.md) |

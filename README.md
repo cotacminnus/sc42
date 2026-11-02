@@ -68,6 +68,7 @@ python -m examples.run_pipeline --config configs/pipelines/progressive_training.
 | Independently composed agents and phase ablations | [Phase-composable evaluation](docs/phase_composable_evaluation.md) |
 | Comparing models: one model against each baseline (for example paired vs CHH), batches and round robins with a summary table | [Model comparisons](docs/command_reference.md#model-comparisons-and-round-robins) |
 | Duplicate deals, metrics, bootstrap uncertainty | [Arena methodology](docs/arena.md) |
+| Training convergence: policy drift between snapshots, what a run trained against, plateaus, snapshot cross-play and record discrepancies | [Convergence diagnostics](docs/convergence.md) |
 | Frozen heuristic and random/conservative variants | [Heuristic V1](docs/simpleheuristic.md), [policy ablations](docs/policy_ablation.md) |
 | Bid-versus-pass replay experiments | [Counterfactual bidding](docs/counterfactual_bidding.md) |
 | Exact open-hand contract/point endgames and complete-deal bid benchmarks | [Endgame oracle](docs/endgame_oracle.md) |

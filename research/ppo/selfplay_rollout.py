@@ -139,6 +139,9 @@ def collect_phase_hand(models, seed, episode, learn_phases, pool, critic=None, c
         rss = int(Path('/proc/self/statm').read_text().split()[1]) * os.sysconf('SC_PAGE_SIZE')
     except (OSError, ValueError, IndexError):
         rss = None
+    # opponent is the pool's name; opponent_sha256 is the identity: a file SHA for
+    # frozen opponents, but for self-current the rollout weight-payload digest
+    # (phase_chunk), which never matches a checkpoint file.
     row = dict(worker_rss_bytes=rss, episode=episode, paths=tuple(tuple(p) for p in paths.values()),
                reward=transition.rewards[team], opponent=label,
                opponent_sha256=current_sha256 if spec is None else spec.sha256,

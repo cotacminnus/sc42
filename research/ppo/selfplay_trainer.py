@@ -53,7 +53,11 @@ class SelfPlayConfig(Config):
 
     @property
     def snapshot_fallback(self):
-        """Legacy anchor fallback for self-snapshots; the current policy when anchor-free or from scratch."""
+        """Legacy anchor fallback for self-snapshots; the current policy when anchor-free or from scratch.
+
+        With an anchor, every self-snapshots hand before the first snapshot
+        (snapshot_every_hands) plays the fixed original play-only model.
+        """
         return 'current' if self.from_scratch or self.anchor is None else 'anchor'
 
     def __post_init__(self):
@@ -604,6 +608,7 @@ class PairedSelfPlayTrainer(SelfPlayTrainer):
         return metrics
 
     def publish_snapshot(self, directory):
+        # So paired runs keep only best.pt and latest.pt: no intermediate policies.
         raise ValueError('Paired-partner training does not publish historical snapshots yet')
 
     def close(self):

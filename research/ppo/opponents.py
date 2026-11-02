@@ -22,7 +22,13 @@ NO_ANCHOR = ('anchor requested, but this experiment has no original play-only an
 
 @dataclass(frozen=True)
 class CheckpointIdentity:
-    """File identity shared by frozen opponents and phase-composable evaluation."""
+    """File identity shared by frozen opponents and phase-composable evaluation.
+
+    The SHA identifies the file, not the weights: files that differ only in
+    metadata (best.pt saved in the same update as a snapshot, reruns that
+    differ only in recorded settings) hold equal weights under different
+    SHAs. research.ppo.convergence.weights_digest compares weights.
+    """
     path: str
     sha256: str
 
@@ -256,6 +262,8 @@ class HistoricalPool:
     choose() returns (name, None) for the learner's own current rollout policy:
     always for self-current, and for self-snapshots before any snapshot exists
     when snapshot_fallback is 'current'. The legacy fallback is the anchor.
+    Either way the returned name stays 'self-snapshots', so opponent logs must
+    be read by SHA (opponent_assignments), not by name.
     """
     probabilities: tuple
     policies: tuple[PolicySpec, ...]
@@ -303,6 +311,7 @@ class HistoricalPool:
                                     and self.snapshot_fallback == 'current'):
             return name, None
         if name == SELF_SNAPSHOTS:
+            # Before the first snapshot this is the anchor, still labelled self-snapshots.
             roster = self.snapshots or (self.anchor,)
             index = random.Random(stream_seed(seed, 'historical-snapshot-v1', episode)).randrange(len(roster))
             return name, roster[index]

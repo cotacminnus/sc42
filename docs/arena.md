@@ -130,6 +130,8 @@ with open('arena-report.json', 'w') as output:
 values. Experiment CLIs export per-hand and metric CSVs through `experiment_output.py`,
 retaining group IDs and policy assignments. See [output locations](command_reference.md#outputs-and-logs).
 The arena report is separate from schema-5 training logs.
+[Convergence diagnostics](convergence.md) use these reports for snapshot
+cross-play: transitive progress, cycles and forgetting across a training run.
 
 ## Uncertainty
 

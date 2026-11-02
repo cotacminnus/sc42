@@ -92,6 +92,8 @@ def main(argv=None):
             buffer, reward = trainer.collect()
             metrics = trainer.update(buffer)
             elapsed = perf_counter() - started
+            # Version-1 schema: metrics at the top level and mean_signed_reward; unlike
+            # train_selfplay_ppo, no opponent_assignments, anchor KL or snapshots.
             row = dict(hands=trainer.hands, play_samples=trainer.samples, updates=trainer.updates,
                        optimizer_steps=trainer.optimizer_steps, mean_signed_reward=reward,
                        runtime_seconds=elapsed, hands_per_second=(trainer.hands - initial_hands) / elapsed, **metrics)

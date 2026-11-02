@@ -204,6 +204,8 @@ def distill(args, identity, data, clip, out):
         kl_new_to_old_validation=float(masked_kl(log_new, log_old, masks)[validation].mean()),
         value_rmse_validation=float(((values - v_old)[validation] ** 2).mean().sqrt()),
         history=history)
+    # The copy keeps the source's config, progress and snapshots, which describe
+    # the source's training; metadata['derivation'] is the only provenance here.
     checkpoint = read(identity.path)
     checkpoint['model'] = model.state_dict()
     checkpoint['metadata']['derivation'] = dict(

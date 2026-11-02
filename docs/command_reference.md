@@ -21,6 +21,7 @@ page owns *how to run things*.
 - [Legacy trainer: train_ppo](#legacy-trainer-train_ppo) — Recipe 1, resume, mixed opponents
 - [Multi-phase trainer: train_selfplay_ppo](#multi-phase-trainer-train_selfplay_ppo) — Recipes 2–11 and 13–15 (from scratch, policy-only PPO), arguments, artifacts, troubleshooting
 - [Evaluation](#evaluation) — agent-vs-agent composition (Recipe 12), [model comparisons and round robins](#model-comparisons-and-round-robins), compatibility commands
+- [Convergence report](#convergence-report) — policy drift, training exposure, plateaus and cross-play of recorded runs ([guide](convergence.md))
 - [Experiment pipelines](#experiment-pipelines) — JSON-defined step sequences ([full guide](experiment_pipelines.md))
 - [Performance benchmarks](#performance-benchmarks)
 - [Reproducibility checklist](#reproducibility-checklist)
@@ -83,6 +84,7 @@ same time can double or triple that.
 | PPO models, buffers, legacy trainer | `test_ppo_model`, `test_ppo_buffer`, `test_ppo_agent`, `test_ppo_training`, `test_ppo_opponents`, `test_parallel_ppo` | `rl` |
 | Multi-phase self-play training | `test_ppo_multiphase`, `test_centralized_critic`, `test_policy_only_ppo`, `test_scratch_selfplay`, `test_paired_selfplay`, `test_search_training`, `test_evaluation_performance` | `rl` |
 | Phase-composable evaluation | `test_phase_composition` | `rl` |
+| Convergence diagnostics | `test_convergence` | `rl` |
 | OpenSpiel adapter | `test_openspiel` ([OpenSpiel](openspiel.md)) | `openspiel` |
 
 **After a change,** run the modules of the area you touched first (fast feedback),
@@ -126,6 +128,7 @@ Any other failure is a real one.
 | Train independent-phase PPO / historical self-play | `python -m examples.train_selfplay_ppo` | `rl` | [Multi-phase trainer](#multi-phase-trainer-train_selfplay_ppo) |
 | Phase-composed agent-vs-agent evaluation (canonical) | `python -m examples.evaluate_agent_vs_agent` | `rl` only for neural phases | [Agent-vs-agent](#agent-vs-agent-composition) |
 | A model against each baseline, batches, round robins with a summary | `python -m examples.run_pipeline --config configs/pipelines/study_comparisons.json` | `rl` for neural agents | [Model comparisons](#model-comparisons-and-round-robins) |
+| Convergence of recorded runs: drift, exposure, plateaus, cross-play | `python -m examples.convergence_report` | `rl` | [Convergence report](#convergence-report) |
 | Legacy checkpoint evaluation | `python -m examples.evaluate_ppo` | `rl` | [Compatibility evaluation](#compatibility-evaluation) |
 | Multi-opponent phase evaluation (anchors, archives) | `python -m examples.evaluate_selfplay_ppo` | `rl` | [Compatibility evaluation](#compatibility-evaluation) |
 | Agent API demo (no arguments) | `python -m examples.agent_selfplay` | — | [Self-play examples](#self-play-examples) |
@@ -1875,6 +1878,49 @@ trained check: use files whose routed neural phases are already trained. For exp
 availability validation or any independent phase ablation, use
 `evaluate_agent_vs_agent`. Existing single/multi-opponent JSON envelopes remain
 unchanged; reports are never merged into an unlabeled multi-opponent score.
+
+## Convergence report
+
+`examples.convergence_report` measures how much recorded training runs still
+change, against whom they trained, and (through a generated pipeline) whether
+their change is progress or cycling. The metric definitions, the existing runs'
+results and the record discrepancies it detects are in
+[convergence diagnostics](convergence.md). It is read-only and plays no games.
+
+```bash
+# Drift, training exposure, validation plateaus and warnings for several runs
+python -m examples.convergence_report --run shared=runs/study-shared --run control=runs/search-p5/control \
+  --run paired=runs/study-paired --run base=runs/study-play-v1 --output runs/convergence/report.json
+
+# Cross-play, step 1: write a pipeline (snapshots vs each other and a fixed panel,
+# final vs final, mixed partnerships); --crossplay-policies thins long lineages
+python -m examples.convergence_report --run shared=runs/study-shared --run control=runs/search-p5/control \
+  --panel HHH,CHH --panel-checkpoint anchor=runs/study-play-v1/checkpoints/best.pt \
+  --crossplay-policies 5 --deals 1024 --crossplay-pipeline runs/convergence/crossplay.json
+python -m examples.run_pipeline --config runs/convergence/crossplay.json --dry-run
+python -m examples.run_pipeline --config runs/convergence/crossplay.json
+
+# Cross-play, step 2: the same --run/--panel/--crossplay-policies/--deals/--seed, reading the results
+python -m examples.convergence_report --run shared=runs/study-shared --run control=runs/search-p5/control \
+  --panel HHH,CHH --panel-checkpoint anchor=runs/study-play-v1/checkpoints/best.pt \
+  --crossplay-policies 5 --deals 1024 --crossplay-results runs/convergence/crossplay.json \
+  --output runs/convergence/crossplay-report.json
+```
+
+| Argument | Meaning |
+| --- | --- |
+| `--run NAME=DIR` | A training output directory (repeat). Version-1, version-2 shared, paired and derived-checkpoint directories are recognised. |
+| `--probe-hands` | Heuristic V1 hands whose decisions with two or more legal moves form the probe set (default 256). |
+| `--seed` | Probe positions and cross-play deals (default 20261101). |
+| `--output` | JSON report: every metric per run, plus cross-play when requested. |
+| `--crossplay-pipeline OUT.json` | Write an `examples.run_pipeline` configuration of cross-play comparisons; it is validated with each step's parser before writing. |
+| `--crossplay-results PIPELINE.json` | Summarize that pipeline's results. Refused if the regenerated plan does not match the file's comparisons. |
+| `--panel` | Fixed built-in opponents, comma-separated (default `HHH,CHH`). The first is also the mixed-partnership reference. |
+| `--panel-checkpoint NAME=PATH` | A fixed checkpoint opponent (repeatable), playing its trained phases and heuristic otherwise. |
+| `--crossplay-policies N` | Evenly spaced policies per run, first and last included (default 0: all). |
+| `--deals`, `--bootstrap-samples` | Per cross-play step (defaults 1,024 and 2,000). |
+| `--pipeline-name`, `--pipeline-root` | Pipeline name (default `convergence-crossplay-v1`) and output root (default `runs/pipelines/NAME`). |
+| `--log-dir` | Readable log and a CSV with one row per drift step. |
 
 ## Experiment pipelines
 

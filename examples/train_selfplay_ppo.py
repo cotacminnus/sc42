@@ -408,6 +408,8 @@ def main(argv=None):
                       f'{trainer.rollout_performance["search_wall_seconds"]:.1f} s wall')
             if (not paired and sample_count and set(trainer.model.neural_phases) <= set(trainer.model.trained_phases)
                     and trainer.hands - trainer.last_snapshot >= config.snapshot_every_hands):
+                # Published before validation: if this update's validation is the best
+                # so far, best.pt repeats these weights under a different file SHA.
                 spec = trainer.publish_snapshot(directory / 'snapshots')
                 print(f'Historical snapshot: {spec.name} SHA256 {spec.sha256}')
             if trainer.hands - trainer.last_eval >= config.eval_every_hands or final:
