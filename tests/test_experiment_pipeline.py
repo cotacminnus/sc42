@@ -16,7 +16,7 @@ from examples import run_pipeline as rp
 TORCH = importlib.util.find_spec('torch') is not None
 CONFIGS = Path(__file__).resolve().parents[1] / 'configs' / 'pipelines'
 # Tracked examples only; .gitignore leaves other (personal) pipeline files in this directory.
-EXAMPLES = tuple(CONFIGS / name for name in ('template.json', 'progressive_training.json', 'scratch_selfplay.json',
+EXAMPLES = tuple(CONFIGS / name for name in ('template.json', 'quickstart.json', 'progressive_training.json', 'scratch_selfplay.json',
                                              'critic_comparison.json', 'study_comparisons.json',
                                              'study_round_robin.json', 'all_agents_round_robin.json'))
 

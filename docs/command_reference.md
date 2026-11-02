@@ -1897,8 +1897,8 @@ python -m examples.run_pipeline --config configs/pipelines/progressive_training.
 
 Allowed step commands: `train_ppo`, `train_selfplay_ppo`, `evaluate_ppo`,
 `evaluate_selfplay_ppo`, `evaluate_agent_vs_agent`, `oracle_labels`. Examples are in
-`configs/pipelines/` (`template.json`, `progressive_training.json`,
-`scratch_selfplay.json`, `critic_comparison.json`).
+`configs/pipelines/` (`template.json`, `quickstart.json`, `progressive_training.json`,
+`scratch_selfplay.json`, `critic_comparison.json` and the evaluation-only comparison sets).
 
 ## Performance benchmarks
 
