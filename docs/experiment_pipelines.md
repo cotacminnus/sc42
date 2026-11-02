@@ -43,6 +43,7 @@ anything starts.
 | Example in `configs/pipelines/` | What it does |
 | --- | --- |
 | `template.json` | Annotated starting point: a scratch stage, a second stage that also trains against the first as a named opponent, and an evaluation. |
+| `quickstart.json` | Smoke scale, under a minute on a 16-core CPU: train play from random weights, a new stage that adds bidding (play frozen, the first stage as an opponent), an evaluation against HHH and CHH, and a head-to-head comparison that writes `summary.md`. Too small for conclusions. |
 | `progressive_training.json` | Curriculum from random weights: play → bidding (play frozen) → trump (bid/play frozen) → joint with a centralized critic and historical snapshots → head-to-head evaluation against the pre-joint model. No pretrained checkpoint or anchor. |
 | `scratch_selfplay.json` | All phases from random weights against `HHH:0.3,self-current:0.7`, a second stage adding historical snapshots, then fixed-opponent and head-to-head evaluations. |
 | `critic_comparison.json` | Three independent from-scratch branches that differ only in `critic-mode` (`none`, `local`, `centralized`), each evaluated on the same held-out deals. |

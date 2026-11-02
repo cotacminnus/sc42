@@ -1,0 +1,77 @@
+{
+  "schema_version": 1,
+  "name": "quickstart",
+  "description": "Smoke-scale tour of the pipeline features, a few minutes on a laptop CPU: train play from random weights, start a new stage that adds bidding, evaluate it against fixed opponents, and compare the two stages head to head. Budgets are far too small for conclusions; see progressive_training.json for full-size settings.",
+  "output_root": "runs/pipelines/quickstart",
+  "steps": [
+    {
+      "id": "play",
+      "command": "train_selfplay_ppo",
+      "description": "Play from random weights; heuristic bidding and trump.",
+      "args": {
+        "from-scratch": true,
+        "learner-bid": "heuristic",
+        "learner-trump": "heuristic",
+        "learner-play": "neural-train",
+        "opponent-pool": "HHH:1",
+        "eval-opponents": "HHH",
+        "selection-opponent": "HHH",
+        "total-hands": 2048,
+        "rollout-decisions": 2048,
+        "eval-every-hands": 1024,
+        "eval-deals": 64,
+        "threads": 2,
+        "seed": 42
+      }
+    },
+    {
+      "id": "bidding",
+      "command": "train_selfplay_ppo",
+      "description": "New stage from play's best checkpoint: train fresh bidding heads with play frozen, against HHH and the play stage.",
+      "args": {
+        "init-checkpoint": "${play.best}",
+        "learner-bid": "neural-train",
+        "learner-bid-source": "new",
+        "learner-trump": "heuristic",
+        "learner-play": "neural-frozen",
+        "opponent-checkpoint": ["play=${play.best}"],
+        "opponent-pool": "HHH:0.5,play:0.5",
+        "eval-opponents": "HHH",
+        "selection-opponent": "HHH",
+        "total-hands": 2048,
+        "rollout-decisions": 2048,
+        "eval-every-hands": 1024,
+        "eval-deals": 64,
+        "threads": 2,
+        "seed": 42
+      }
+    },
+    {
+      "id": "fixed-opponents",
+      "command": "evaluate_selfplay_ppo",
+      "description": "Held-out deals against fixed opponents, with a seed different from training.",
+      "args": {
+        "checkpoint": "${bidding.best}",
+        "opponents": "HHH,CHH",
+        "deals": 128,
+        "seed": 12345,
+        "threads": 2
+      }
+    },
+    {
+      "id": "bidding-vs-play",
+      "command": "evaluate_agent_vs_agent",
+      "description": "Bidding stage vs play stage",
+      "args": {
+        "agent-a-bid": "neural",
+        "agent-a-play": "neural",
+        "agent-a-checkpoint": "${bidding.best}",
+        "agent-b-play": "neural",
+        "agent-b-checkpoint": "${play.best}",
+        "deals": 128,
+        "seed": 12345,
+        "threads": 2
+      }
+    }
+  ]
+}
