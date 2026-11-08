@@ -82,6 +82,7 @@ same time can double or triple that.
 | Beliefs and Monte Carlo search | `test_belief`, `test_pimc_agent`, `test_model_guided_pimc` | model-guided: `rl` |
 | PPO models, buffers, legacy trainer | `test_ppo_model`, `test_ppo_buffer`, `test_ppo_agent`, `test_ppo_training`, `test_ppo_opponents`, `test_parallel_ppo` | `rl` |
 | Multi-phase self-play training | `test_ppo_multiphase`, `test_centralized_critic`, `test_policy_only_ppo`, `test_scratch_selfplay`, `test_paired_selfplay`, `test_search_training`, `test_evaluation_performance` | `rl` |
+| Match-win objective (match rollouts, cross-hand returns, match validation, resume, pipeline) | `test_match_selfplay` | engine check: —; rest: `rl` |
 | Phase-composable evaluation | `test_phase_composition` | `rl` |
 | OpenSpiel adapter | `test_openspiel` ([OpenSpiel](openspiel.md)) | `openspiel` |
 
@@ -507,8 +508,10 @@ Install the `rl` extra first. Two trainers exist deliberately:
 | `examples.train_ppo` | Reproducing the version-1 play-only baseline (heuristic bid/trump), optional fixed/mixed heuristic opponents. | [Legacy PPO](ppo_training.md) |
 | `examples.train_selfplay_ppo` | New experiments: independently trained/frozen bid, trump and play phases, neural and historical opponents. | [Multi-phase PPO](multiphase_selfplay.md) |
 
-Both train complete **hand** episodes; there is no training `--episode` or match-PPO
-option. The recipes are research configurations, not proven optimal settings.
+Both train complete **hand** episodes by default. `train_selfplay_ppo
+--reward-objective match-win` instead trains on complete matches
+([Recipe 16](#recipe-16-match-win-training)). The recipes are research
+configurations, not proven optimal settings.
 
 ### Workflow finder
 
@@ -529,6 +532,7 @@ option. The recipes are research configurations, not proven optimal settings.
 | [13: critic comparison](#recipe-13-local-versus-centralized-critic-and-oracle-auxiliary) | Local critic (A), centralized critic (B), centralized plus oracle auxiliary (C) | Original play checkpoint; an oracle dataset for C |
 | [14: from scratch](#recipe-14-from-scratch-training-and-self-play) | Random initialization of any phase subset; HHH, current-policy self-play or historical self-play | **None**: no checkpoint or anchor |
 | [15: policy-only PPO](#recipe-15-policy-only-ppo-and-a-three-way-critic-comparison) | Critic-free PPO (`--critic-mode none`), and matched none/local/centralized branches | **None** (from scratch), or any checkpoint for a new stage |
+| [16: match-win training](#recipe-16-match-win-training) | Train to win complete seven-mark matches (+1/−1 at match end); select `best.pt` by match win rate | **None** (from scratch), or any checkpoint for a new stage |
 
 Before running a recipe, confirm the named input files exist and satisfy its
 trained-phase prerequisites. Output directories must be new unless resuming. An
@@ -1164,6 +1168,57 @@ default estimator (Monte Carlo for `none`, GAE otherwise); add
 `--return-estimator monte-carlo` to the critic branches to separate the effect of the
 baseline from that of the estimator.
 
+### Recipe 16: match-win training
+
+`--reward-objective match-win` makes one RL episode a complete match to
+`--target-marks` (default 7): intermediate hands pay nothing and the match
+winner's partnership receives +1, the loser −1. Validation plays complete
+matches and `best.pt` maximizes match win rate. Method, budgets and fair
+comparison with hand-marks training:
+[match-win objective](multiphase_selfplay.md#match-win-objective).
+
+```bash
+# A. All three phases from random weights, mixed heuristic and current-policy self-play
+python -m examples.train_selfplay_ppo --from-scratch \
+  --learner-bid neural-train --learner-trump neural-train --learner-play neural-train \
+  --reward-objective match-win --target-marks 7 \
+  --opponent-pool HHH:0.3,CHH:0.2,self-current:0.5 --eval-opponents HHH,CHH --selection-opponent HHH \
+  --total-hands 262144 --rollout-decisions 8192 --eval-deals 256 --eval-every-hands 16384 \
+  --threads 8 --eval-threads 8 --seed 42 --output-dir runs/match-win
+
+# B. Exact resume: objective and target are restored; changing either is rejected
+python -m examples.train_selfplay_ppo --resume runs/match-win/checkpoints/latest.pt \
+  --total-hands 524288 --output-dir runs/match-win
+
+# C. New match-win stage from a hand-marks checkpoint: actors kept, value heads reset
+python -m examples.train_selfplay_ppo --init-checkpoint runs/ppo-scratch-selfplay/checkpoints/best.pt \
+  --learner-bid neural-train --learner-trump neural-train --learner-play neural-train \
+  --reward-objective match-win --opponent-pool HHH:0.3,self-current:0.7 \
+  --eval-opponents HHH,CHH --selection-opponent HHH --total-hands 262144 --rollout-decisions 8192 \
+  --threads 8 --output-dir runs/match-win-from-hands
+
+# D. Held-out evaluation in complete matches (and the same checkpoint on single hands)
+python -m examples.evaluate_selfplay_ppo --checkpoint runs/match-win/checkpoints/best.pt \
+  --opponents HHH,CHH,HHR --episode match --target-marks 7 --deals 1024 --threads 8
+python -m examples.evaluate_selfplay_ppo --checkpoint runs/match-win/checkpoints/best.pt \
+  --opponents HHH,CHH,HHR --episode hand --deals 2048 --threads 8
+
+# E. Head to head in complete matches
+python -m examples.evaluate_agent_vs_agent \
+  --agent-a-checkpoint runs/match-win/checkpoints/best.pt --agent-a-bid neural --agent-a-trump neural --agent-a-play neural \
+  --agent-b-checkpoint runs/ppo-scratch-selfplay/checkpoints/best.pt --agent-b-bid neural --agent-b-trump neural --agent-b-play neural \
+  --episode match --target-marks 7 --deals 1024 --seed 7355608 --threads 8
+```
+
+`--total-hands` counts simulated hands; a run exceeds it by at most
+2·target − 2 hands, because the last match is always finished. For a fair
+comparison with hand-marks training, run A and the same command without
+`--reward-objective` (and `--target-marks`) from the same seed and budget, then
+evaluate both with D and E on identical seeds. `configs/pipelines/match_win_selfplay.json`
+runs a two-stage version through the [pipeline runner](experiment_pipelines.md).
+Search inside training (`--search-fraction`) and oracle auxiliary supervision
+(`--oracle-aux-coef`) use hand-point targets and are rejected with `match-win`.
+
 Recipe 12 (held-out evaluation) is in [Evaluation](#recipe-12-held-out-phase-ablations).
 
 ### train_selfplay_ppo arguments
@@ -1345,9 +1400,9 @@ against frozen opponents; they are not four simultaneously updated PPO players.
 | Argument | Type / accepted values | Default | Meaning and interactions |
 | --- | --- | --- | --- |
 | `--eval-opponents` | Nonempty, unique comma-separated exact registry names; no separator whitespace | `HHH,CHH,anchor` with an anchor, else `HHH,CHH` | Separate reports using the same fixed paired schedules. May include registered archives/compositions, but not the dynamic `self-current`/`self-snapshots` entries (rejected); register a concrete snapshot to evaluate it. `anchor` without an anchor is an error. |
-| `--selection-opponent` | One name present in `--eval-opponents` | `anchor` with an anchor, else `HHH` | `best.pt` maximizes this opponent's mean signed marks/hand, strictly greater than the previous best; ties retain the earlier best. Does not automatically change when training opponents or validation names change. |
+| `--selection-opponent` | One name present in `--eval-opponents` | `anchor` with an anchor, else `HHH` | `best.pt` maximizes this opponent's mean signed marks/hand (match win rate with `--reward-objective match-win`), strictly greater than the previous best; ties retain the earlier best. Does not automatically change when training opponents or validation names change. |
 | `--eval-every-hands` | Integer > 0 | `5000` | Validation threshold since last evaluation, checked after collection/update. May overshoot by a rollout; also evaluates at total-hand completion, including an empty final batch. |
-| `--eval-deals` | Integer > 0 | `128` | Duplicate-deal **groups per opponent** per validation. Two swapped games/group in hand mode, so 128 means 256 games against each opponent. Increasing this changes the selection experiment/cost. |
+| `--eval-deals` | Integer > 0 | `128` | Duplicate-deal **groups per opponent** per validation. Two swapped games/group, so 128 means 256 games against each opponent: hands, or complete matches with `--reward-objective match-win`. Increasing this changes the selection experiment/cost. |
 | `--bootstrap-samples` | Integer > 0 | `200` | Complete-group percentile-bootstrap replicates in validation, not PPO minibatches. CLI cannot disable validation bootstrap with zero. Evaluation CLIs have their own defaults. |
 | `--checkpoint-every-hands` | Integer > 0 | `5000` | Save `latest.pt` at threshold and final completion. Intermediate progress since last save is not guaranteed recoverable after interruption. Independent of `best.pt` selection/publication. |
 
@@ -1392,6 +1447,8 @@ guarantee of higher hands/second.
 | `--return-estimator` | `gae`, `monte-carlo` | `gae`; `monte-carlo` with `--critic-mode none` | `monte-carlo` uses complete-hand returns (GAE with λ = 1) as a diagnostic baseline. Uses `--gamma` (default 1). `--critic-mode none` requires `monte-carlo`: an explicit `gae` is rejected, never overridden. Fixed for exact resume. |
 | `--oracle-aux-coef` | Finite float ≥ 0 | `0` (disabled) | Weight of the critic's oracle-point interval loss. A positive value requires `--critic-mode centralized` and `--oracle-dataset`; it is rejected with `none` or `local`. |
 | `--oracle-dataset` | Path from `examples.oracle_labels` | Unset | Its SHA256 is stored in the configuration and verified on resume; only the `train` split is optimized and the `validation` split is reported. |
+| `--reward-objective` | `hand-marks`, `match-win` | `hand-marks` | `hand-marks`: one hand per episode, signed marks at hand end (unchanged). `match-win`: one complete match per episode, +1/−1 to the match winner/loser at match end and 0 at intermediate hands; validation on complete matches; `best.pt` by match win rate. Fixed for exact resume; a new stage may change it (trainable value heads and a centralized critic are then reinitialized). Rejected with `--search-fraction` > 0 or `--oracle-aux-coef` > 0. |
+| `--target-marks` | Integer ≥ 1 | `7` | Marks that win a match. Only with `match-win` (another value with `hand-marks` is rejected). Fixed for exact resume. `--total-hands` may be exceeded by at most 2·target − 2 hands. |
 
 When a centralized critic starts from a checkpoint without compatible critic
 weights (every play-only or local-critic file), it is initialized fresh from its own
@@ -1426,7 +1483,11 @@ records the source's mode as `initial_critic_mode`. `--resume` with a different
 - Modern `play_samples` is a compatibility alias for **all** training samples; actual
   playing counts are `phase_samples.play` per rollout.
 - `mean_reward` averages all collected hand rewards, including zero-sample hands;
-  `training_by_opponent` separates counts and means.
+  `training_by_opponent` separates counts and means. With `--reward-objective
+  match-win` it is the mean terminal match reward (+1/−1) per completed match;
+  `matches`, `rollout_matches` (match win rate, hands per match and the separately
+  named hand win rate and marks per hand) and `rollout_bids` are described in
+  [match-win objective](multiphase_selfplay.md#match-win-objective).
 - `metrics` contains aggregate and `bid_*`/`trump_*`/`play_*` losses, entropy, KL and
   clipping statistics. A phase absent from a batch has no optimized phase metrics;
   console fallback zeros are not evidence it trained.
@@ -1857,8 +1918,10 @@ for final testing; repeated selection on one test seed makes it part of validati
 
 Both commands share `--deals 2048`, `--seed 12345`, `--bootstrap-seed 0`,
 `--bootstrap-samples 2000`, `--threads 1`, optional `--output` and optional
-`--log-dir`, with the same ranges as above. They evaluate hands only and do not
-expose independent phase strategies or stochastic inference.
+`--log-dir`, with the same ranges as above. `evaluate_ppo` evaluates hands only;
+`evaluate_selfplay_ppo` evaluates hands by default or complete matches with
+`--episode match`. Neither exposes independent phase strategies or stochastic
+inference.
 
 | Command | Argument | Accepted values / default | Meaning |
 | --- | --- | --- | --- |
@@ -1869,6 +1932,8 @@ expose independent phase strategies or stochastic inference.
 | `evaluate_selfplay_ppo` | `--anchor-checkpoint` | Original anchor path; inferred from checkpoint config | Override must match original anchor SHA256. |
 | `evaluate_selfplay_ppo` | `--opponents` | Unique registered names; default `HHH,CHH,HHR,anchor`, or `HHH,CHH,HHR` for an anchor-free checkpoint | Built-ins, anchor and explicitly registered archives. Requesting `anchor` from an anchor-free checkpoint fails. |
 | `evaluate_selfplay_ppo` | `--opponent-checkpoint` | Repeatable `NAME=PATH` | Registers whole frozen checkpoint opponents. No opponent-composition option here. |
+| `evaluate_selfplay_ppo` | `--episode` | `hand` (default), `match` | `match` plays complete matches to `--target-marks`; `--deals` then counts duplicate match groups (two matches each). Reports add the average match length; match JSON output adds `episode` and `target_marks` (the hand envelope is unchanged). |
+| `evaluate_selfplay_ppo` | `--target-marks` | Integer ≥ 1; default `7` | Match target with `--episode match`. |
 
 These compatibility learner routes do not add the canonical per-selected-phase
 trained check: use files whose routed neural phases are already trained. For explicit
@@ -1898,7 +1963,8 @@ python -m examples.run_pipeline --config configs/pipelines/progressive_training.
 Allowed step commands: `train_ppo`, `train_selfplay_ppo`, `evaluate_ppo`,
 `evaluate_selfplay_ppo`, `evaluate_agent_vs_agent`, `oracle_labels`. Examples are in
 `configs/pipelines/` (`template.json`, `quickstart.json`, `progressive_training.json`,
-`scratch_selfplay.json`, `critic_comparison.json` and the evaluation-only comparison sets).
+`scratch_selfplay.json`, `critic_comparison.json`, `match_win_selfplay.json` and the
+evaluation-only comparison sets).
 
 ## Performance benchmarks
 

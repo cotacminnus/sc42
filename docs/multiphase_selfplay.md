@@ -3,7 +3,9 @@
 Use `examples.train_selfplay_ppo` for new experiments that independently train or
 freeze bidding, trump and playing, or use frozen learned opponents. The original
 play-only `train_ppo` remains a separate reproducible baseline; see
-[legacy PPO](ppo_training.md). Neither command trains multi-hand matches.
+[legacy PPO](ppo_training.md). By default both train on single hands; only
+`train_selfplay_ppo --reward-objective match-win` trains on complete matches
+([match-win objective](#match-win-objective)).
 
 This guide explains mechanics and interpretation. The
 [command reference](command_reference.md#multi-phase-trainer-train_selfplay_ppo) owns every flag,
@@ -210,7 +212,8 @@ signed stake. Multi-mark contract stakes remain part of that return.
 
 GAE traverses each nonempty seat sequence backward, using the next trained
 observation's value and terminal bootstrap zero. It never crosses seat/hand
-boundaries or resets after tricks. Gamma advances once per enabled seat decision;
+boundaries or resets after tricks (under the [match-win objective](#match-win-objective)
+a seat trajectory instead spans every hand of one match). Gamma advances once per enabled seat decision;
 frozen continuations and opponent turns are not separate discount steps. With
 gamma below one, changing enabled phases changes the number of discount steps.
 The value target is advantage plus old value, predicting signed marks, not merely
@@ -406,7 +409,8 @@ to training with the larger budget from the outset, because batch boundaries dif
 
 The validation opponent is independent of the training pool. Multiple opponents
 receive distinct reports on identical duplicate schedules; best.pt optimizes only
-one primary opponent's mean signed marks/hand. Training always validates the
+one primary opponent's mean signed marks/hand (match win rate under the
+[match-win objective](#match-win-objective)). Training always validates the
 current in-memory weights without creating a temporary checkpoint. latest.pt is
 most recent periodically saved progress, not necessarily highest performance.
 An interruption can lose work since that save; progress/log records alone cannot
@@ -595,6 +599,143 @@ All pairings except Base–HHH are significant.
 - **Caveats.** One seed and `best.pt` selected against the anchor's validation
   schedule. Treat these as evidence about these checkpoints, not about the
   methods.
+
+## Match-win objective
+
+`--reward-objective match-win` trains every enabled phase to win complete
+matches (first partnership to `--target-marks`, default 7) instead of maximizing
+signed marks per hand. The default, `hand-marks`, is unchanged bit for bit.
+
+```bash
+python -m examples.train_selfplay_ppo --from-scratch \
+  --learner-bid neural-train --learner-trump neural-train --learner-play neural-train \
+  --reward-objective match-win --target-marks 7 \
+  --opponent-pool HHH:0.3,CHH:0.2,self-current:0.5 --eval-opponents HHH,CHH --selection-opponent HHH \
+  --total-hands 262144 --rollout-decisions 8192 --eval-deals 256 --threads 8 --eval-threads 8 \
+  --output-dir runs/match-win --log-dir logs/experiments/match-win
+```
+
+A complete two-stage experiment is `configs/pipelines/match_win_selfplay.json`
+([experiment pipelines](experiment_pipelines.md#common-workflows)).
+
+### Two objectives
+
+| | `hand-marks` (default) | `match-win` |
+| --- | --- | --- |
+| RL episode | one hand | one complete match (`SelfPlayEnv(episode='match')`) |
+| Reward | signed marks awarded, at hand end | +1 winning / −1 losing partnership, at match end only; 0 at every intermediate hand |
+| Learner partnership, opponent, agents | chosen per hand | chosen once per match and kept for all its hands |
+| Seat trajectory | one hand: bid → trump → 7 plays | every trainable decision of the match, in order, across hand boundaries |
+| Value target | expected signed marks of the hand | expected signed match outcome (2·P(win) − 1) |
+| Validation and best.pt | duplicate hands; mean signed marks/hand | duplicate matches; match win rate |
+| `--total-hands` | hands | still simulated hands (see budgets below) |
+
+Match rewards come from the engine's existing match episodes
+(`texas42/episodes.py`): marks accumulate, the shaker rotates each hand and the
+observation already encodes both teams' match marks relative to the target. No
+rule, scoring or encoder changes. There is no mark-differential or heuristic
+shaping: a 7–6 win and a 7–0 win both return +1.
+
+### Collection and returns
+
+`collect_phase_match` (in `research/ppo/selfplay_rollout.py`, beside the
+unchanged `collect_phase_hand`) plays one match with fixed rollout weights.
+Each learner seat keeps one chronological trajectory for the whole match. A
+hand boundary is an ordinary step: the record before it has reward 0 and is not
+terminal. When the match ends, the signed outcome is attached to the last
+record of each nonempty learner-seat trajectory, which alone is marked done.
+A seat with no decision in the final hand (typically trump-only training when
+the other team declared) still receives the outcome on its last earlier record;
+a seat with no trainable decision in the whole match contributes nothing.
+
+GAE and Monte Carlo returns run unchanged (`RolloutBuffer`) over these
+trajectories, so they span the whole match with terminal bootstrap zero. With
+the default `gamma=1.0` the Monte Carlo return of every decision is the match
+outcome, i.e. its value estimates the undiscounted win probability (rescaled to
+[−1, 1]). `--gae-lambda` keeps its meaning; with gamma below one, discounting
+advances once per trainable seat decision across all hands. Local, centralized
+(privileged features also carry the match score) and policy-only critics all
+use these match returns. Paired partners and frozen phases work as in hand mode.
+
+Randomness uses match-indexed streams (`match-deal-v1`,
+`multiphase-match-actions-v1`, `multiphase-match-opponent-v1`, …) disjoint
+from the hand streams. Match `i` of a run is the same for any worker count.
+
+### Budgets, waves and logging
+
+`--total-hands` remains a budget of actually simulated hands, and only complete
+matches enter a rollout. Collection launches matches in deterministic waves
+sized from the decisions still needed (estimate: target × per-hand minimum) and
+never more than the remaining hand budget divided by the longest possible match
+(2·target − 1 hands), with at least one. Therefore a run or rollout overshoots
+`--total-hands` by **at most 2·target − 2 hands** (12 at seven marks); the final
+update is the first with hands ≥ total. `--rollout-decisions` is reached by
+whole matches; `--max-rollout-hands` still caps a trump-only rollout, and
+eight-match waves bound trump overshoot. Evaluation, checkpoint and snapshot
+intervals keep counting hands.
+
+Each `progress.jsonl` row adds `reward_objective`, `rollout_bids` (contracts by
+bid bucket 30 / 31–41 / 42 / 2+ marks for the learner and opponent teams) and, in
+match mode, `target_marks`, cumulative `matches`, and `rollout_matches`:
+`matches`, `hands`, `mean_hands_per_match`, `match_win_rate`,
+`mean_terminal_reward`, and the separately named hand statistics
+`hand_win_rate` and `mean_signed_marks_per_hand`. `mean_reward` and
+`training_by_opponent[*].mean_signed_reward` are the terminal reward per episode
+(per match here); `training_by_opponent` also gives `matches`, `win_rate` and
+`mean_signed_marks_per_hand`. `value_diagnostics` gives per-phase return and value
+means. Validation rows add `selection_metric`, `selection_score` and
+`evaluation_average_match_length`.
+
+### Validation and best.pt
+
+Match-win training validates the in-memory weights on complete matches through
+the existing paired arena (`compare_agents(episode='match')`): `--eval-deals`
+counts duplicate match groups (each played ABAB and BABA, so two matches), the
+bootstrap resamples whole groups, and reports give match win rate with its 95%
+interval, mean signed marks per hand and average match length. best.pt is the
+first validation with the highest match win rate against `--selection-opponent`
+(strict improvement, so ties keep the earliest). Matches cost roughly
+(average match length) × a hand, so lower `--eval-deals` or raise
+`--eval-every-hands` accordingly. Training rewards never depend on validation.
+
+### Stages, checkpoints and resume
+
+Checkpoints record `reward_objective`, `target_marks`,
+`checkpoint_selection_metric` (`mean_signed_marks` or `match_win_rate`),
+`initial_reward_objective`, `value_initialization` (`random`, `inherited` or
+`reset`) and the `matches` counter. Files written before this option read as
+`hand-marks`, target 7, selected by signed marks. Exact `--resume` restores the
+objective and target and rejects a change to either.
+
+A new stage (`--init-checkpoint`, `--init-play-checkpoint`) may change the
+objective. Signed-mark value estimates are not calibrated match-outcome
+estimates (and vice versa), so when the source objective differs, the value
+heads of the trainable phases are reinitialized from a dedicated seed stream and
+a centralized critic starts fresh; trunks and policy heads are kept, and frozen
+phases are untouched. The console prints the reset. Expect a short period of
+noisy advantages while the new value heads calibrate.
+
+Not supported with `match-win` (rejected with an error): search inside training
+and oracle auxiliary supervision, whose targets are hand points. `--target-marks`
+is rejected with `hand-marks`.
+
+### Comparing the objectives fairly
+
+- **Sample efficiency.** A hand-marks hand is a complete episode with a
+  multi-valued reward; a match gives one ±1 outcome after about 6–10 hands, so
+  credit for each decision is far noisier. Expect match-win training to need
+  substantially more hands to reach the same play quality, and compare at equal
+  `--total-hands` (simulated hands, the dominant cost), not equal updates.
+- **What each optimizes.** Match-win can rationally take score-dependent risk
+  (bid aggressively when behind, conservatively when ahead) that lowers mean
+  marks per hand; hand-marks cannot see a reason to. Judge both on held-out
+  complete matches (`evaluate_selfplay_ppo --episode match`,
+  `evaluate_agent_vs_agent --episode match`) and on duplicate hands, with
+  identical seeds, opponents and deal counts.
+- **Matched conditions.** Same seeds, phases, opponent pool, rollout size,
+  learning rate and budget; change only `--reward-objective`. Report match win
+  rate with its interval, signed marks per hand, average match length and the
+  bid buckets.
 
 ## Search inside training
 

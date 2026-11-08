@@ -43,13 +43,17 @@ def evaluate_many(model, *, opponents=('HHH',), deals=128, seed=12345,
 
 
 def evaluate_policies(model, policies, *, deals=128, seed=12345, bootstrap_seed=0,
-                      bootstrap_samples=200, threads=1, performance=None, partner_model=None):
+                      bootstrap_samples=200, threads=1, performance=None, partner_model=None,
+                      episode='hand', target_marks=7):
     """Validate either in-memory architecture against variants or frozen archives.
 
     Preserve PPOAgent inference for the legacy APIs; per-phase composition has
     its own explicit routing and RNG scheme. Both use the same arena execution.
     partner_model (paired-partner training) plays the team's second seat;
     without it, `model` plays both seats as before.
+
+    episode='match' plays complete matches to target_marks through the same
+    paired arena (deals then counts duplicate match groups, two matches each).
     """
     previous_threads = torch.get_num_threads()
     if previous_threads != 1:
@@ -66,7 +70,8 @@ def evaluate_policies(model, policies, *, deals=128, seed=12345, bootstrap_seed=
         telemetry = {}
         reports = evaluate_matchups(factory, ((s.name, s.factory()) for s in policies),
             num_deals=deals, seed=seed, bootstrap_seed=bootstrap_seed,
-            bootstrap_samples=bootstrap_samples, threads=threads, performance=telemetry)
+            bootstrap_samples=bootstrap_samples, threads=threads, performance=telemetry,
+            episode=episode, target_marks=target_marks)
         if neural_phases is None:
             for values in telemetry.values():
                 values['snapshot_seconds'] = snapshot_seconds

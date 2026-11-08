@@ -251,7 +251,7 @@ take are in the [command reference](docs/command_reference.md).
 | `texas42/belief.py` | Hidden-deal constraints, exact counting/sampling, rollouts, expected action values |
 | `texas42/training.py`, `encoding.py`, `actions.py` | Versioned ID-based views, 387 features, legal global actions |
 | `texas42/openspiel.py` | Optional OpenSpiel adapter over the native engine |
-| `research/ppo/` | Optional PPO training (local, centralized or no critic), oracle label datasets, checkpoints, frozen-policy composition, model-guided search |
+| `research/ppo/` | Optional PPO training (local, centralized or no critic; hand-marks or match-win objective), oracle label datasets, checkpoints, frozen-policy composition, model-guided search |
 | `examples/` | Runnable training, evaluation and benchmark commands, including `run_pipeline.py` |
 | `configs/pipelines/` | Example pipeline JSON files (other files in this directory are git-ignored) |
 | `tests/`, `docs/` | Deterministic `unittest` coverage and technical documentation |

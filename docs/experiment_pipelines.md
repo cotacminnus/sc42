@@ -46,6 +46,7 @@ anything starts.
 | `quickstart.json` | Smoke scale, under a minute on a 16-core CPU: train play from random weights, a new stage that adds bidding (play frozen, the first stage as an opponent), an evaluation against HHH and CHH, and a head-to-head comparison that writes `summary.md`. Too small for conclusions. |
 | `progressive_training.json` | Curriculum from random weights: play → bidding (play frozen) → trump (bid/play frozen) → joint with a centralized critic and historical snapshots → head-to-head evaluation against the pre-joint model. No pretrained checkpoint or anchor. |
 | `scratch_selfplay.json` | All phases from random weights against `HHH:0.3,self-current:0.7`, a second stage adding historical snapshots, then fixed-opponent and head-to-head evaluations. |
+| `match_win_selfplay.json` | Match-win objective: all phases from random weights trained to win complete seven-mark matches against `HHH:0.3,CHH:0.2,self-current:0.5`, a match-win fine-tuning stage adding historical snapshots, held-out evaluation in matches and in hands, and a head-to-head match comparison. |
 | `critic_comparison.json` | Three independent from-scratch branches that differ only in `critic-mode` (`none`, `local`, `centralized`), each evaluated on the same held-out deals. |
 | `study_comparisons.json` | Evaluation only. The one-seed study's Shared and Paired models each against HHH, HHR, HRR, CHH, CRR and RRR, then Paired against Shared (13 comparisons). Needs the study checkpoints in `runs/study-*`, or your own paths. |
 | `study_round_robin.json` | Evaluation only. Every pair of Base, Shared, Paired, RRR, HHH and plain PIMC (15 comparisons). |
@@ -359,6 +360,21 @@ each rollout) and/or `self-snapshots` (published earlier learners) in
 **Train against an earlier stage.** Register it with
 `"opponent-checkpoint": ["stage1=${stage1.best}"]` and use `stage1` in
 `opponent-pool` or `eval-opponents`. See `template.json`.
+
+**Match-win training.** Add `"reward-objective": "match-win"` and
+`"target-marks": 7` to a `train_selfplay_ppo` step to train on complete matches
+(+1/−1 for the match winner, nothing at intermediate hands) instead of signed
+marks per hand; validation then plays complete matches and `best.pt` is selected
+by match win rate. `total-hands` still counts simulated hands, and a step may
+exceed it by at most 2·target − 2 hands (one final match). `${STEP.best}` and
+`${STEP.latest}` work as usual. A later stage that changes the objective resets
+the trainable value heads; an interrupted step resumes with its saved objective.
+Evaluate complete matches with `"episode": "match"` (and `"target-marks"`) on
+`evaluate_selfplay_ppo` or `evaluate_agent_vs_agent`. `match_win_selfplay.json`
+trains all three phases from scratch against `HHH:0.3,CHH:0.2,self-current:0.5`,
+fine-tunes with historical snapshots, and evaluates on held-out matches, held-out
+hands and head to head. Mechanics and how to compare it fairly with hand-marks
+training: [match-win objective](multiphase_selfplay.md#match-win-objective).
 
 **Choose the critic.** `"critic-mode"` takes `"none"` (policy-only PPO with Monte
 Carlo returns and no value loss), `"local"` (the default; omit the key to keep it)

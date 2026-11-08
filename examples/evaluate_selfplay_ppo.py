@@ -19,6 +19,10 @@ def build_parser():
     p.add_argument('--anchor-checkpoint', type=Path)
     p.add_argument('--opponents', help='default HHH,CHH,HHR,anchor; HHH,CHH,HHR for anchor-free checkpoints')
     p.add_argument('--opponent-checkpoint', action='append', default=[], metavar='NAME=PATH')
+    p.add_argument('--episode', choices=('hand', 'match'), default='hand',
+                   help='hand: single-hand duplicate deals; match: complete matches to --target-marks '
+                        '(--deals then counts duplicate match groups)')
+    p.add_argument('--target-marks', type=int, default=7, help='match target (with --episode match)')
     add_evaluation_arguments(p)
     return p
 
@@ -49,7 +53,8 @@ def main(argv=None):
         specs = tuple(registry[n] for n in names)
         telemetry, started = {}, perf_counter()
         reports = evaluate_phases(model, specs, deals=a.deals, seed=a.seed, bootstrap_seed=a.bootstrap_seed,
-            bootstrap_samples=a.bootstrap_samples, threads=a.threads, performance=telemetry)
+            bootstrap_samples=a.bootstrap_samples, threads=a.threads, performance=telemetry,
+            episode=a.episode, target_marks=a.target_marks)
     except (ValueError, FileNotFoundError) as exc:
         p.error(str(exc))
     same_play = None if anchor is None else all(torch.equal(a.cpu(), b.cpu()) for a, b in zip(
@@ -57,11 +62,15 @@ def main(argv=None):
     print(f'Anchor comparison shares identical playing parameters: '
           f'{"N/A (no original anchor)" if same_play is None else same_play}')
     print(f'Learner SHA256: {learner.sha256}\nOriginal anchor SHA256: {anchor.sha256 if anchor else "none"}')
+    print(f'Training objective: {data["metadata"].get("reward_objective", "hand-marks")}; evaluation episode: '
+          + (f'match to {a.target_marks} marks' if a.episode == 'match' else 'hand'))
     details = {}
     for name, report in reports.items():
         print(f'Opponent {name}; identity {registry[name].sha256 or "heuristic variant"}')
         print(format_report(report, {'A': 'neural ' + ','.join(model.neural_phases), 'B': name},
                             telemetry[name]['evaluation_total_seconds']))
+        if a.episode == 'match':
+            print(f'Matches: {report.games_played}; average match length {report.average_match_length:.2f} hands')
         details[name] = evaluation_diagnostics(report)
         print(format_breakdown(details[name]))
         for policy in ('A', 'B'):
@@ -75,6 +84,8 @@ def main(argv=None):
     if a.output:
         a.output.write_text(json.dumps(dict(checkpoint_id=learner.sha256, anchor_id=anchor.sha256 if anchor else None,
             opponent_identities={s.name: s.sha256 for s in specs}, same_playing_parameters=same_play,
+            # Present only for match evaluation, so the legacy hand envelope is unchanged.
+            **(dict(episode='match', target_marks=a.target_marks) if a.episode == 'match' else {}),
             evaluations={n: r.to_dict() for n, r in reports.items()}, breakdowns=details), indent=2) + '\n')
     return reports
 

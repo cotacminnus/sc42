@@ -16,6 +16,11 @@ from .critic import CRITIC_MODES, ORACLE_POINT_SCALE, interval_loss, new_critic
 from .model import freeze_value_heads
 
 
+REWARD_OBJECTIVES = ('hand-marks', 'match-win')
+# Selection metric of best.pt for each objective (recorded in checkpoint metadata).
+SELECTION_METRICS = {'hand-marks': 'mean_signed_marks', 'match-win': 'match_win_rate'}
+
+
 @dataclass(frozen=True)
 class SelfPlayConfig(Config):
     learn_phases: tuple = ('bid',)
@@ -50,6 +55,16 @@ class SelfPlayConfig(Config):
     search_target: str = 'cmpo'       # 'cmpo' (KL to the clipped MPO target) or 'advantage'
     search_clip: float = 2.0          # CMPO clip c on Â/σ (KL step bound 2c)
     search_warmup_hands: int = 0      # ordinary PPO until this many hands
+    # Training objective (docs/multiphase_selfplay.md, "Match-win objective").
+    # 'hand-marks' (default): one hand per episode, signed marks at hand end.
+    # 'match-win': one complete match to target_marks per episode, +1/-1 to
+    # the winning/losing partnership at match end and zero reward before it.
+    reward_objective: str = 'hand-marks'
+    target_marks: int = 7
+
+    @property
+    def match_objective(self):
+        return self.reward_objective == 'match-win'
 
     @property
     def snapshot_fallback(self):
@@ -139,16 +154,75 @@ class SelfPlayConfig(Config):
             raise ValueError('search_clip must be finite and positive')
         if type(self.search_warmup_hands) is not int or self.search_warmup_hands < 0:
             raise ValueError('search_warmup_hands must be a nonnegative integer')
+        if self.reward_objective not in REWARD_OBJECTIVES:
+            raise ValueError('reward_objective must be ' + ' or '.join(REWARD_OBJECTIVES))
+        if type(self.target_marks) is not int or self.target_marks < 1:
+            raise ValueError('target_marks must be a positive integer')
+        if self.match_objective:
+            # Both auxiliary targets are hand-level: search values are expected
+            # hand points and oracle labels are certified hand points. Mixing them
+            # with match-outcome returns would be silently inconsistent.
+            if self.search_fraction:
+                raise ValueError('Search inside training uses hand-level point targets; it is not supported '
+                                 'with reward_objective match-win (set search_fraction 0)')
+            if self.oracle_aux_coef > 0:
+                raise ValueError('Oracle auxiliary supervision uses hand-level point labels; it is not supported '
+                                 'with reward_objective match-win')
+        elif self.target_marks != 7:
+            raise ValueError('target_marks applies only to reward_objective match-win; hand-marks episodes '
+                             'are single hands')
+
+
+def reset_value_heads(model, learn_phases, seed):
+    """Reinitialize the value heads of trainable phases from a dedicated seed stream.
+
+    Used when a new stage changes the reward objective: signed-mark value
+    estimates are not calibrated match-outcome estimates (or vice versa). The
+    global RNG is not consumed; frozen phases and every actor weight are kept.
+    """
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(stream_seed(seed, 'objective-value-reset-v1'))
+        for phase in learn_phases:
+            model.networks[phase].value.reset_parameters()
+
+
+def bid_summary(rows):
+    """Resolved-contract bid buckets for the learner team and its opponents."""
+    from .selfplay_rollout import BID_CATEGORIES
+    summary = {team: dict.fromkeys(BID_CATEGORIES, 0) for team in ('learner', 'opponent')}
+    for row in rows:
+        for learner_declared, category in row['bids']:
+            summary['learner' if learner_declared else 'opponent'][category] += 1
+    return summary
+
+
+def match_summary(rows):
+    """Rollout match statistics; hand-level values are kept separately identifiable."""
+    matches, hands = len(rows), sum(r['hands'] for r in rows)
+    hand_marks = [m for r in rows for m in r['hand_marks']]
+    return dict(matches=matches, hands=hands, mean_hands_per_match=hands / matches,
+                match_win_rate=sum(r['reward'] > 0 for r in rows) / matches,
+                mean_terminal_reward=sum(r['reward'] for r in rows) / matches,
+                hand_win_rate=sum(m > 0 for m in hand_marks) / hands,
+                mean_signed_marks_per_hand=sum(hand_marks) / hands)
 
 
 class SelfPlayTrainer(Trainer):
-    def __init__(self, config, initial=None, *, initial_critic=None):
+    def __init__(self, config, initial=None, *, initial_critic=None, initial_objective=None):
         """initial: the initialization model; None (required) for from-scratch training.
 
         initial_critic: a CentralCritic state_dict to continue, else a fresh critic.
         critic_initialization records which happened ('fresh' or 'checkpoint');
         it is None for the local actor-critic. A from-scratch resume restores
         weights afterwards through selfplay_checkpoint.resume().
+
+        initial_objective: the reward objective the initialization weights were
+        trained for (None: unknown or from scratch). When it differs from
+        config.reward_objective, value estimates have different semantics
+        (signed marks per hand vs signed match outcome): the value heads of the
+        trainable phases are reinitialized and initial_critic is not copied.
+        Actor weights (trunks and policy heads) are kept. value_initialization
+        records 'random', 'inherited' or 'reset'.
         """
         super().__init__(config)
         if config.from_scratch:
@@ -201,6 +275,13 @@ class SelfPlayTrainer(Trainer):
             model = PhaseActorCritic.from_play(initial, config.learn_phases)
         if not config.learner_phases and not config.from_scratch:
             model.trained_phases = tuple(getattr(initial, 'trained_phases', ('play',)))
+        self.value_initialization = 'random' if config.from_scratch else 'inherited'
+        if (not config.from_scratch and initial_objective is not None
+                and initial_objective != config.reward_objective):
+            reset_value_heads(model, config.learn_phases, config.seed)
+            initial_critic = None
+            self.value_initialization = 'reset'
+        self.initial_objective = initial_objective
         model.configure_learning(config.learn_phases)
         if config.critic_mode == 'none':
             freeze_value_heads(model)  # After configure_learning, which enables whole phases.
@@ -233,6 +314,9 @@ class SelfPlayTrainer(Trainer):
             self.oracle_summary = dataset.summary()
             self.oracle_shuffle = torch.Generator().manual_seed(stream_seed(config.seed, 'oracle-auxiliary-v1'))
         self.sampling_scheme = 'multiphase-episode-v1'
+        self.matches = 0  # Completed match episodes (match-win objective only).
+        self.match_metrics = None  # Last rollout's match statistics (match-win only).
+        self.bid_metrics = None  # Last rollout's resolved-contract bid buckets by team.
         minimum = self.minimum_decisions
         self.workers = resolve_workers(config.threads, min(config.total_hands,
                                 math.ceil(config.rollout_decisions / max(1, minimum))))
@@ -300,22 +384,30 @@ class SelfPlayTrainer(Trainer):
         search = self.training_search()
         if search is not None:
             critic = (critic[0] if critic else None, search)
-        rows, pids, indices, actual = [], set(), [], 0
+        match = c.match_objective
+        if match:
+            # Complete matches only: (critic, no search, target marks).
+            critic = (critic[0] if critic else None, None, c.target_marks)
+        # hands counts simulated hands of this rollout; indices are hand (or match) episodes.
+        rows, pids, indices, actual, hands = [], set(), [], 0, 0
         previous = torch.get_num_threads()
         try:
-            while actual < c.rollout_decisions and self.hands + len(indices) < c.total_hands:
-                remaining = c.total_hands - self.hands - len(indices)
+            while actual < c.rollout_decisions and self.hands + hands < c.total_hands:
+                remaining = c.total_hands - self.hands - hands
                 if not self.minimum_decisions:
-                    remaining = min(remaining, c.max_rollout_hands - len(indices))
+                    remaining = min(remaining, c.max_rollout_hands - hands)
                     if remaining <= 0:
                         break
-                count = min(math.ceil((c.rollout_decisions - actual) / max(1, self.minimum_decisions)), remaining)
+                if match:
+                    count = self._match_wave(actual, remaining)
+                else:
+                    count = min(math.ceil((c.rollout_decisions - actual) / max(1, self.minimum_decisions)), remaining)
                 # Neural trump produces a variable extra sample. Fixed-size waves
                 # keep boundaries independent of worker scheduling and use actual
                 # accumulated decisions. At most one eight-hand wave overshoots.
                 if 'trump' in c.learn_phases:
                     count = min(count, 8)
-                first = self.hands + len(indices)
+                first = (self.matches if match else self.hands) + len(indices)
                 wave = tuple(range(first, first + count))
                 indices.extend(wave)
                 size = math.ceil(count / self.workers)
@@ -332,6 +424,7 @@ class SelfPlayTrainer(Trainer):
                 pids.update(pid for _, pid in chunks)
                 rows.extend(completed)
                 actual += sum(len(path) for r in completed for path in r['paths'])
+                hands += sum(r['hands'] for r in completed) if match else count
         except BaseException:
             self.close()
             raise
@@ -351,11 +444,23 @@ class SelfPlayTrainer(Trainer):
         for row in rows:
             self.opponent_assignments.append((row['episode'], row['opponent'], row['opponent_sha256']))
             stats = self.opponent_metrics.setdefault(row['opponent'], dict(hands=0, reward_sum=0.0))
-            stats['hands'] += 1
+            if match:
+                # reward_sum/mean_signed_reward stay the terminal episode reward
+                # (here +1/-1 per match); hand-level marks are reported separately.
+                for key in ('matches', 'wins', 'hand_marks_sum'):
+                    stats.setdefault(key, 0)
+                stats['matches'] += 1
+                stats['wins'] += int(row['reward'] > 0)
+                stats['hand_marks_sum'] += sum(row['hand_marks'])
+                stats['hands'] += row['hands']
+            else:
+                stats['hands'] += 1
             stats['reward_sum'] += row['reward']
             for path in row['paths']:
                 if not path:
-                    continue  # A defending learner has no trump action/reward trajectory.
+                    # A defending learner has no trump action/reward trajectory;
+                    # in a match, a trump-only seat may never have declared.
+                    continue
                 index = partner_index(path[0].seat) if len(models) == 2 else 0
                 buffers[index].add_trajectory(path, c.gamma, c.gae_lambda, estimator=c.return_estimator,
                                               baseline=c.critic_mode != 'none')
@@ -365,20 +470,46 @@ class SelfPlayTrainer(Trainer):
                     counts = self.partner_phase_counts[index]
                     counts[phase] = counts.get(phase, 0) + 1
         for stats in self.opponent_metrics.values():
-            stats['mean_signed_reward'] = stats['reward_sum'] / stats['hands']
-        expected = count * self.minimum_decisions
+            if match:
+                stats['mean_signed_reward'] = stats['reward_sum'] / stats['matches']
+                stats['win_rate'] = stats['wins'] / stats['matches']
+                stats['mean_signed_marks_per_hand'] = stats['hand_marks_sum'] / stats['hands']
+            else:
+                stats['mean_signed_reward'] = stats['reward_sum'] / stats['hands']
+        expected = hands * self.minimum_decisions
         total = sum(len(b) for b in buffers)
-        if not expected <= total <= expected + count * int('trump' in c.learn_phases):
+        if not expected <= total <= expected + hands * int('trump' in c.learn_phases):
             raise RuntimeError('Incorrect enabled-phase rollout count')
+        self.bid_metrics = bid_summary(rows)
+        self.match_metrics = match_summary(rows) if match else None
         self.rollout_performance = {k: sum(r[k] for r in rows)
                                    for k in ('inference_seconds', 'neural_inference_seconds', 'opponent_loading_seconds')}
         self.rollout_performance['worker_peak_rss_bytes'] = max((r['worker_rss_bytes'] or 0 for r in rows), default=0) or None
         self.rollout_performance['merging_seconds'] = perf_counter() - merging_started
         if search is not None:
             self.rollout_performance.update(self.search_performance)
-        self.hands += count
+        self.hands += hands
+        if match:
+            self.matches += count
         self.collection_seconds = perf_counter() - started
+        # Mean terminal learner-team reward per episode (hand or match).
         return buffers, sum(r['reward'] for r in rows) / count
+
+    def _match_wave(self, actual, remaining):
+        """Matches in the next collection wave (match-win objective).
+
+        Depends only on accumulated decisions and hands, never on worker
+        scheduling. A match lasts at most 2*target_marks-1 hands, so a wave
+        never launches more matches than the remaining hand budget can hold
+        except for a single final match: the completed-hand budget is exceeded
+        by at most 2*target_marks-2 hands, and unfinished matches never occur.
+        """
+        c = self.config
+        longest = 2 * c.target_marks - 1
+        # A neutral estimate of trainable decisions per match (target hands).
+        per_match = max(1, self.minimum_decisions * c.target_marks)
+        count = math.ceil((c.rollout_decisions - actual) / per_match)
+        return max(1, min(count, remaining // longest))
 
     def auxiliary_loss(self):
         """Interval loss of the critic's oracle head on certified point bounds."""
@@ -558,13 +689,13 @@ class PairedSelfPlayTrainer(SelfPlayTrainer):
     self-snapshots are not supported yet (SelfPlayConfig rejects them).
     """
 
-    def __init__(self, config, initial=None):
+    def __init__(self, config, initial=None, *, initial_objective=None):
         # initial=None is from-scratch training: SelfPlayTrainer draws the random
         # initialization from a fixed seed stream, so both partners still start equal.
         if config.partner_mode != 'paired':
             raise ValueError("PairedSelfPlayTrainer requires partner_mode='paired'")
-        super().__init__(config, initial)
-        self.partner = SelfPlayTrainer(config, initial)
+        super().__init__(config, initial, initial_objective=initial_objective)
+        self.partner = SelfPlayTrainer(config, initial, initial_objective=initial_objective)
         # Distinct shuffle stream so the partners do not see identical minibatch orders.
         self.partner.shuffle = torch.Generator().manual_seed(
             stream_seed(config.seed, 'minibatches-partner-2'))
@@ -581,7 +712,7 @@ class PairedSelfPlayTrainer(SelfPlayTrainer):
         buffers, reward = self._collect()
         self.samples += len(buffers[0])
         self.partner.samples += len(buffers[1])
-        self.partner.hands = self.hands
+        self.partner.hands, self.partner.matches = self.hands, self.matches
         return tuple(buffers), reward
 
     def update(self, buffers):

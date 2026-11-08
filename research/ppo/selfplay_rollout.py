@@ -57,35 +57,9 @@ def collect_phase_hand(models, seed, episode, learn_phases, pool, critic=None, c
     generator, so the hand, its actions and its records are exactly those of
     a run without search.
     """
-    models = models if isinstance(models, tuple) else (models,)
-    if len(models) not in (1, 2):
-        raise ValueError('Expected one shared learner or two paired partners')
-
-    def learner(seat):
-        return models[partner_index(seat)] if len(models) == 2 else models[0]
-
+    learner, label, spec, agents, loading = _episode_setup(
+        models, seed, episode, learn_phases, pool, 'multiphase-opponent-actions-v1')
     team = (episode + seed) % 2
-    label, spec = pool.choose(seed, episode)
-    started = perf_counter()
-    if spec is None:
-        def factory(seat, agent_seed):
-            return PPOAgent(learner(seat), seed=agent_seed, stochastic_phases=learn_phases)
-    else:
-        if spec not in _FACTORIES:
-            created = spec.factory()
-            if hasattr(created, 'prepare'):
-                created.prepare()
-            _FACTORIES[spec] = created
-        factory = _FACTORIES[spec]
-    loading = perf_counter() - started
-    agents = []
-    for seat in range(4):
-        agent_seed = stream_seed(seed, 'multiphase-opponent-actions-v1', episode * 4 + seat)
-        agent = (PPOAgent(learner(seat), seed=agent_seed) if seat % 2 == team else factory(seat, agent_seed))
-        agent.reset(seat)
-        if isinstance(agent, PPOAgent):
-            agent.profile_inference = True
-        agents.append(agent)
     generator = torch.Generator().manual_seed(stream_seed(seed, 'multiphase-actions-v1', episode))
     env = SelfPlayEnv(episode='hand', seed=stream_seed(seed, 'deal', episode))
     obs = env.reset()
@@ -104,20 +78,9 @@ def collect_phase_hand(models, seed, episode, learn_phases, pool, critic=None, c
                                               stream_seed(seed, 'search-worlds-v1', episode * 64 + decisions)))
         started = perf_counter()
         if obs.seat in paths and obs.phase in learn_phases:
-            features = tuple(encode(obs))
-            x = torch.tensor([features], dtype=torch.float32)
-            mask = torch.tensor([obs.action_mask], dtype=torch.bool)
-            neural_started = perf_counter()
-            action, logp, value = learner(obs.seat).select(x, mask, generator=generator)
-            critic_features = None
-            if critic is not None:
-                critic_features = tuple(encode_privileged(obs, env.remaining_hands()))
-                value = critic(torch.tensor([critic_features], dtype=torch.float32))
-            neural_inference += perf_counter() - neural_started
-            action = int(action.item())
-            paths[obs.seat].append(Experience(features, obs.action_mask, action,
-                float(logp.item()), float(value.item()), 0.0, False, obs.seat, episode,
-                critic_features))
+            action, seconds = _learner_decision(learner(obs.seat), obs, generator, critic, env,
+                                                paths[obs.seat], episode)
+            neural_inference += seconds
         else:
             action = agents[obs.seat].act(obs)
         inference += perf_counter() - started
@@ -134,20 +97,181 @@ def collect_phase_hand(models, seed, episode, learn_phases, pool, critic=None, c
             raise RuntimeError('Incorrect controlled-seat trajectory length')
         if path:
             path[-1] = replace(path[-1], reward=float(transition.rewards[seat]), done=True)
-    try:
-        from pathlib import Path
-        rss = int(Path('/proc/self/statm').read_text().split()[1]) * os.sysconf('SC_PAGE_SIZE')
-    except (OSError, ValueError, IndexError):
-        rss = None
-    row = dict(worker_rss_bytes=rss, episode=episode, paths=tuple(tuple(p) for p in paths.values()),
+    row = dict(worker_rss_bytes=_worker_rss(), episode=episode, paths=tuple(tuple(p) for p in paths.values()),
                reward=transition.rewards[team], opponent=label,
                opponent_sha256=current_sha256 if spec is None else spec.sha256,
                decisions=decisions, points=transition.hand_result.team_points, bidder=transition.hand_result.bidder,
+               bids=(_bid_record(transition.hand_result, team),),
                inference_seconds=inference, opponent_loading_seconds=loading,
                neural_inference_seconds=neural_inference + sum(getattr(a, 'neural_inference_seconds', 0.0) for a in agents))
     if search is not None:
         row['search_requests'] = tuple(requests)
     return row
+
+
+def _episode_setup(models, seed, episode, learn_phases, pool, agent_stream, *, match=False):
+    """Learner routing, opponent choice and four fresh agents for one episode.
+
+    Hand episodes keep their original streams and construction order exactly.
+    Match episodes (match=True) choose the opponent once per match from
+    match-specific streams; agent_stream seeds every seat's own agent.
+    """
+    models = models if isinstance(models, tuple) else (models,)
+    if len(models) not in (1, 2):
+        raise ValueError('Expected one shared learner or two paired partners')
+
+    def learner(seat):
+        return models[partner_index(seat)] if len(models) == 2 else models[0]
+
+    team = (episode + seed) % 2
+    label, spec = pool.choose(seed, episode, match=match)
+    started = perf_counter()
+    if spec is None:
+        def factory(seat, agent_seed):
+            return PPOAgent(learner(seat), seed=agent_seed, stochastic_phases=learn_phases)
+    else:
+        if spec not in _FACTORIES:
+            created = spec.factory()
+            if hasattr(created, 'prepare'):
+                created.prepare()
+            _FACTORIES[spec] = created
+        factory = _FACTORIES[spec]
+    loading = perf_counter() - started
+    agents = []
+    for seat in range(4):
+        agent_seed = stream_seed(seed, agent_stream, episode * 4 + seat)
+        agent = (PPOAgent(learner(seat), seed=agent_seed) if seat % 2 == team else factory(seat, agent_seed))
+        agent.reset(seat)
+        if isinstance(agent, PPOAgent):
+            agent.profile_inference = True
+        agents.append(agent)
+    return learner, label, spec, agents, loading
+
+
+def _learner_decision(model, obs, generator, critic, env, path, episode):
+    """Sample one trainable learner decision and append its record; (action, neural seconds).
+
+    The actor sees only encode(obs); privileged critic features are stored
+    beside the record and never enter action selection.
+    """
+    features = tuple(encode(obs))
+    x = torch.tensor([features], dtype=torch.float32)
+    mask = torch.tensor([obs.action_mask], dtype=torch.bool)
+    started = perf_counter()
+    action, logp, value = model.select(x, mask, generator=generator)
+    critic_features = None
+    if critic is not None:
+        critic_features = tuple(encode_privileged(obs, env.remaining_hands()))
+        value = critic(torch.tensor([critic_features], dtype=torch.float32))
+    seconds = perf_counter() - started
+    action = int(action.item())
+    path.append(Experience(features, obs.action_mask, action, float(logp.item()), float(value.item()),
+                           0.0, False, obs.seat, episode, critic_features))
+    return action, seconds
+
+
+BID_CATEGORIES = ('30', '31-41', '42', '2+ marks')
+
+
+def bid_category(bid):
+    """Rollout bid diagnostic bucket: 30, 31-41, 42 (one mark) or 2+ marks."""
+    if bid.points is not None:
+        return '30' if bid.points == 30 else '31-41'
+    return '42' if bid.marks == 1 else '2+ marks'
+
+
+def _bid_record(result, team):
+    """(contract declared by the learner team, bid bucket) for one completed hand."""
+    return result.bidder % 2 == team, bid_category(result.bid)
+
+
+def _worker_rss():
+    try:
+        from pathlib import Path
+        return int(Path('/proc/self/statm').read_text().split()[1]) * os.sysconf('SC_PAGE_SIZE')
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+@torch.no_grad()
+def collect_phase_match(models, seed, match, learn_phases, pool, critic=None, current_sha256=None, *,
+                        target_marks=7):
+    """One complete match to target_marks; the match-win counterpart of collect_phase_hand.
+
+    The learner partnership, the opponent and every agent are chosen once per
+    match and persist across hands; SelfPlayEnv(episode='match') carries the
+    marks and rotates the shaker. Each learner seat keeps ONE chronological
+    trajectory across all hands (bid, trump and play records): hand
+    boundaries are ordinary steps with zero reward, never terminal. At match
+    end the signed result (+1 winning partnership, -1 losing) is attached to
+    the last record of each nonempty learner-seat trajectory, which alone is
+    marked done, so returns span the whole match. A seat without a decision
+    in the final hand still receives the outcome on its last earlier record;
+    a seat with no record at all (trump-only learner that never declared)
+    yields an empty path that the trainer skips.
+
+    All randomness uses match-indexed streams disjoint from the hand
+    collector's, so hand-mode sampling is untouched. Search inside training
+    is not supported here (SelfPlayConfig rejects it).
+    """
+    learner, label, spec, agents, loading = _episode_setup(
+        models, seed, match, learn_phases, pool, 'multiphase-match-opponent-actions-v1', match=True)
+    team = (match + seed) % 2
+    generator = torch.Generator().manual_seed(stream_seed(seed, 'multiphase-match-actions-v1', match))
+    env = SelfPlayEnv(episode='match', target_marks=target_marks,
+                      seed=stream_seed(seed, 'match-deal-v1', match))
+    obs = env.reset()
+    paths = {s: [] for s in range(4) if s % 2 == team}
+    decisions = hand_decisions = 0
+    inference = neural_inference = 0.0
+    hands, shakers, bids = [], [env.shaker], []
+    expected = int('bid' in learn_phases) + 7 * int('play' in learn_phases)
+    lengths = {s: 0 for s in paths}
+    while True:
+        started = perf_counter()
+        if obs.seat in paths and obs.phase in learn_phases:
+            action, seconds = _learner_decision(learner(obs.seat), obs, generator, critic, env,
+                                                paths[obs.seat], match)
+            neural_inference += seconds
+        else:
+            action = agents[obs.seat].act(obs)
+        inference += perf_counter() - started
+        transition = env.step(action)
+        decisions += 1
+        hand_decisions += 1
+        result = transition.hand_result
+        if result is not None:
+            if hand_decisions != 33 or sum(result.team_points) != 42:
+                raise RuntimeError('Incomplete normal hand')
+            for seat, path in paths.items():
+                added = len(path) - lengths[seat]
+                if not expected <= added <= expected + int('trump' in learn_phases):
+                    raise RuntimeError('Incorrect controlled-seat trajectory length')
+                lengths[seat] = len(path)
+            if not transition.terminated and any(transition.rewards):
+                raise RuntimeError('Intermediate match hands must not pay policy rewards')
+            hands.append(result.marks_awarded if result.scoring_team == team else -result.marks_awarded)
+            bids.append(_bid_record(result, team))
+            hand_decisions = 0
+            if len(hands) > 2 * target_marks - 1:
+                raise RuntimeError('Match exceeded its maximum length')
+            if transition.terminated:
+                break
+            shakers.append(env.shaker)
+        obs = transition.observation
+    if transition.match_winner is None or set(map(abs, transition.rewards)) != {1}:
+        raise RuntimeError('A match must end with signed unit team rewards')
+    for seat, path in paths.items():
+        if path:
+            path[-1] = replace(path[-1], reward=float(transition.rewards[seat]), done=True)
+    return dict(worker_rss_bytes=_worker_rss(), episode=match, paths=tuple(tuple(p) for p in paths.values()),
+                reward=transition.rewards[team], opponent=label,
+                opponent_sha256=current_sha256 if spec is None else spec.sha256,
+                decisions=decisions, hands=len(hands), hand_marks=tuple(hands), bids=tuple(bids),
+                shakers=tuple(shakers), final_marks=(env.match_marks[team], env.match_marks[1 - team]),
+                inference_seconds=inference, opponent_loading_seconds=loading,
+                neural_inference_seconds=neural_inference + sum(getattr(a, 'neural_inference_seconds', 0.0)
+                                                                for a in agents))
 
 
 def _load_learners(weights, hidden, neural):
@@ -225,10 +349,12 @@ def attach_search_values(rows, values):
 
 def phase_chunk(task):
     global _CRITIC, _CRITIC_VERSION
-    # optional: (critic weights or None[, TrainingSearch]); absent keeps the original task.
+    # optional: (critic weights or None[, TrainingSearch or None[, match target marks]]);
+    # absent keeps the original task. A target collects complete matches, not hands.
     weights, hidden, neural, learn, seed, indices, pool, *optional = task
     critic_weights = optional[0] if optional else None
     search = optional[1] if len(optional) > 1 else None
+    target_marks = optional[2] if len(optional) > 2 else None
     # Bound process-local opponent caches to the current roster plus anchor.
     from .checkpoint import _FROZEN_MODELS
     allowed = {s for s in (pool.anchor, *pool.policies, *pool.snapshots) if s is not None}
@@ -257,7 +383,12 @@ def phase_chunk(task):
     rows, current = [], hashlib.sha256(b''.join(payloads)).hexdigest()
     for episode in indices:
         try:
-            rows.append(collect_phase_hand(_LEARNER, seed, episode, learn, pool, critic, current, search))
+            if target_marks is None:
+                rows.append(collect_phase_hand(_LEARNER, seed, episode, learn, pool, critic, current, search))
+            else:
+                rows.append(collect_phase_match(_LEARNER, seed, episode, learn, pool, critic, current,
+                                                target_marks=target_marks))
         except Exception as exc:
-            raise RuntimeError(f'Multi-phase episode={episode} worker={os.getpid()}: {exc}') from exc
+            kind = 'episode' if target_marks is None else 'match'
+            raise RuntimeError(f'Multi-phase {kind}={episode} worker={os.getpid()}: {exc}') from exc
     return rows, os.getpid()

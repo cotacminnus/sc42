@@ -8,11 +8,13 @@ from time import perf_counter
 import torch
 from examples.experiment_output import record_output, add_output_arguments, add_config_arguments
 from research.ppo.trainer import Config
-from research.ppo.checkpoint import load_model
+from research.ppo.checkpoint import load_model, load_frozen
 from research.ppo.multiphase import phases, PhaseActorCritic, PHASES, LearnerPhaseSpec, resolve_learner_phases
 from research.ppo.opponents import PolicySpec, CheckpointIdentity, historical_pool, policy_registry
-from research.ppo.selfplay_trainer import SelfPlayConfig, SelfPlayTrainer, PairedSelfPlayTrainer
-from research.ppo.selfplay_checkpoint import save, resume, config_from_dict, save_pair, resume_pair
+from research.ppo.selfplay_trainer import (SelfPlayConfig, SelfPlayTrainer, PairedSelfPlayTrainer,
+                                           REWARD_OBJECTIVES, SELECTION_METRICS)
+from research.ppo.selfplay_checkpoint import (save, resume, config_from_dict, save_pair, resume_pair,
+                                              reward_objective)
 from research.ppo.selfplay_evaluation import evaluate_phases, frozen_model, evaluation_diagnostics
 from research.ppo.imitation import clone_bidding, teacher_data, playing_kl
 from research.ppo.seeds import stream_seed
@@ -101,6 +103,14 @@ def build_parser():
                         help='cmpo: KL to the clipped MPO target; advantage: all-action clipped surrogate')
     search.add_argument('--search-clip', type=float, default=2.0, help='CMPO clip c on normalized advantages')
     search.add_argument('--search-warmup-hands', type=int, default=0, help='ordinary PPO before searching')
+    objective = parser.add_argument_group(
+        'training objective', 'docs/multiphase_selfplay.md#match-win-objective: hand-marks (default) trains on '
+        'signed marks per hand; match-win plays complete matches and rewards only the match winner (+1/-1)')
+    objective.add_argument('--reward-objective', choices=REWARD_OBJECTIVES, default='hand-marks',
+                           help='match-win also validates on complete matches and selects best.pt by '
+                                'match win rate; --total-hands still counts hands')
+    objective.add_argument('--target-marks', type=int, default=7,
+                           help='marks that win a match (match-win only)')
     parser.add_argument('--eval-threads', type=int, default=1)
     parser.add_argument('--output-dir', type=Path, default=Path('runs/ppo-selfplay'))
     add_output_arguments(parser)
@@ -228,11 +238,12 @@ def main(argv=None):
             partner_mode='paired' if args.paired_partners else 'shared',
             search_fraction=args.search_fraction, search_samples=args.search_samples,
             search_weight=args.search_weight, search_target=args.search_target,
-            search_clip=args.search_clip, search_warmup_hands=args.search_warmup_hands)
+            search_clip=args.search_clip, search_warmup_hands=args.search_warmup_hands,
+            reward_objective=args.reward_objective, target_marks=args.target_marks)
         if args.resume:
             if saved is None:
                 raise ValueError('Resume requires a multi-phase checkpoint; use --init-play-checkpoint for migration')
-            for key in ('critic_mode', 'return_estimator'):
+            for key in ('critic_mode', 'return_estimator', 'reward_objective', 'target_marks'):
                 if '--' + key.replace('_', '-') in explicit and getattr(config, key) != getattr(saved, key):
                     raise ValueError(f'Exact resume cannot change {key} ({getattr(saved, key)} -> '
                                      f'{getattr(config, key)}); start a new stage with --init-checkpoint')
@@ -262,6 +273,14 @@ def main(argv=None):
             factory = spec.factory()
             if hasattr(factory, 'prepare'):
                 factory.prepare()
+        # Objective of the initialization weights (version-1 and older files: hand-marks).
+        # A different objective resets trainable value heads and the centralized critic.
+        initial_objective = None
+        if not args.resume and not config.from_scratch:
+            sources = {reward_objective(data['metadata'])} | {
+                reward_objective(load_frozen(s.source)[1]) for s in config.learner_phases
+                if s.state == 'neural-train' and s.source is not None}
+            initial_objective = (sources.pop() if len(sources) == 1 else 'mixed')
         initial_critic = None
         if (not args.resume and config.critic_mode == 'centralized' and data is not None
                 and data.get('critic') is not None
@@ -274,9 +293,10 @@ def main(argv=None):
         source = None if config.from_scratch else initial
         if paired:
             # The config rejects a centralized critic in paired mode, so no initial critic applies.
-            trainer = PairedSelfPlayTrainer(config, source)
+            trainer = PairedSelfPlayTrainer(config, source, initial_objective=initial_objective)
         else:
-            trainer = SelfPlayTrainer(config, source, initial_critic=initial_critic)
+            trainer = SelfPlayTrainer(config, source, initial_critic=initial_critic,
+                                      initial_objective=initial_objective)
         learners = (trainer, trainer.partner) if paired else (trainer,)
         if args.resume:
             (resume_pair if paired else resume)(args.resume, trainer)
@@ -301,6 +321,8 @@ def main(argv=None):
     (directory / 'config.json').write_text(json.dumps(asdict(config), indent=2) + '\n')
     checkpoints = directory / 'checkpoints'
     started, initial_hands = perf_counter(), trainer.hands
+    match = config.match_objective
+    episode = dict(episode='match', target_marks=config.target_marks) if match else {}
     validation_seed = stream_seed(config.seed, 'selfplay-validation-v1')
     bootstrap_seed = stream_seed(config.seed, 'selfplay-validation-bootstrap-v1')
     # The forgetting diagnostic compares play with the original anchor; without one it is unavailable.
@@ -322,6 +344,17 @@ def main(argv=None):
         print('Original anchor: none')
     print(f'Device: {trainer.device}; workers: {trainer.workers}; torch threads: {config.torch_threads}; validation workers: {resolve_workers(args.eval_threads)}')
     print(f'Primary selection opponent: {config.primary_opponent}; training pool: {config.opponent_probabilities}')
+    if match:
+        print(f'Objective: match-win (complete matches to {config.target_marks} marks; +1/-1 to the match '
+              f'winner/loser, 0 at intermediate hands; gamma={config.gamma}). Budget counts hands: the last '
+              f'match may exceed --total-hands by at most {2 * config.target_marks - 2} hands. '
+              f'Validation: {config.eval_deals} duplicate match groups; best.pt by match win rate')
+    else:
+        print('Objective: hand-marks (signed marks per hand); best.pt by mean signed marks')
+    if trainer.value_initialization == 'reset':
+        print(f'Value heads of {",".join(config.learn_phases)} reinitialized: the initialization weights were '
+              f'trained for {trainer.initial_objective}, not {config.reward_objective}'
+              + ('; centralized critic initialized fresh' if trainer.critic is not None else ''))
     if config.critic_mode == 'none':
         print(f'Critic: none (policy-only PPO); returns: monte-carlo, zero baseline (gamma={config.gamma}); '
               'no value loss, value heads not optimized, --value-coef unused')
@@ -352,7 +385,8 @@ def main(argv=None):
             if not all(frozen_verified.values()):
                 raise RuntimeError('Frozen phase parameters changed during training')
             frozen_play_verified = frozen_verified.get('play')
-            final = trainer.hands == config.total_hands
+            # A match-win rollout finishes its last match, so hands may exceed the budget.
+            final = trainer.hands >= config.total_hands
             total_samples = sum(t.samples for t in learners)  # Both partners when paired.
             row = dict(hands=trainer.hands, play_samples=total_samples, training_samples=total_samples,
                 updates=trainer.updates, optimizer_steps=trainer.optimizer_steps, mean_reward=reward,
@@ -373,7 +407,11 @@ def main(argv=None):
                 critic_initialization=trainer.critic_initialization,
                 value_diagnostics=trainer.value_diagnostics if sample_count else None,
                 oracle_dataset=trainer.oracle_summary,
-                oracle_validation=trainer.oracle_validation_metrics() if sample_count else None)
+                oracle_validation=trainer.oracle_validation_metrics() if sample_count else None,
+                reward_objective=config.reward_objective, rollout_bids=trainer.bid_metrics)
+            if match:
+                row.update(target_marks=config.target_marks, matches=trainer.matches,
+                           rollout_matches=trainer.match_metrics)
             # (label, trainer, metrics) per learner network. Paired metrics are
             # {'partner_1': ..., 'partner_2': ...}; a partner without samples is absent.
             groups = ([(f'partner {i} ', t, metrics.get(f'partner_{i}', {})) for i, t in enumerate(learners, start=1)]
@@ -388,8 +426,24 @@ def main(argv=None):
                     playing_anchor_kl=(playing_kl(t.model, anchor, reference)
                                        if reference is not None and 'play' in t.model.neural_phases else None))
                     for i, t in enumerate(learners, start=1)}
-            print(f'Update {trainer.updates}: {trainer.hands}/{config.total_hands} hands; samples {trainer.phase_counts}; reward {reward:+.4f}')
+            if match:
+                m = trainer.match_metrics
+                print(f'Update {trainer.updates}: {trainer.hands}/{config.total_hands} hands, {trainer.matches} matches; '
+                      f'samples {trainer.phase_counts}; rollout {m["matches"]} matches, {m["hands"]} hands '
+                      f'({m["mean_hands_per_match"]:.2f}/match); match win {m["match_win_rate"]:.1%}; '
+                      f'mean terminal reward {reward:+.4f}; hand win {m["hand_win_rate"]:.1%}; '
+                      f'marks/hand {m["mean_signed_marks_per_hand"]:+.4f}')
+            else:
+                print(f'Update {trainer.updates}: {trainer.hands}/{config.total_hands} hands; samples {trainer.phase_counts}; reward {reward:+.4f}')
+            bids = trainer.bid_metrics
+            print('  contracts (learner/opponent): ' + '; '.join(
+                f'{k} {bids["learner"][k]}/{bids["opponent"][k]}' for k in bids['learner']))
             for label, learner, values in groups:
+                if values and learner.value_diagnostics:
+                    # Returns are signed marks (hand-marks) or the signed match outcome (match-win).
+                    print(f'  {label}returns: ' + '; '.join(
+                        f'{p} mean {d["return_mean"]:+.4f} (value {"N/A" if d["value_mean"] is None else format(d["value_mean"], "+.4f")})'
+                        for p, d in learner.value_diagnostics.items() if isinstance(d, dict)))
                 if values and config.critic_mode != 'none':  # Policy-only PPO has no critic to report.
                     ev = learner.value_diagnostics['explained_variance']
                     print(f'  {label}critic: value loss {values["value_loss"]:.5f}; explained variance '
@@ -418,7 +472,7 @@ def main(argv=None):
                 reports = evaluate_phases(trainer.model, specs, deals=config.eval_deals, seed=validation_seed,
                     bootstrap_seed=bootstrap_seed, bootstrap_samples=config.bootstrap_samples,
                     threads=args.eval_threads, performance=telemetry,
-                    partner_model=trainer.partner.model if paired else None)
+                    partner_model=trainer.partner.model if paired else None, **episode)
                 row['evaluation_seconds'] = perf_counter() - evaluation_started
                 row['evaluations'] = {n: r.to_dict() for n, r in reports.items()}
                 row['evaluation_performances'] = telemetry
@@ -429,7 +483,16 @@ def main(argv=None):
                 trainer.last_eval = trainer.hands
                 for name, report in reports.items():
                     print(f'Evaluation {name}\n{report.summary()}')
-                score = reports[config.primary_opponent].metrics[0].mean_signed_marks
+                # best.pt: match win rate (match-win) or mean signed marks per hand (hand-marks)
+                # against the selection opponent; strict improvement keeps the earliest tie.
+                primary = reports[config.primary_opponent]
+                score = primary.metrics[0].win_rate if match else primary.metrics[0].mean_signed_marks
+                row['selection_metric'] = SELECTION_METRICS[config.reward_objective]
+                row['selection_score'] = score
+                if match:
+                    row['evaluation_average_match_length'] = primary.average_match_length
+                    print(f'Selection ({config.primary_opponent}): match win rate {score:.3f} over '
+                          f'{primary.games_played} matches; average length {primary.average_match_length:.2f} hands')
                 if score > trainer.best_score:
                     trainer.best_score = score
                     saving_started = perf_counter(); save_checkpoint('best.pt')
@@ -448,7 +511,8 @@ def main(argv=None):
                 sink.write(json.dumps(row, allow_nan=False) + '\n')
     finally:
         trainer.close()
-    print(f'Complete: {trainer.hands} hands, {sum(t.samples for t in learners)} training decisions, {trainer.updates} updates; elapsed {perf_counter() - started:.3f}s')
+    print(f'Complete: {trainer.hands} hands' + (f', {trainer.matches} matches' if match else '')
+          + f', {sum(t.samples for t in learners)} training decisions, {trainer.updates} updates; elapsed {perf_counter() - started:.3f}s')
     if paired:
         print(f'Paired models: {checkpoints / "partner-1"} (seat 0/1) and {checkpoints / "partner-2"} (seat 2/3)')
     return trainer
