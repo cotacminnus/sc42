@@ -1,0 +1,106 @@
+{
+  "schema_version": 1,
+  "name": "match-win-selfplay-v1",
+  "description": "Match-win objective (docs/multiphase_selfplay.md#match-win-objective): all three phases from random weights trained to win complete seven-mark matches (+1/-1 at match end only) against a mixed heuristic/current-policy pool, then a match-win fine-tuning stage that adds historical snapshots. Each stage trains an exact number of complete matches (total-matches; total-hands is ignored). best.pt is selected by match win rate against HHH over 256 duplicate match pairs (512 matches per opponent). Held-out evaluation in complete matches and in single hands, then a head-to-head match evaluation of the two stages.",
+  "output_root": "runs/pipelines/ppo-3neural-7-markwinning-20261107",
+  "steps": [
+    {
+      "id": "match-scratch",
+      "command": "train_selfplay_ppo",
+      "description": "From scratch: bidding, trump and play trainable; one RL episode is one complete seven-mark match.",
+      "args": {
+        "from-scratch": true,
+        "learner-bid": "neural-train",
+        "learner-trump": "neural-train",
+        "learner-play": "neural-train",
+        "reward-objective": "match-win",
+        "target-marks": 7,
+        "opponent-pool": "HHH:0.3,CHH:0.2,self-current:0.5",
+        "eval-opponents": "HHH,CHH",
+        "selection-opponent": "HHH",
+        "eval-match-pairs": 256,
+        "eval-every-hands": 16384,
+        "checkpoint-every-hands": 16384,
+        "total-matches": 262144,
+        "rollout-decisions": 8192,
+        "threads": 16,
+        "eval-threads": 16,
+        "seed": 42
+      }
+    },
+    {
+      "id": "match-finetune",
+      "command": "train_selfplay_ppo",
+      "description": "New match-win stage from the first stage's best.pt (same objective, so value heads are inherited); opponents now include published snapshots.",
+      "args": {
+        "init-checkpoint": "${match-scratch.best}",
+        "learner-bid": "neural-train",
+        "learner-trump": "neural-train",
+        "learner-play": "neural-train",
+        "reward-objective": "match-win",
+        "target-marks": 7,
+        "opponent-pool": "HHH:0.2,self-current:0.3,self-snapshots:0.5",
+        "snapshot-every-hands": 16384,
+        "snapshot-pool-size": 8,
+        "eval-opponents": "HHH,CHH",
+        "selection-opponent": "HHH",
+        "eval-match-pairs": 256,
+        "eval-every-hands": 16384,
+        "checkpoint-every-hands": 16384,
+        "learning-rate": 5e-5,
+        "total-matches": 786432,
+        "rollout-decisions": 8192,
+        "threads": 16,
+        "eval-threads": 16,
+        "seed": 1876
+      }
+    },
+    {
+      "id": "held-out-matches",
+      "command": "evaluate_selfplay_ppo",
+      "description": "Held-out seed; 1024 duplicate match pairs (2048 complete seven-mark matches) per opponent.",
+      "args": {
+        "checkpoint": "${match-finetune.best}",
+        "opponents": "HHH,CHH,HHR",
+        "episode": "match",
+        "target-marks": 7,
+        "match-pairs": 4096,
+        "seed": 12345,
+        "threads": 16
+      }
+    },
+    {
+      "id": "held-out-hands",
+      "command": "evaluate_selfplay_ppo",
+      "description": "The same checkpoint on single duplicate hands (signed marks per hand), for comparison with hand-marks runs.",
+      "args": {
+        "checkpoint": "${match-finetune.best}",
+        "opponents": "HHH,CHH,HHR",
+        "episode": "hand",
+        "deals": 4096,
+        "seed": 12345,
+        "threads": 16
+      }
+    },
+    {
+      "id": "head-to-head-matches",
+      "command": "evaluate_agent_vs_agent",
+      "description": "Fine-tuned stage (A) against the from-scratch stage (B): 4096 duplicate match pairs (8192 complete seven-mark matches).",
+      "args": {
+        "agent-a-checkpoint": "${match-finetune.best}",
+        "agent-a-bid": "neural",
+        "agent-a-trump": "neural",
+        "agent-a-play": "neural",
+        "agent-b-checkpoint": "${match-scratch.best}",
+        "agent-b-bid": "neural",
+        "agent-b-trump": "neural",
+        "agent-b-play": "neural",
+        "episode": "match",
+        "target-marks": 7,
+        "match-pairs": 4096,
+        "seed": 7355608,
+        "threads": 16
+      }
+    }
+  ]
+}

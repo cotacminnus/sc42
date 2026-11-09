@@ -1,0 +1,157 @@
+{
+  "schema_version": 1,
+  "name": "compare-hand-vs-match-v1",
+  "description": "Controlled reward-objective comparison (docs/multiphase_selfplay.md#comparing-the-objectives-fairly). Two independent from-scratch branches that differ only in --reward-objective: A hand-marks (signed marks per hand) and B match-win (+1/-1 per complete seven-mark match). Same seed (identical random actor initialization), architecture, trainable phases, opponent pool, rollout size, optimizer settings and an EQUAL simulated-hand budget (total-hands; B may exceed it by at most 12 hands to finish its last match). Primary metric: held-out match win rate of each branch's latest.pt (equal experience, no dependence on the branches' different best.pt criteria) against the same fixed opponents on identical seeds; best.pt, single-hand and head-to-head results are secondary.",
+  "output_root": "runs/pipelines/compare-hand-vs-match-v1",
+  "steps": [
+    {
+      "id": "hand-marks",
+      "command": "train_selfplay_ppo",
+      "description": "Condition A: hand-level signed-mark reward.",
+      "args": {
+        "from-scratch": true,
+        "learner-bid": "neural-train",
+        "learner-trump": "neural-train",
+        "learner-play": "neural-train",
+        "reward-objective": "hand-marks",
+        "opponent-pool": "HHH:0.3,CHH:0.2,self-current:0.5",
+        "eval-opponents": "HHH,CHH",
+        "selection-opponent": "HHH",
+        "eval-deals": 256,
+        "eval-every-hands": 16384,
+        "checkpoint-every-hands": 16384,
+        "total-hands": 262144,
+        "rollout-decisions": 8192,
+        "threads": 16,
+        "eval-threads": 16,
+        "seed": 42
+      }
+    },
+    {
+      "id": "match-win",
+      "command": "train_selfplay_ppo",
+      "description": "Condition B: terminal match-win reward; identical except for the objective (and its match validation).",
+      "args": {
+        "from-scratch": true,
+        "learner-bid": "neural-train",
+        "learner-trump": "neural-train",
+        "learner-play": "neural-train",
+        "reward-objective": "match-win",
+        "target-marks": 7,
+        "opponent-pool": "HHH:0.3,CHH:0.2,self-current:0.5",
+        "eval-opponents": "HHH,CHH",
+        "selection-opponent": "HHH",
+        "eval-match-pairs": 256,
+        "eval-every-hands": 16384,
+        "checkpoint-every-hands": 16384,
+        "total-hands": 262144,
+        "rollout-decisions": 8192,
+        "threads": 16,
+        "eval-threads": 16,
+        "seed": 42
+      }
+    },
+    {
+      "id": "hand-marks-matches",
+      "command": "evaluate_selfplay_ppo",
+      "description": "PRIMARY (A): latest.pt in complete seven-mark matches, 1024 duplicate match pairs per opponent.",
+      "args": {
+        "checkpoint": "${hand-marks.latest}",
+        "opponents": "HHH,CHH,HHR",
+        "episode": "match",
+        "target-marks": 7,
+        "match-pairs": 1024,
+        "seed": 20261107,
+        "threads": 16
+      }
+    },
+    {
+      "id": "match-win-matches",
+      "command": "evaluate_selfplay_ppo",
+      "description": "PRIMARY (B): latest.pt on the identical match schedule.",
+      "args": {
+        "checkpoint": "${match-win.latest}",
+        "opponents": "HHH,CHH,HHR",
+        "episode": "match",
+        "target-marks": 7,
+        "match-pairs": 1024,
+        "seed": 20261107,
+        "threads": 16
+      }
+    },
+    {
+      "id": "hand-marks-best-matches",
+      "command": "evaluate_selfplay_ppo",
+      "description": "Secondary (A): best.pt (selected by signed marks) in complete matches.",
+      "args": {
+        "checkpoint": "${hand-marks.best}",
+        "opponents": "HHH,CHH,HHR",
+        "episode": "match",
+        "target-marks": 7,
+        "match-pairs": 1024,
+        "seed": 20261107,
+        "threads": 16
+      }
+    },
+    {
+      "id": "match-win-best-matches",
+      "command": "evaluate_selfplay_ppo",
+      "description": "Secondary (B): best.pt (selected by match win rate) in complete matches.",
+      "args": {
+        "checkpoint": "${match-win.best}",
+        "opponents": "HHH,CHH,HHR",
+        "episode": "match",
+        "target-marks": 7,
+        "match-pairs": 1024,
+        "seed": 20261107,
+        "threads": 16
+      }
+    },
+    {
+      "id": "hand-marks-hands",
+      "command": "evaluate_selfplay_ppo",
+      "description": "Secondary (A): latest.pt on single duplicate hands (signed marks per hand).",
+      "args": {
+        "checkpoint": "${hand-marks.latest}",
+        "opponents": "HHH,CHH,HHR",
+        "episode": "hand",
+        "deals": 4096,
+        "seed": 20261107,
+        "threads": 16
+      }
+    },
+    {
+      "id": "match-win-hands",
+      "command": "evaluate_selfplay_ppo",
+      "description": "Secondary (B): latest.pt on the identical single-hand schedule.",
+      "args": {
+        "checkpoint": "${match-win.latest}",
+        "opponents": "HHH,CHH,HHR",
+        "episode": "hand",
+        "deals": 4096,
+        "seed": 20261107,
+        "threads": 16
+      }
+    },
+    {
+      "id": "head-to-head",
+      "command": "evaluate_agent_vs_agent",
+      "description": "B (match-win) against A (hand-marks), latest.pt of each, in complete seven-mark matches.",
+      "args": {
+        "agent-a-checkpoint": "${match-win.latest}",
+        "agent-a-bid": "neural",
+        "agent-a-trump": "neural",
+        "agent-a-play": "neural",
+        "agent-b-checkpoint": "${hand-marks.latest}",
+        "agent-b-bid": "neural",
+        "agent-b-trump": "neural",
+        "agent-b-play": "neural",
+        "episode": "match",
+        "target-marks": 7,
+        "match-pairs": 2048,
+        "seed": 7355608,
+        "threads": 16
+      }
+    }
+  ]
+}

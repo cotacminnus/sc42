@@ -121,7 +121,11 @@ Next experiments:
   oracle auxiliary head under matched budgets
   ([Recipe 13](command_reference.md#recipe-13-local-versus-centralized-critic-and-oracle-auxiliary)).
 - Study opponent-pool curricula and cross-play partners before introducing live
-  self-play, recurrent policies or match-level PPO.
+  self-play or recurrent policies.
+- Compare the match-win objective (complete seven-mark matches, +1/−1 at match
+  end; [match-win objective](multiphase_selfplay.md#match-win-objective)) with
+  hand-marks training under equal hand budgets, on held-out matches and hands.
+  Implemented; no results yet.
 - Deep Monte Carlo remains an alternative algorithm to compare under equal budgets.
 - Search inside training (Monte Carlo search as a policy-improvement signal) has a
   [theory, evidence and plan document](search_training.md): the theoretical case

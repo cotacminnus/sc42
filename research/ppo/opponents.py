@@ -290,10 +290,16 @@ class HistoricalPool:
         total = sum(w for _, w in entries)
         object.__setattr__(self, 'probabilities', tuple((n, str(w / total)) for n, w in sorted(entries)))
 
-    def choose(self, seed, episode):
+    def choose(self, seed, episode, *, match=False):
+        """(label, frozen spec or None for the learner's own snapshot) for one episode.
+
+        match=True draws a match-indexed choice from disjoint streams, made once
+        per complete match; hand episodes keep their original streams.
+        """
+        prefix = 'multiphase-match-' if match else 'multiphase-'
         name = self.probabilities[0][0]
         if len(self.probabilities) > 1:
-            draw = random.Random(stream_seed(seed, 'multiphase-opponent-v1', episode)).random()
+            draw = random.Random(stream_seed(seed, prefix + 'opponent-v1', episode)).random()
             cumulative = 0.0
             for name, probability in self.probabilities:
                 cumulative += float(Fraction(probability))
@@ -304,7 +310,8 @@ class HistoricalPool:
             return name, None
         if name == SELF_SNAPSHOTS:
             roster = self.snapshots or (self.anchor,)
-            index = random.Random(stream_seed(seed, 'historical-snapshot-v1', episode)).randrange(len(roster))
+            stream = 'historical-match-snapshot-v1' if match else 'historical-snapshot-v1'
+            index = random.Random(stream_seed(seed, stream, episode)).randrange(len(roster))
             return name, roster[index]
         return name, next(p for p in self.policies if p.name == name)
 

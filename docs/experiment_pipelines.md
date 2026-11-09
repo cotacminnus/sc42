@@ -46,6 +46,8 @@ anything starts.
 | `quickstart.json` | Smoke scale, under a minute on a 16-core CPU: train play from random weights, a new stage that adds bidding (play frozen, the first stage as an opponent), an evaluation against HHH and CHH, and a head-to-head comparison that writes `summary.md`. Too small for conclusions. |
 | `progressive_training.json` | Curriculum from random weights: play → bidding (play frozen) → trump (bid/play frozen) → joint with a centralized critic and historical snapshots → head-to-head evaluation against the pre-joint model. No pretrained checkpoint or anchor. |
 | `scratch_selfplay.json` | All phases from random weights against `HHH:0.3,self-current:0.7`, a second stage adding historical snapshots, then fixed-opponent and head-to-head evaluations. |
+| `match_win_selfplay.json` | Match-win objective with match budgets: all phases from random weights trained for exactly 40,000 complete seven-mark matches against `HHH:0.3,CHH:0.2,self-current:0.5`, a 100,000-match fine-tuning stage adding historical snapshots (validation on 256 match pairs), held-out evaluation in matches and in hands, and a head-to-head match comparison. |
+| `compare_hand_vs_match.json` | Controlled comparison of `hand-marks` and `match-win` training: identical seed, phases, pool and simulated-hand budget; both evaluated on identical held-out match and hand schedules, plus head to head. |
 | `critic_comparison.json` | Three independent from-scratch branches that differ only in `critic-mode` (`none`, `local`, `centralized`), each evaluated on the same held-out deals. |
 | `study_comparisons.json` | Evaluation only. The one-seed study's Shared and Paired models each against HHH, HHR, HRR, CHH, CRR and RRR, then Paired against Shared (13 comparisons). Needs the study checkpoints in `runs/study-*`, or your own paths. |
 | `study_round_robin.json` | Evaluation only. Every pair of Base, Shared, Paired, RRR, HHH and plain PIMC (15 comparisons). |
@@ -359,6 +361,31 @@ each rollout) and/or `self-snapshots` (published earlier learners) in
 **Train against an earlier stage.** Register it with
 `"opponent-checkpoint": ["stage1=${stage1.best}"]` and use `stage1` in
 `opponent-pool` or `eval-opponents`. See `template.json`.
+
+**Match-win training.** Add `"reward-objective": "match-win"` and
+`"target-marks": 7` to a `train_selfplay_ppo` step to train on complete matches
+(+1/−1 for the match winner, nothing at intermediate hands) instead of signed
+marks per hand; validation then plays complete matches and `best.pt` is selected
+by match win rate. Budget the step with `"total-matches": N` to train exactly N
+complete matches (`total-hands` is then ignored), or with `"total-hands"` to
+budget simulated hands (the last match is finished, at most 2·target − 2 extra
+hands). `rollout-decisions` remains the trainable decisions per PPO update.
+Name validation groups `"eval-match-pairs"` (each pair is two complete matches;
+it replaces `eval-deals`, and giving both is rejected at `--dry-run`). An
+interrupted step resumes with its saved objective and budget. `${STEP.best}` and
+`${STEP.latest}` work as usual; a later stage that changes the objective resets
+the trainable value heads. Evaluate complete matches with `"episode": "match"`
+and `"match-pairs"` on `evaluate_selfplay_ppo` or `evaluate_agent_vs_agent`.
+`match_win_selfplay.json` trains 40,000 then 100,000 matches; mechanics and
+diagnostics: [match-win objective](multiphase_selfplay.md#match-win-objective).
+
+**Compare reward objectives.** `compare_hand_vs_match.json` trains two
+independent from-scratch branches that differ only in `reward-objective` (and
+its validation unit), with the same seed, phases, pool and an equal
+`total-hands` budget, then evaluates both `latest.pt` files on identical
+held-out match schedules (primary metric: match win rate), plus `best.pt`,
+single-hand and head-to-head results. Do not give the match branch a
+`total-matches` budget here: equal match counts are unequal game experience.
 
 **Choose the critic.** `"critic-mode"` takes `"none"` (policy-only PPO with Monte
 Carlo returns and no value loss), `"local"` (the default; omit the key to keep it)

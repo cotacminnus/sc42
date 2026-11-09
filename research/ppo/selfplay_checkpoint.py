@@ -75,6 +75,18 @@ def validate(data):
             raise ValueError('Incompatible centralized critic state or privileged feature layout')
     elif data.get('critic') is not None:
         raise ValueError(f'A {config.critic_mode}-critic checkpoint must not contain centralized critic weights')
+    # Older checkpoints predate reward objectives: single hands, signed marks,
+    # best.pt selected by mean signed marks.
+    from .selfplay_trainer import SELECTION_METRICS
+    if (m.get('reward_objective', 'hand-marks') != config.reward_objective
+            or m.get('target_marks', config.target_marks) != config.target_marks
+            or m.get('checkpoint_selection_metric', 'mean_signed_marks') != SELECTION_METRICS[config.reward_objective]):
+        raise ValueError('Inconsistent reward objective, target marks or checkpoint selection metadata')
+
+
+def reward_objective(metadata):
+    """Training objective recorded in checkpoint metadata; version-1 and older files mean hand-marks."""
+    return metadata.get('reward_objective', 'hand-marks')
 
 
 def config_from_dict(data):
@@ -120,6 +132,15 @@ def save(path, trainer):
     data['metadata']['learner_phases'] = [asdict(s) for s in trainer.learner_phases]
     data['metadata']['optimizer_parameters'] = optimizer_parameters(trainer)
     data['metadata']['initial_critic_mode'] = trainer.initial_critic_mode
+    from .selfplay_trainer import SELECTION_METRICS
+    data['metadata'].update(reward_objective=trainer.config.reward_objective,
+                            target_marks=trainer.config.target_marks,
+                            budget_unit=trainer.config.budget_unit,
+                            budget_target=trainer.config.budget_target,
+                            checkpoint_selection_metric=SELECTION_METRICS[trainer.config.reward_objective],
+                            initial_reward_objective=trainer.initial_objective,
+                            value_initialization=trainer.value_initialization)
+    data['progress']['matches'] = trainer.matches
     # Provenance: random initialization names no checkpoint, path or SHA256.
     data['metadata']['initialization'] = 'random' if trainer.config.from_scratch else 'checkpoint'
     data['metadata']['initialization_seed'] = trainer.config.seed if trainer.config.from_scratch else None
@@ -148,14 +169,22 @@ def resume(path, trainer):
         raise ValueError('Play-only checkpoints initialize a new stage; they cannot exactly resume multi-phase training')
     saved = asdict(config_from_dict(data['config']))
     current = asdict(trainer.config)
+    # Budgets may grow on exact resume, but never switch unit (hands <-> matches).
+    if (saved.get('total_matches') is None) != (current['total_matches'] is None):
+        raise ValueError('Exact resume cannot switch between a hand budget (total_hands) and a match budget '
+                         '(total_matches); initialize a new stage instead')
     for key, value in saved.items():
-        if key not in ('total_hands', 'device', 'threads') and current[key] != value:
+        if key not in ('total_hands', 'total_matches', 'device', 'threads') and current[key] != value:
             raise ValueError(f'Exact resume configuration mismatch: {key}; initialize a new stage instead')
     if tuple(data['metadata']['neural_phases']) != trainer.model.neural_phases:
         raise ValueError('Exact resume neural phase architecture mismatch')
     if trainer.device.type != data['sampling_device']:
         raise ValueError('Exact resume requires the same optimizer device type')
-    if trainer.config.total_hands < data['progress']['hands']:
+    if trainer.config.budget_unit == 'matches':
+        # total_hands is ignored under a match budget, so only completed matches bound it.
+        if trainer.config.total_matches < data['progress'].get('matches', 0):
+            raise ValueError('total_matches precedes saved progress')
+    elif trainer.config.total_hands < data['progress']['hands']:
         raise ValueError('total_hands precedes saved progress')
     membership = optimizer_parameters(trainer)
     if data['metadata'].get('optimizer_parameters', membership) != membership:
@@ -165,6 +194,8 @@ def resume(path, trainer):
         trainer.critic.load_state_dict(data['critic'], strict=True)
         trainer.critic_initialization = data['metadata'].get('critic_initialization')
     trainer.initial_critic_mode = data['metadata'].get('initial_critic_mode')
+    trainer.initial_objective = data['metadata'].get('initial_reward_objective')
+    trainer.value_initialization = data['metadata'].get('value_initialization', trainer.value_initialization)
     if trainer.oracle_shuffle is not None:
         trainer.oracle_shuffle.set_state(data['rng']['oracle'])
     trainer.model.trained_phases = tuple(data['metadata']['trained_phases'])
