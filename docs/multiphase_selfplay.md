@@ -611,11 +611,13 @@ python -m examples.train_selfplay_ppo --from-scratch \
   --learner-bid neural-train --learner-trump neural-train --learner-play neural-train \
   --reward-objective match-win --target-marks 7 \
   --opponent-pool HHH:0.3,CHH:0.2,self-current:0.5 --eval-opponents HHH,CHH --selection-opponent HHH \
-  --total-hands 262144 --rollout-decisions 8192 --eval-deals 256 --threads 8 --eval-threads 8 \
+  --total-matches 40000 --rollout-decisions 8192 --eval-match-pairs 256 --threads 8 --eval-threads 8 \
   --output-dir runs/match-win --log-dir logs/experiments/match-win
 ```
 
-A complete two-stage experiment is `configs/pipelines/match_win_selfplay.json`
+A complete two-stage experiment is `configs/pipelines/match_win_selfplay.json`;
+the controlled comparison with hand-marks training is
+`configs/pipelines/compare_hand_vs_match.json`
 ([experiment pipelines](experiment_pipelines.md#common-workflows)).
 
 ### Two objectives
@@ -628,7 +630,7 @@ A complete two-stage experiment is `configs/pipelines/match_win_selfplay.json`
 | Seat trajectory | one hand: bid → trump → 7 plays | every trainable decision of the match, in order, across hand boundaries |
 | Value target | expected signed marks of the hand | expected signed match outcome (2·P(win) − 1) |
 | Validation and best.pt | duplicate hands; mean signed marks/hand | duplicate matches; match win rate |
-| `--total-hands` | hands | still simulated hands (see budgets below) |
+| Budget | `--total-hands` (hands) | `--total-matches` (exactly N complete matches), or `--total-hands` (simulated hands) |
 
 Match rewards come from the engine's existing match episodes
 (`texas42/episodes.py`): marks accumulate, the shaker rotates each hand and the
@@ -661,41 +663,92 @@ Randomness uses match-indexed streams (`match-deal-v1`,
 `multiphase-match-actions-v1`, `multiphase-match-opponent-v1`, …) disjoint
 from the hand streams. Match `i` of a run is the same for any worker count.
 
-### Budgets, waves and logging
+### Budgets: total-hands versus total-matches
 
-`--total-hands` remains a budget of actually simulated hands, and only complete
-matches enter a rollout. Collection launches matches in deterministic waves
-sized from the decisions still needed (estimate: target × per-hand minimum) and
-never more than the remaining hand budget divided by the longest possible match
-(2·target − 1 hands), with at least one. Therefore a run or rollout overshoots
-`--total-hands` by **at most 2·target − 2 hands** (12 at seven marks); the final
-update is the first with hands ≥ total. `--rollout-decisions` is reached by
-whole matches; `--max-rollout-hands` still caps a trump-only rollout, and
-eight-match waves bound trump overshoot. Evaluation, checkpoint and snapshot
-intervals keep counting hands.
+A terminal match reward exists only when a match ends, so collection never
+truncates a match: an unfinished match has no return to learn from, and
+bootstrapping it from a value estimate would make the result depend on where
+a rollout happened to stop. Every rollout therefore contains whole matches, and
+a budget is reached only at a match boundary.
 
-Each `progress.jsonl` row adds `reward_objective`, `rollout_bids` (contracts by
-bid bucket 30 / 31–41 / 42 / 2+ marks for the learner and opponent teams) and, in
-match mode, `target_marks`, cumulative `matches`, and `rollout_matches`:
-`matches`, `hands`, `mean_hands_per_match`, `match_win_rate`,
-`mean_terminal_reward`, and the separately named hand statistics
-`hand_win_rate` and `mean_signed_marks_per_hand`. `mean_reward` and
-`training_by_opponent[*].mean_signed_reward` are the terminal reward per episode
-(per match here); `training_by_opponent` also gives `matches`, `win_rate` and
-`mean_signed_marks_per_hand`. `value_diagnostics` gives per-phase return and value
-means. Validation rows add `selection_metric`, `selection_score` and
-`evaluation_average_match_length`.
+| Objective | `--total-matches` | Stopping condition |
+| --- | --- | --- |
+| `hand-marks` | omitted | `--total-hands` (unchanged) |
+| `hand-marks` | given | rejected: a match budget needs `match-win` |
+| `match-win` | omitted | `--total-hands` simulated hands; the last match is finished, so a run overshoots by **at most 2·target − 2 hands** (12 at seven marks) |
+| `match-win` | given | **exactly N completed matches**; `--total-hands` is ignored entirely (not an extra maximum), even when given explicitly |
+
+`--rollout-decisions` stays a target number of *trainable decisions* per PPO
+update, not a match count. Collection launches matches in deterministic waves
+sized from the decisions still needed (estimate: target × per-hand minimum
+trainable decisions per match) and keeps adding waves until the target is
+reached. Under a match budget a wave never exceeds the matches still allowed, so
+no extra match is ever scheduled and the final rollout may hold fewer decisions
+than the target; under a hand budget a wave never exceeds the remaining hands
+divided by the longest possible match (2·target − 1), with at least one. Wave
+sizes depend only on decisions, hands and matches already collected, never on
+worker scheduling, so match indices, streams and results are identical for any
+worker count. With trump-only training (possibly zero samples per match),
+`--max-rollout-hands` still bounds each rollout and eight-match waves bound its
+overshoot, so collection cannot loop. Evaluation, checkpoint and snapshot
+intervals keep counting hands, and snapshot files stay named by simulated hands.
+
+Report all three units: completed **matches** (the budget and the episode
+count), simulated **hands** (the dominant compute cost and the unit for comparing
+with hand-marks runs) and **trainable decisions** (PPO samples, which vary with
+the trainable phases and with match length). A match budget fixes the first but
+not the other two.
+
+### Progress and bidding diagnostics
+
+Every `progress.jsonl` row has `reward_objective`, `budget_unit` (`hands` or
+`matches`), `budget_target`, `hands`, `training_samples`, `updates`,
+`rollout_bids` (resolved contracts by bucket 30 / 31–41 / 42 / 2+ marks for the
+learner and opponent teams) and `bidding` (below). Match-win rows add
+`target_marks`, cumulative `matches`, this rollout's `rollout_matches` and
+`rollout_hands`, `mean_hands_per_match`, `match_win_rate`,
+`mean_terminal_reward`, the separately named hand statistics `hand_win_rate`
+and `mean_signed_marks_per_hand`, and `rollout_match_metrics` (the same values
+as one object). `mean_reward` and `training_by_opponent[*].mean_signed_reward`
+are the terminal reward per episode (per match here); `training_by_opponent`
+also gives `matches`, `win_rate` and `mean_signed_marks_per_hand`.
+`value_diagnostics` gives per-phase return and value means. Validation rows add
+`selection_metric`, `selection_score`, `evaluation_average_match_length` and
+`evaluation_sample_units`.
+
+Both collectors record every auction call of every seat from the actor's own
+public observation (no hidden hands): seat and partnership, the match score
+before the call (own and opposing marks; leading, tied or trailing), whether
+passing was legal and whether the call was forced, the call's bucket (pass, 30,
+31–41, 42, 2+ marks) and exact action key, the standing high bid, the buckets of
+all legal alternatives, and whether the caller's partnership won the auction.
+Only aggregates are logged, under `bidding.learner` and `bidding.opponent`:
+
+| Field | Question it answers |
+| --- | --- |
+| `calls`, `call_rates`, `pass_rate`, `voluntary_pass_rate`, `forced_calls` | How often does the team pass or bid each bucket? |
+| `high_bid_rate`, `high_bid_available_rate` | Does it rarely *attempt* 42 / 2+ mark bids, even when they are legal? |
+| `bid_attempts[bucket].auction_won`, `.overbid_rate` | Does it attempt high bids but get overbid? |
+| `contracts.by_category[bucket].success_rate` | Does it win high contracts but fail them? |
+| `by_score_state`, `by_match_score["own-opp"]` | Does its bidding change with the match score? |
+
+The per-decision records live only in the rollout rows and are never written to
+checkpoints.
 
 ### Validation and best.pt
 
 Match-win training validates the in-memory weights on complete matches through
-the existing paired arena (`compare_agents(episode='match')`): `--eval-deals`
-counts duplicate match groups (each played ABAB and BABA, so two matches), the
+the existing paired arena (`compare_agents(episode='match')`):
+`--eval-match-pairs N` (the match-mode name of `--eval-deals`; give only one)
+is the number of duplicate match groups per opponent. Each group plays the same
+deal sequence twice with seats swapped, so 256 pairs are 512 complete matches
+per opponent; logs and `evaluation_sample_units` state groups, matches and
+hands explicitly. The
 bootstrap resamples whole groups, and reports give match win rate with its 95%
 interval, mean signed marks per hand and average match length. best.pt is the
 first validation with the highest match win rate against `--selection-opponent`
 (strict improvement, so ties keep the earliest). Matches cost roughly
-(average match length) × a hand, so lower `--eval-deals` or raise
+(average match length) × a hand, so lower `--eval-match-pairs` or raise
 `--eval-every-hands` accordingly. Training rewards never depend on validation.
 
 ### Stages, checkpoints and resume
@@ -703,9 +756,14 @@ first validation with the highest match win rate against `--selection-opponent`
 Checkpoints record `reward_objective`, `target_marks`,
 `checkpoint_selection_metric` (`mean_signed_marks` or `match_win_rate`),
 `initial_reward_objective`, `value_initialization` (`random`, `inherited` or
-`reset`) and the `matches` counter. Files written before this option read as
-`hand-marks`, target 7, selected by signed marks. Exact `--resume` restores the
-objective and target and rejects a change to either.
+`reset`), `budget_unit`, `budget_target`, the configuration's `total_matches`
+and the completed `hands` and `matches`. Files written before these options read
+as `hand-marks`, target 7, a hand budget, selected by signed marks. Exact
+`--resume` restores the objective, target and budget unit and rejects a change to
+any of them (a hand budget cannot become a match budget, or vice versa); it
+continues from the recorded completed-match count, and the budget may be raised
+(`--total-matches` or `--total-hands`) but not lowered below completed work.
+A new stage may use either budget.
 
 A new stage (`--init-checkpoint`, `--init-play-checkpoint`) may change the
 objective. Signed-mark value estimates are not calibrated match-outcome
@@ -732,10 +790,15 @@ is rejected with `hand-marks`.
   complete matches (`evaluate_selfplay_ppo --episode match`,
   `evaluate_agent_vs_agent --episode match`) and on duplicate hands, with
   identical seeds, opponents and deal counts.
-- **Matched conditions.** Same seeds, phases, opponent pool, rollout size,
-  learning rate and budget; change only `--reward-objective`. Report match win
-  rate with its interval, signed marks per hand, average match length and the
-  bid buckets.
+- **Matched conditions.** Same seed (so identical random actor
+  initialization), architecture, phases, opponent pool, rollout size, learning
+  rate and **simulated-hand budget**: budget both arms with `--total-hands`, not
+  equal match counts, which would give the match arm several times more game
+  experience. Change only `--reward-objective`. Use match win rate on held-out
+  complete matches as the primary metric for both, ideally on `latest.pt` (equal
+  experience; the arms' `best.pt` use different selection criteria). Report its
+  interval, signed marks per hand, average match length and the bidding
+  diagnostics. `configs/pipelines/compare_hand_vs_match.json` implements this.
 
 ## Search inside training
 

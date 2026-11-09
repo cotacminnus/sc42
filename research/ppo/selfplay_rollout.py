@@ -9,6 +9,7 @@ from texas42.agents import HeuristicAgent
 from texas42.encoding import encode
 from texas42.privileged import encode_privileged
 from texas42.selfplay import SelfPlayEnv
+from texas42.actions import ACTION_REGISTRY
 from .agent import PPOAgent
 from .buffer import Experience
 from .composition import partner_index
@@ -65,6 +66,7 @@ def collect_phase_hand(models, seed, episode, learn_phases, pool, critic=None, c
     obs = env.reset()
     paths = {s: [] for s in range(4) if s % 2 == team}
     decisions, inference, neural_inference = 0, 0.0, 0.0
+    calls = []
     if search is not None:
         search_draws = random.Random(stream_seed(seed, 'search-decisions-v1', episode))
         requests = []
@@ -84,6 +86,8 @@ def collect_phase_hand(models, seed, episode, learn_phases, pool, critic=None, c
         else:
             action = agents[obs.seat].act(obs)
         inference += perf_counter() - started
+        if obs.phase == 'bid':
+            calls.append(bid_decision(obs, action, team))
         transition = env.step(action)
         decisions += 1
         if transition.terminated:
@@ -97,11 +101,14 @@ def collect_phase_hand(models, seed, episode, learn_phases, pool, critic=None, c
             raise RuntimeError('Incorrect controlled-seat trajectory length')
         if path:
             path[-1] = replace(path[-1], reward=float(transition.rewards[seat]), done=True)
+    _resolve_auction(calls, transition.hand_result)
     row = dict(worker_rss_bytes=_worker_rss(), episode=episode, paths=tuple(tuple(p) for p in paths.values()),
                reward=transition.rewards[team], opponent=label,
                opponent_sha256=current_sha256 if spec is None else spec.sha256,
                decisions=decisions, points=transition.hand_result.team_points, bidder=transition.hand_result.bidder,
                bids=(_bid_record(transition.hand_result, team),),
+               contracts=(_contract_record(transition.hand_result, team),),
+               bid_decisions=tuple(calls),
                inference_seconds=inference, opponent_loading_seconds=loading,
                neural_inference_seconds=neural_inference + sum(getattr(a, 'neural_inference_seconds', 0.0) for a in agents))
     if search is not None:
@@ -171,6 +178,7 @@ def _learner_decision(model, obs, generator, critic, env, path, episode):
 
 
 BID_CATEGORIES = ('30', '31-41', '42', '2+ marks')
+CALL_CATEGORIES = ('pass',) + BID_CATEGORIES
 
 
 def bid_category(bid):
@@ -183,6 +191,44 @@ def bid_category(bid):
 def _bid_record(result, team):
     """(contract declared by the learner team, bid bucket) for one completed hand."""
     return result.bidder % 2 == team, bid_category(result.bid)
+
+
+def _contract_record(result, team):
+    """(learner team declared, bid bucket, contract made) for one completed hand."""
+    return result.bidder % 2 == team, bid_category(result.bid), result.scoring_team == result.bidder % 2
+
+
+def _call_category(call):
+    """Bucket of one auction call: pass, 30, 31-41, 42 or 2+ marks."""
+    return 'pass' if call is None else bid_category(call)
+
+
+def bid_decision(obs, action, team):
+    """Diagnostic record of one auction call, from the actor's public observation only.
+
+    Holds the acting seat and partnership, the actor-relative match score
+    before the call, whether passing was legal or the bid was forced, the
+    selected call (bucket and exact action key), the standing high bid and
+    the buckets of every legal alternative. 'auction_won' is filled in when
+    the hand's contract resolves. No hidden hand enters the record.
+    """
+    view = obs.view
+    own, other = view.match_marks[obs.seat % 2], view.match_marks[1 - obs.seat % 2]
+    legal = [ACTION_REGISTRY[i].value for i in obs.legal_action_ids]
+    return dict(seat=obs.seat, learner=obs.seat % 2 == team, own_marks=own, opponent_marks=other,
+                score_state='leading' if own > other else 'trailing' if own < other else 'tied',
+                pass_legal=None in legal, forced=bool(view.forced),
+                call=_call_category(ACTION_REGISTRY[action].value), action=ACTION_REGISTRY[action].key,
+                standing=None if view.current_bid is None else _call_category(view.current_bid),
+                alternatives=tuple(sorted({_call_category(v) for v in legal}, key=CALL_CATEGORIES.index)),
+                auction_won=None)
+
+
+def _resolve_auction(records, result):
+    """Mark each pending auction call with whether its partnership won the contract."""
+    for record in records:
+        if record['auction_won'] is None:
+            record['auction_won'] = record['seat'] % 2 == result.bidder % 2
 
 
 def _worker_rss():
@@ -224,7 +270,7 @@ def collect_phase_match(models, seed, match, learn_phases, pool, critic=None, cu
     paths = {s: [] for s in range(4) if s % 2 == team}
     decisions = hand_decisions = 0
     inference = neural_inference = 0.0
-    hands, shakers, bids = [], [env.shaker], []
+    hands, shakers, bids, contracts, calls = [], [env.shaker], [], [], []
     expected = int('bid' in learn_phases) + 7 * int('play' in learn_phases)
     lengths = {s: 0 for s in paths}
     while True:
@@ -236,6 +282,8 @@ def collect_phase_match(models, seed, match, learn_phases, pool, critic=None, cu
         else:
             action = agents[obs.seat].act(obs)
         inference += perf_counter() - started
+        if obs.phase == 'bid':
+            calls.append(bid_decision(obs, action, team))
         transition = env.step(action)
         decisions += 1
         hand_decisions += 1
@@ -252,6 +300,8 @@ def collect_phase_match(models, seed, match, learn_phases, pool, critic=None, cu
                 raise RuntimeError('Intermediate match hands must not pay policy rewards')
             hands.append(result.marks_awarded if result.scoring_team == team else -result.marks_awarded)
             bids.append(_bid_record(result, team))
+            contracts.append(_contract_record(result, team))
+            _resolve_auction(calls, result)
             hand_decisions = 0
             if len(hands) > 2 * target_marks - 1:
                 raise RuntimeError('Match exceeded its maximum length')
@@ -268,6 +318,7 @@ def collect_phase_match(models, seed, match, learn_phases, pool, critic=None, cu
                 reward=transition.rewards[team], opponent=label,
                 opponent_sha256=current_sha256 if spec is None else spec.sha256,
                 decisions=decisions, hands=len(hands), hand_marks=tuple(hands), bids=tuple(bids),
+                contracts=tuple(contracts), bid_decisions=tuple(calls),
                 shakers=tuple(shakers), final_marks=(env.match_marks[team], env.match_marks[1 - team]),
                 inference_seconds=inference, opponent_loading_seconds=loading,
                 neural_inference_seconds=neural_inference + sum(getattr(a, 'neural_inference_seconds', 0.0)

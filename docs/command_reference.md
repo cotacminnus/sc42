@@ -82,7 +82,7 @@ same time can double or triple that.
 | Beliefs and Monte Carlo search | `test_belief`, `test_pimc_agent`, `test_model_guided_pimc` | model-guided: `rl` |
 | PPO models, buffers, legacy trainer | `test_ppo_model`, `test_ppo_buffer`, `test_ppo_agent`, `test_ppo_training`, `test_ppo_opponents`, `test_parallel_ppo` | `rl` |
 | Multi-phase self-play training | `test_ppo_multiphase`, `test_centralized_critic`, `test_policy_only_ppo`, `test_scratch_selfplay`, `test_paired_selfplay`, `test_search_training`, `test_evaluation_performance` | `rl` |
-| Match-win objective (match rollouts, cross-hand returns, match validation, resume, pipeline) | `test_match_selfplay` | engine check: —; rest: `rl` |
+| Match-win objective (match rollouts, cross-hand returns, total-matches budgets, bidding diagnostics, match-pair evaluation units, match validation, resume, pipelines) | `test_match_selfplay` | engine check: —; rest: `rl` |
 | Phase-composable evaluation | `test_phase_composition` | `rl` |
 | OpenSpiel adapter | `test_openspiel` ([OpenSpiel](openspiel.md)) | `openspiel` |
 
@@ -140,8 +140,11 @@ Any other failure is a real one.
 
 A duplicate **group** (`--deals N`) contains two games on the same absolute-seat deal
 and shaker with ABAB/BABA partnership seating swapped. Thus `--deals 4096` normally
-yields 8192 hand games. In `--episode match` mode the units are paired match
-schedules, not individual hands. Bootstrap intervals resample **whole groups**. See
+yields 8192 hand games. In `--episode match` mode each group is a pair of
+complete matches on the same deal sequence, so `--match-pairs 256` (the explicit
+match-mode name of `--deals`, on the commands that accept it) yields 512 complete
+matches per opponent; reports print groups, matches and hands separately.
+Bootstrap intervals resample **whole groups**. See
 [arena methodology](arena.md) for metric and statistical definitions.
 
 ### Common arena flags
@@ -152,6 +155,7 @@ defaults are listed in each command's table.
 | Argument | Meaning |
 | --- | --- |
 | `--deals` | Number of paired duplicate groups, not number of games. |
+| `--match-pairs` | `evaluate_selfplay_ppo` and `evaluate_agent_vs_agent` with `--episode match`: the same group count, named for matches (two complete matches per pair). Give `--deals` or `--match-pairs`, not both. |
 | `--seed` | Deterministic deal/episode/agent seed. Choose fresh held-out values for final tests. |
 | `--threads` | Maximum simulation processes: `1` sequential, `0` auto (capped at 8 and by CPU affinity, physical cores, quotas and task count), `N` up to N. |
 | `--bootstrap-seed` | Independent bootstrap RNG seed. |
@@ -1183,12 +1187,12 @@ python -m examples.train_selfplay_ppo --from-scratch \
   --learner-bid neural-train --learner-trump neural-train --learner-play neural-train \
   --reward-objective match-win --target-marks 7 \
   --opponent-pool HHH:0.3,CHH:0.2,self-current:0.5 --eval-opponents HHH,CHH --selection-opponent HHH \
-  --total-hands 262144 --rollout-decisions 8192 --eval-deals 256 --eval-every-hands 16384 \
+  --total-matches 20000 --rollout-decisions 8192 --eval-match-pairs 256 --eval-every-hands 16384 \
   --threads 8 --eval-threads 8 --seed 42 --output-dir runs/match-win
 
-# B. Exact resume: objective and target are restored; changing either is rejected
+# B. Exact resume: objective, target and budget unit are restored; raise the match budget
 python -m examples.train_selfplay_ppo --resume runs/match-win/checkpoints/latest.pt \
-  --total-hands 524288 --output-dir runs/match-win
+  --total-matches 40000 --output-dir runs/match-win
 
 # C. New match-win stage from a hand-marks checkpoint: actors kept, value heads reset
 python -m examples.train_selfplay_ppo --init-checkpoint runs/ppo-scratch-selfplay/checkpoints/best.pt \
@@ -1199,7 +1203,7 @@ python -m examples.train_selfplay_ppo --init-checkpoint runs/ppo-scratch-selfpla
 
 # D. Held-out evaluation in complete matches (and the same checkpoint on single hands)
 python -m examples.evaluate_selfplay_ppo --checkpoint runs/match-win/checkpoints/best.pt \
-  --opponents HHH,CHH,HHR --episode match --target-marks 7 --deals 1024 --threads 8
+  --opponents HHH,CHH,HHR --episode match --target-marks 7 --match-pairs 1024 --threads 8
 python -m examples.evaluate_selfplay_ppo --checkpoint runs/match-win/checkpoints/best.pt \
   --opponents HHH,CHH,HHR --episode hand --deals 2048 --threads 8
 
@@ -1207,15 +1211,24 @@ python -m examples.evaluate_selfplay_ppo --checkpoint runs/match-win/checkpoints
 python -m examples.evaluate_agent_vs_agent \
   --agent-a-checkpoint runs/match-win/checkpoints/best.pt --agent-a-bid neural --agent-a-trump neural --agent-a-play neural \
   --agent-b-checkpoint runs/ppo-scratch-selfplay/checkpoints/best.pt --agent-b-bid neural --agent-b-trump neural --agent-b-play neural \
-  --episode match --target-marks 7 --deals 1024 --seed 7355608 --threads 8
+  --episode match --target-marks 7 --match-pairs 1024 --seed 7355608 --threads 8
 ```
 
-`--total-hands` counts simulated hands; a run exceeds it by at most
-2·target − 2 hands, because the last match is always finished. For a fair
-comparison with hand-marks training, run A and the same command without
-`--reward-objective` (and `--target-marks`) from the same seed and budget, then
-evaluate both with D and E on identical seeds. `configs/pipelines/match_win_selfplay.json`
-runs a two-stage version through the [pipeline runner](experiment_pipelines.md).
+`--total-matches N` trains exactly N complete matches and replaces
+`--total-hands` as the stopping condition (an explicit `--total-hands` is then
+ignored, not used as a maximum). Without it, match-win runs stop on
+`--total-hands` simulated hands, exceeded by at most 2·target − 2 hands because
+the last match is always finished. `--rollout-decisions` is still trainable
+decisions per update; the final rollout of a match budget may be smaller.
+Progress lines and rows report completed matches, simulated hands and trainable
+decisions. `--eval-match-pairs`/`--match-pairs` count duplicate match groups
+(two complete matches each) and are the match-mode names of `--eval-deals`/`--deals`.
+For a fair comparison with hand-marks training, budget **both** arms with the
+same `--total-hands` and seed (equal match counts would give the match arm far
+more experience), then evaluate both with D and E on identical seeds:
+`configs/pipelines/compare_hand_vs_match.json` does this, and
+`configs/pipelines/match_win_selfplay.json` runs a two-stage match-budget
+experiment through the [pipeline runner](experiment_pipelines.md).
 Search inside training (`--search-fraction`) and oracle auxiliary supervision
 (`--oracle-aux-coef`) use hand-point targets and are rejected with `match-win`.
 
@@ -1448,7 +1461,9 @@ guarantee of higher hands/second.
 | `--oracle-aux-coef` | Finite float ≥ 0 | `0` (disabled) | Weight of the critic's oracle-point interval loss. A positive value requires `--critic-mode centralized` and `--oracle-dataset`; it is rejected with `none` or `local`. |
 | `--oracle-dataset` | Path from `examples.oracle_labels` | Unset | Its SHA256 is stored in the configuration and verified on resume; only the `train` split is optimized and the `validation` split is reported. |
 | `--reward-objective` | `hand-marks`, `match-win` | `hand-marks` | `hand-marks`: one hand per episode, signed marks at hand end (unchanged). `match-win`: one complete match per episode, +1/−1 to the match winner/loser at match end and 0 at intermediate hands; validation on complete matches; `best.pt` by match win rate. Fixed for exact resume; a new stage may change it (trainable value heads and a centralized critic are then reinitialized). Rejected with `--search-fraction` > 0 or `--oracle-aux-coef` > 0. |
-| `--target-marks` | Integer ≥ 1 | `7` | Marks that win a match. Only with `match-win` (another value with `hand-marks` is rejected). Fixed for exact resume. `--total-hands` may be exceeded by at most 2·target − 2 hands. |
+| `--target-marks` | Integer ≥ 1 | `7` | Marks that win a match. Only with `match-win` (another value with `hand-marks` is rejected). Fixed for exact resume. A `--total-hands` budget may be exceeded by at most 2·target − 2 hands. |
+| `--total-matches` | Integer ≥ 1 | Unset (hand budget) | `match-win` only (rejected with `hand-marks`): train exactly this many complete matches. Replaces `--total-hands` as the stopping condition; an explicit `--total-hands` is ignored. No extra match is scheduled; the final rollout may be smaller than `--rollout-decisions`. Exact resume keeps the budget unit (switching hands ↔ matches is rejected), may raise N, and rejects N below completed matches. |
+| `--eval-match-pairs` | Integer > 0 | Unset (`--eval-deals`, 128) | `match-win` only: duplicate match groups per validation opponent, each two complete matches (256 → 512 matches per opponent). Same schedule and setting as `--eval-deals`, under an explicit name; giving both is rejected. |
 
 When a centralized critic starts from a checkpoint without compatible critic
 weights (every play-only or local-critic file), it is initialized fresh from its own
@@ -1484,10 +1499,12 @@ records the source's mode as `initial_critic_mode`. `--resume` with a different
   playing counts are `phase_samples.play` per rollout.
 - `mean_reward` averages all collected hand rewards, including zero-sample hands;
   `training_by_opponent` separates counts and means. With `--reward-objective
-  match-win` it is the mean terminal match reward (+1/−1) per completed match;
-  `matches`, `rollout_matches` (match win rate, hands per match and the separately
-  named hand win rate and marks per hand) and `rollout_bids` are described in
-  [match-win objective](multiphase_selfplay.md#match-win-objective).
+  match-win` it is the mean terminal match reward (+1/−1) per completed match.
+  Every row has `budget_unit`/`budget_target` and `bidding` (per-decision auction
+  aggregates); match rows add `matches`, `rollout_matches`, `rollout_hands`,
+  `mean_hands_per_match`, `match_win_rate`, `mean_terminal_reward` and the
+  separately named hand statistics; see
+  [progress and bidding diagnostics](multiphase_selfplay.md#progress-and-bidding-diagnostics).
 - `metrics` contains aggregate and `bid_*`/`trump_*`/`play_*` losses, entropy, KL and
   clipping statistics. A phase absent from a batch has no optimized phase metrics;
   console fallback zeros are not evidence it trained.
@@ -1769,7 +1786,8 @@ optimizer/device or trainability flag here.
 | `--bootstrap-seed` | Integer | `0` | Separate resampling seed. |
 | `--bootstrap-samples` | Integer > 0 | `2000` | Paired group bootstrap replicates; intervals unavailable for fewer than two groups. |
 | `--threads` | Integer ≥ 0 | `1` | Up to N simulation workers; 0 auto with CPU/task limits. |
-| `--episode` | hand, match | hand | Paired hands or complete paired match schedules. Match metrics use actual played-hand counts. |
+| `--episode` | hand, match | hand | Paired hands or complete paired match schedules. Match metrics use actual played-hand counts; match runs print and save (`sample_units`) groups, complete matches and hands. |
+| `--match-pairs` | Integer > 0; requires `--episode match` | Unset (`--deals`) | Duplicate match groups, two complete matches each; the match-mode name of `--deals`. Giving both is rejected. |
 | `--target-marks` | Integer > 0 | `7` | Match termination target; does not turn hand mode into a match. |
 | `--output` | Path | Unset | Full JSON arena report with composition identities and diagnostics. |
 | `--log-dir` | Directory path | Auto under `logs/experiments` | Readable log, hand CSV and metric CSV; separate from JSON path. |
@@ -1932,7 +1950,8 @@ inference.
 | `evaluate_selfplay_ppo` | `--anchor-checkpoint` | Original anchor path; inferred from checkpoint config | Override must match original anchor SHA256. |
 | `evaluate_selfplay_ppo` | `--opponents` | Unique registered names; default `HHH,CHH,HHR,anchor`, or `HHH,CHH,HHR` for an anchor-free checkpoint | Built-ins, anchor and explicitly registered archives. Requesting `anchor` from an anchor-free checkpoint fails. |
 | `evaluate_selfplay_ppo` | `--opponent-checkpoint` | Repeatable `NAME=PATH` | Registers whole frozen checkpoint opponents. No opponent-composition option here. |
-| `evaluate_selfplay_ppo` | `--episode` | `hand` (default), `match` | `match` plays complete matches to `--target-marks`; `--deals` then counts duplicate match groups (two matches each). Reports add the average match length; match JSON output adds `episode` and `target_marks` (the hand envelope is unchanged). |
+| `evaluate_selfplay_ppo` | `--episode` | `hand` (default), `match` | `match` plays complete matches to `--target-marks`. Reports print duplicate groups, complete matches, hands and average match length per opponent; match JSON output adds `episode`, `target_marks`, `match_pairs` and `sample_units` (the hand envelope is unchanged). |
+| `evaluate_selfplay_ppo` | `--match-pairs` | Integer > 0; requires `--episode match` | Duplicate match groups per opponent, two complete matches each; the explicit match-mode name of `--deals` (same schedule). Giving both, or `--match-pairs` without `--episode match`, is rejected. |
 | `evaluate_selfplay_ppo` | `--target-marks` | Integer ≥ 1; default `7` | Match target with `--episode match`. |
 
 These compatibility learner routes do not add the canonical per-selected-phase

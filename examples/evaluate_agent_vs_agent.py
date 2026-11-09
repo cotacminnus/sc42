@@ -5,7 +5,8 @@ from pathlib import Path
 from time import perf_counter
 
 from examples.benchmark_output import format_report, format_breakdown, format_performance, table
-from examples.experiment_output import record_output, add_evaluation_arguments
+from examples.experiment_output import (CheckedParser, record_output, add_evaluation_arguments,
+                                        match_units, describe_match_units)
 from research.ppo.composition import (PIMC_LEAVES, PIMC_LIKELIHOODS, STRATEGIES, CompositeAgentFactory,
                                      comparison_metadata, evaluate_composed, resolve_policy_spec,
                                      strategy_label)
@@ -64,7 +65,7 @@ def team_label(spec, partner):
 
 def build_parser():
     """The command's argparse definition (also used by examples.run_pipeline to validate)."""
-    p = argparse.ArgumentParser(description=__doc__)
+    p = CheckedParser(description=__doc__)
     for agent in ('a', 'b'):
         p.add_argument(f'--agent-{agent}-checkpoint', type=Path)
         p.add_argument(f'--agent-{agent}-partner-checkpoint', type=Path,
@@ -79,7 +80,7 @@ def build_parser():
             p.add_argument(f'--agent-{agent}-partner-{phase}', choices=STRATEGIES[phase],
                            help='second-seat strategy; defaults to the first seat\'s')
             p.add_argument(f'--agent-{agent}-partner-{phase}-checkpoint', type=Path)
-    add_evaluation_arguments(p, seed=42)
+    add_evaluation_arguments(p, seed=42, match_pairs=True)
     p.add_argument('--stochastic-neural', action='store_true', help='Seeded sampling instead of greedy neural inference')
     p.add_argument('--pimc-samples', type=int, default=DEFAULT_PIMC_SAMPLES,
                    help='sampled hidden deals per PIMC decision (trump/play strategy "pimc"); '
@@ -173,6 +174,8 @@ def main(argv=None):
     print(f'Configuration/checkpoint preparation: {preparation_seconds:.3f} s')
     print(format_performance(performance))
     print(format_report(report, {'A': team_label(a, a2), 'B': team_label(b, b2)}, elapsed))
+    if args.episode == 'match':
+        print(f'Sample size: {describe_match_units(match_units(report))}')
     details = evaluation_diagnostics(report)
     print(format_breakdown(details))
     print('\nAuction calls and partnership roles')
@@ -191,6 +194,8 @@ def main(argv=None):
         data.update(composition=dict(agents={'A': a.to_dict(), 'B': b.to_dict()},
             comparisons=metadata, neural_inference='stochastic' if args.stochastic_neural else 'greedy',
             sampling_scheme='composite-phase-v1'), breakdown=details)
+        if args.episode == 'match':  # Match runs only, so hand-mode JSON is unchanged.
+            data['sample_units'] = match_units(report)
         if uses_pimc:
             data['composition']['pimc_samples'] = args.pimc_samples
         if guided:

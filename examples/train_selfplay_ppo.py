@@ -6,7 +6,8 @@ from pathlib import Path
 import sys
 from time import perf_counter
 import torch
-from examples.experiment_output import record_output, add_output_arguments, add_config_arguments
+from examples.experiment_output import (CheckedParser, record_output, add_output_arguments, add_config_arguments,
+                                        match_units, describe_match_units)
 from research.ppo.trainer import Config
 from research.ppo.checkpoint import load_model, load_frozen
 from research.ppo.multiphase import phases, PhaseActorCritic, PHASES, LearnerPhaseSpec, resolve_learner_phases
@@ -55,7 +56,7 @@ SKIPPED = {'train_opponents', 'eval_opponents', 'selection_opponent', 'rollout_p
 
 def build_parser():
     """The command's argparse definition (also used by examples.run_pipeline to validate)."""
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = CheckedParser(description=__doc__)
     defaults = Config(learning_rate=1e-4)
     add_config_arguments(parser, defaults, exclude=SKIPPED, critic_modes=SelfPlayConfig.critic_modes)
     source = parser.add_mutually_exclusive_group()
@@ -111,10 +112,30 @@ def build_parser():
                                 'match win rate; --total-hands still counts hands')
     objective.add_argument('--target-marks', type=int, default=7,
                            help='marks that win a match (match-win only)')
+    objective.add_argument('--total-matches', type=int,
+                           help='match-win only: train exactly this many complete matches; replaces '
+                                '--total-hands as the stopping condition (which is then ignored)')
+    objective.add_argument('--eval-match-pairs', type=int,
+                           help='match-win only: duplicate match groups per validation opponent (two complete '
+                                'matches each); the match-mode name of --eval-deals (give only one)')
+    # --eval-deals keeps its default of 128 unless --eval-match-pairs names the groups instead.
+    parser.set_defaults(eval_deals=None)
+    parser.checks.append(resolve_validation_groups)
     parser.add_argument('--eval-threads', type=int, default=1)
     parser.add_argument('--output-dir', type=Path, default=Path('runs/ppo-selfplay'))
     add_output_arguments(parser)
     return parser
+
+
+def _percent(value):
+    return 'N/A' if value is None else f'{value:.1%}'
+
+
+def resolve_validation_groups(args):
+    """--eval-match-pairs and --eval-deals both set the validation group count; reject both at once."""
+    if args.eval_match_pairs is not None and args.eval_deals is not None:
+        raise ValueError('--eval-match-pairs and --eval-deals both set the number of duplicate validation '
+                         'groups; give only one')
 
 
 @record_output
@@ -123,6 +144,12 @@ def main(argv=None):
     args = parser.parse_args(argv)
     arguments = list(sys.argv[1:] if argv is None else argv)
     explicit = {arg.split('=')[0] for arg in arguments if arg.startswith('--')}
+    if args.eval_match_pairs is not None:
+        # Same schedule and config field (eval_deals); only the name states the unit.
+        args.eval_deals = args.eval_match_pairs
+        explicit.add('--eval-deals')
+    elif args.eval_deals is None:
+        args.eval_deals = Config.eval_deals
     directory = args.output_dir
     if (directory / 'progress.jsonl').exists() and not args.resume:
         parser.error('Run already exists; choose another output directory or --resume')
@@ -220,6 +247,12 @@ def main(argv=None):
         scratch_lineage = args.from_scratch or bool(args.resume and saved.from_scratch)
         pool = historical_pool(args.opponent_pool, policies, anchor_spec,
                                snapshot_fallback='current' if scratch_lineage or anchor_spec is None else 'anchor')
+        if args.resume:
+            # Omitted objective/budget settings come from the checkpoint, so that the
+            # provisional configuration below is valid (e.g. --total-matches alone).
+            for key in ('reward_objective', 'target_marks', 'total_matches'):
+                if '--' + key.replace('_', '-') not in explicit:
+                    setattr(args, key, getattr(saved, key))
         base = {f.name: getattr(args, f.name) for f in fields(Config) if f.name not in SKIPPED}
         if '--hidden-size' not in explicit and initial is not None:
             base['hidden_size'] = initial.hidden_size
@@ -239,7 +272,8 @@ def main(argv=None):
             search_fraction=args.search_fraction, search_samples=args.search_samples,
             search_weight=args.search_weight, search_target=args.search_target,
             search_clip=args.search_clip, search_warmup_hands=args.search_warmup_hands,
-            reward_objective=args.reward_objective, target_marks=args.target_marks)
+            reward_objective=args.reward_objective, target_marks=args.target_marks,
+            total_matches=args.total_matches)
         if args.resume:
             if saved is None:
                 raise ValueError('Resume requires a multi-phase checkpoint; use --init-play-checkpoint for migration')
@@ -261,6 +295,9 @@ def main(argv=None):
             if configured:
                 changes.update(learner_phases=learner, learn_phases=enabled)
             config = replace(saved, **changes)
+        if args.eval_match_pairs is not None and not config.match_objective:
+            raise ValueError('--eval-match-pairs counts duplicate match groups; it requires --reward-objective '
+                             'match-win (use --eval-deals for hand validation)')
         if not config.learner_phases and config.learn_phases == ('bid',) and isinstance(initial, PhaseActorCritic):
             if not all(torch.equal(a.cpu(), b.cpu()) for a, b in zip(
                     initial.networks['play'].parameters(), anchor.parameters())):
@@ -346,11 +383,19 @@ def main(argv=None):
     print(f'Primary selection opponent: {config.primary_opponent}; training pool: {config.opponent_probabilities}')
     if match:
         print(f'Objective: match-win (complete matches to {config.target_marks} marks; +1/-1 to the match '
-              f'winner/loser, 0 at intermediate hands; gamma={config.gamma}). Budget counts hands: the last '
-              f'match may exceed --total-hands by at most {2 * config.target_marks - 2} hands. '
-              f'Validation: {config.eval_deals} duplicate match groups; best.pt by match win rate')
+              f'winner/loser, 0 at intermediate hands; gamma={config.gamma})')
+        if config.budget_unit == 'matches':
+            print(f'Budget: exactly {config.total_matches} complete matches (--total-hands ignored); '
+                  f'completed so far: {trainer.matches} matches, {trainer.hands} hands')
+        else:
+            print(f'Budget: {config.total_hands} simulated hands; the last match is always finished, so a run '
+                  f'may exceed it by at most {2 * config.target_marks - 2} hands')
+        print(f'Validation: {config.eval_deals} duplicate match groups per opponent -> {2 * config.eval_deals} '
+              'complete matches each; best.pt by match win rate')
     else:
-        print('Objective: hand-marks (signed marks per hand); best.pt by mean signed marks')
+        print(f'Objective: hand-marks (signed marks per hand); budget: {config.total_hands} hands; validation: '
+              f'{config.eval_deals} duplicate groups -> {2 * config.eval_deals} hands per opponent; '
+              'best.pt by mean signed marks')
     if trainer.value_initialization == 'reset':
         print(f'Value heads of {",".join(config.learn_phases)} reinitialized: the initialization weights were '
               f'trained for {trainer.initial_objective}, not {config.reward_objective}'
@@ -372,7 +417,7 @@ def main(argv=None):
         print(f'Oracle auxiliary: coefficient {config.oracle_aux_coef}; dataset {config.oracle_dataset} '
               f'SHA256 {config.oracle_dataset_sha256}; {trainer.oracle_summary}')
     try:
-        while trainer.hands < config.total_hands:
+        while not trainer.budget_exhausted:
             before, update_started = trainer.hands, perf_counter()
             # Paired collect() returns one buffer per partner; update() trains each separately.
             buffer, reward = trainer.collect()
@@ -385,8 +430,8 @@ def main(argv=None):
             if not all(frozen_verified.values()):
                 raise RuntimeError('Frozen phase parameters changed during training')
             frozen_play_verified = frozen_verified.get('play')
-            # A match-win rollout finishes its last match, so hands may exceed the budget.
-            final = trainer.hands >= config.total_hands
+            # One stopping condition for both units; a hand-budget match run may overshoot hands.
+            final = trainer.budget_exhausted
             total_samples = sum(t.samples for t in learners)  # Both partners when paired.
             row = dict(hands=trainer.hands, play_samples=total_samples, training_samples=total_samples,
                 updates=trainer.updates, optimizer_steps=trainer.optimizer_steps, mean_reward=reward,
@@ -408,10 +453,17 @@ def main(argv=None):
                 value_diagnostics=trainer.value_diagnostics if sample_count else None,
                 oracle_dataset=trainer.oracle_summary,
                 oracle_validation=trainer.oracle_validation_metrics() if sample_count else None,
-                reward_objective=config.reward_objective, rollout_bids=trainer.bid_metrics)
+                reward_objective=config.reward_objective, rollout_bids=trainer.bid_metrics,
+                bidding=trainer.bidding_metrics, budget_unit=config.budget_unit,
+                budget_target=config.budget_target)
             if match:
+                m = trainer.match_metrics
                 row.update(target_marks=config.target_marks, matches=trainer.matches,
-                           rollout_matches=trainer.match_metrics)
+                           rollout_matches=m['matches'], rollout_hands=m['hands'],
+                           mean_hands_per_match=m['mean_hands_per_match'], match_win_rate=m['match_win_rate'],
+                           mean_terminal_reward=m['mean_terminal_reward'],
+                           mean_signed_marks_per_hand=m['mean_signed_marks_per_hand'],
+                           hand_win_rate=m['hand_win_rate'], rollout_match_metrics=m)
             # (label, trainer, metrics) per learner network. Paired metrics are
             # {'partner_1': ..., 'partner_2': ...}; a partner without samples is absent.
             groups = ([(f'partner {i} ', t, metrics.get(f'partner_{i}', {})) for i, t in enumerate(learners, start=1)]
@@ -428,16 +480,26 @@ def main(argv=None):
                     for i, t in enumerate(learners, start=1)}
             if match:
                 m = trainer.match_metrics
-                print(f'Update {trainer.updates}: {trainer.hands}/{config.total_hands} hands, {trainer.matches} matches; '
-                      f'samples {trainer.phase_counts}; rollout {m["matches"]} matches, {m["hands"]} hands '
-                      f'({m["mean_hands_per_match"]:.2f}/match); match win {m["match_win_rate"]:.1%}; '
-                      f'mean terminal reward {reward:+.4f}; hand win {m["hand_win_rate"]:.1%}; '
-                      f'marks/hand {m["mean_signed_marks_per_hand"]:+.4f}')
+                matches = (f'{trainer.matches} / {config.total_matches}' if config.budget_unit == 'matches'
+                           else f'{trainer.matches}')
+                hands = (f'{trainer.hands}' if config.budget_unit == 'matches'
+                         else f'{trainer.hands} / {config.total_hands}')
+                print(f'Update {trainer.updates}:\n  Matches: {matches}\n  Hands simulated: {hands}\n'
+                      f'  Average hands/match: {trainer.hands / trainer.matches:.2f}\n'
+                      f'  Trainable decisions: {total_samples} (this rollout {sample_count}: {trainer.phase_counts})\n'
+                      f'  Rollout: {m["matches"]} matches, {m["hands"]} hands ({m["mean_hands_per_match"]:.2f}/match); '
+                      f'match win rate {m["match_win_rate"]:.1%}; mean terminal reward {reward:+.4f}; '
+                      f'hand win rate {m["hand_win_rate"]:.1%}; marks/hand {m["mean_signed_marks_per_hand"]:+.4f}')
             else:
                 print(f'Update {trainer.updates}: {trainer.hands}/{config.total_hands} hands; samples {trainer.phase_counts}; reward {reward:+.4f}')
-            bids = trainer.bid_metrics
+            bids, bidding = trainer.bid_metrics, trainer.bidding_metrics['learner']
             print('  contracts (learner/opponent): ' + '; '.join(
                 f'{k} {bids["learner"][k]}/{bids["opponent"][k]}' for k in bids['learner']))
+            print('  learner calls: ' + '; '.join(f'{k} {v}' for k, v in bidding['calls'].items())
+                  + f'; high-bid rate {_percent(bidding["high_bid_rate"])}; bid rate leading/tied/trailing '
+                  + '/'.join(_percent(bidding['by_score_state'][k]['bid_rate']) for k in ('leading', 'tied', 'trailing'))
+                  + '; contract success ' + ', '.join(
+                      f'{k} {_percent(v["success_rate"])}' for k, v in bidding['contracts']['by_category'].items()))
             for label, learner, values in groups:
                 if values and learner.value_diagnostics:
                     # Returns are signed marks (hand-marks) or the signed match outcome (match-win).
@@ -491,8 +553,10 @@ def main(argv=None):
                 row['selection_score'] = score
                 if match:
                     row['evaluation_average_match_length'] = primary.average_match_length
-                    print(f'Selection ({config.primary_opponent}): match win rate {score:.3f} over '
-                          f'{primary.games_played} matches; average length {primary.average_match_length:.2f} hands')
+                    units = match_units(primary)
+                    row['evaluation_sample_units'] = {n: match_units(r) for n, r in reports.items()}
+                    print(f'Selection ({config.primary_opponent}): match win rate {score:.3f}; '
+                          + describe_match_units(units))
                 if score > trainer.best_score:
                     trainer.best_score = score
                     saving_started = perf_counter(); save_checkpoint('best.pt')
@@ -511,8 +575,11 @@ def main(argv=None):
                 sink.write(json.dumps(row, allow_nan=False) + '\n')
     finally:
         trainer.close()
-    print(f'Complete: {trainer.hands} hands' + (f', {trainer.matches} matches' if match else '')
-          + f', {sum(t.samples for t in learners)} training decisions, {trainer.updates} updates; elapsed {perf_counter() - started:.3f}s')
+    budget = (f'budget {config.budget_target} {config.budget_unit}' + (' (total-hands ignored)'
+              if config.budget_unit == 'matches' else ''))
+    print(f'Complete: {trainer.hands} hands simulated' + (f', {trainer.matches} complete matches' if match else '')
+          + f', {sum(t.samples for t in learners)} training decisions, {trainer.updates} updates; {budget}; '
+          f'elapsed {perf_counter() - started:.3f}s')
     if paired:
         print(f'Paired models: {checkpoints / "partner-1"} (seat 0/1) and {checkpoints / "partner-2"} (seat 2/3)')
     return trainer

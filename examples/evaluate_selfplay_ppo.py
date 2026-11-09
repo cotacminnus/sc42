@@ -4,7 +4,8 @@ import json
 from pathlib import Path
 from time import perf_counter
 import torch
-from examples.experiment_output import record_output, add_evaluation_arguments
+from examples.experiment_output import (CheckedParser, record_output, add_evaluation_arguments,
+                                        match_units, describe_match_units)
 from examples.benchmark_output import format_report, format_breakdown
 from research.ppo.checkpoint import load_model
 from research.ppo.multiphase import PhaseActorCritic
@@ -14,16 +15,16 @@ from research.ppo.selfplay_evaluation import evaluate_phases, evaluation_diagnos
 
 def build_parser():
     """The command's argparse definition (also used by examples.run_pipeline to validate)."""
-    p = argparse.ArgumentParser(description=__doc__)
+    p = CheckedParser(description=__doc__)
     p.add_argument('--checkpoint', required=True, type=Path)
     p.add_argument('--anchor-checkpoint', type=Path)
     p.add_argument('--opponents', help='default HHH,CHH,HHR,anchor; HHH,CHH,HHR for anchor-free checkpoints')
     p.add_argument('--opponent-checkpoint', action='append', default=[], metavar='NAME=PATH')
     p.add_argument('--episode', choices=('hand', 'match'), default='hand',
                    help='hand: single-hand duplicate deals; match: complete matches to --target-marks '
-                        '(--deals then counts duplicate match groups)')
+                        '(--match-pairs duplicate match groups)')
     p.add_argument('--target-marks', type=int, default=7, help='match target (with --episode match)')
-    add_evaluation_arguments(p)
+    add_evaluation_arguments(p, match_pairs=True)
     return p
 
 
@@ -70,7 +71,7 @@ def main(argv=None):
         print(format_report(report, {'A': 'neural ' + ','.join(model.neural_phases), 'B': name},
                             telemetry[name]['evaluation_total_seconds']))
         if a.episode == 'match':
-            print(f'Matches: {report.games_played}; average match length {report.average_match_length:.2f} hands')
+            print(f'Sample size against {name}: {describe_match_units(match_units(report))}')
         details[name] = evaluation_diagnostics(report)
         print(format_breakdown(details[name]))
         for policy in ('A', 'B'):
@@ -85,7 +86,9 @@ def main(argv=None):
         a.output.write_text(json.dumps(dict(checkpoint_id=learner.sha256, anchor_id=anchor.sha256 if anchor else None,
             opponent_identities={s.name: s.sha256 for s in specs}, same_playing_parameters=same_play,
             # Present only for match evaluation, so the legacy hand envelope is unchanged.
-            **(dict(episode='match', target_marks=a.target_marks) if a.episode == 'match' else {}),
+            **(dict(episode='match', target_marks=a.target_marks, match_pairs=a.deals,
+                    sample_units={n: match_units(r) for n, r in reports.items()})
+               if a.episode == 'match' else {}),
             evaluations={n: r.to_dict() for n, r in reports.items()}, breakdowns=details), indent=2) + '\n')
     return reports
 

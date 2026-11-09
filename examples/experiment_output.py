@@ -1,4 +1,5 @@
 """Human-readable execution logs and flat CSV sidecars for experiment CLIs."""
+import argparse
 import csv
 import hashlib
 from functools import wraps
@@ -19,9 +20,75 @@ def add_output_arguments(parser):
                              '(default: logs/experiments/<command>-<run-id>/)')
 
 
-def add_evaluation_arguments(parser, *, seed=12345):
-    """Common flags for the three checkpoint/composition evaluation commands."""
-    parser.add_argument('--deals', type=int, default=2048)
+class CheckedParser(argparse.ArgumentParser):
+    """ArgumentParser that runs cross-argument checks as part of parsing.
+
+    Checks run inside parse_args, so examples.run_pipeline --dry-run (which
+    only parses) rejects the same conflicting combinations as a real run. A
+    check may normalize the namespace; it raises ValueError to reject it.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.checks = []
+
+    def parse_known_args(self, args=None, namespace=None):
+        namespace, extra = super().parse_known_args(args, namespace)
+        for check in self.checks:
+            try:
+                check(namespace)
+            except ValueError as exc:
+                self.error(str(exc))
+        return namespace, extra
+
+
+DEFAULT_DEALS = 2048
+
+
+def resolve_match_pairs(args):
+    """--match-pairs is the match-mode name of --deals: duplicate match groups, two matches each.
+
+    Exactly one of them may be given; --match-pairs requires --episode match.
+    The schedule is unchanged: args.deals holds the group count either way.
+    """
+    if args.match_pairs is not None:
+        if args.deals is not None:
+            raise ValueError('--match-pairs and --deals both set the number of duplicate groups; give only one')
+        if args.episode != 'match':
+            raise ValueError('--match-pairs counts duplicate match groups; it requires --episode match '
+                             '(use --deals for hands)')
+        args.deals = args.match_pairs
+    elif args.deals is None:
+        args.deals = DEFAULT_DEALS
+
+
+def match_units(report):
+    """Explicit sample units of one match-mode arena report (groups, matches, hands)."""
+    return dict(duplicate_match_groups=len({g.group_id for g in report.games}),
+                complete_matches=report.games_played,
+                hands=sum(g.num_hands for g in report.games),
+                average_match_length=report.average_match_length)
+
+
+def describe_match_units(units):
+    return (f'{units["duplicate_match_groups"]} duplicate match groups -> {units["complete_matches"]} complete '
+            f'matches ({units["hands"]} hands; {units["average_match_length"]:.2f} hands/match)')
+
+
+def add_evaluation_arguments(parser, *, seed=12345, match_pairs=False):
+    """Common flags for the three checkpoint/composition evaluation commands.
+
+    match_pairs=True (commands with --episode; parser must be a CheckedParser)
+    adds --match-pairs as the explicit match-mode alias of --deals.
+    """
+    parser.add_argument('--deals', type=int, default=None if match_pairs else DEFAULT_DEALS,
+                        help=f'duplicate groups (default {DEFAULT_DEALS}): two hands each, or two complete '
+                             'matches each with --episode match' if match_pairs else None)
+    if match_pairs:
+        parser.add_argument('--match-pairs', type=int,
+                            help='with --episode match: duplicate match groups per opponent (each group plays '
+                                 'two complete matches with seats swapped); alias of --deals')
+        parser.checks.append(resolve_match_pairs)
     parser.add_argument('--seed', type=int, default=seed)
     parser.add_argument('--bootstrap-seed', type=int, default=0)
     parser.add_argument('--bootstrap-samples', type=int, default=2000)

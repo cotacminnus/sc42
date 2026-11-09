@@ -61,10 +61,22 @@ class SelfPlayConfig(Config):
     # the winning/losing partnership at match end and zero reward before it.
     reward_objective: str = 'hand-marks'
     target_marks: int = 7
+    # Match-win only: stop after exactly this many completed matches. When set,
+    # it replaces total_hands as the stopping condition (total_hands is ignored).
+    total_matches: int | None = None
 
     @property
     def match_objective(self):
         return self.reward_objective == 'match-win'
+
+    @property
+    def budget_unit(self):
+        """'matches' when total_matches is set (match-win only), else 'hands'."""
+        return 'hands' if self.total_matches is None else 'matches'
+
+    @property
+    def budget_target(self):
+        return self.total_hands if self.total_matches is None else self.total_matches
 
     @property
     def snapshot_fallback(self):
@@ -154,6 +166,12 @@ class SelfPlayConfig(Config):
             raise ValueError('search_clip must be finite and positive')
         if type(self.search_warmup_hands) is not int or self.search_warmup_hands < 0:
             raise ValueError('search_warmup_hands must be a nonnegative integer')
+        if self.total_matches is not None:
+            if type(self.total_matches) is not int or self.total_matches < 1:
+                raise ValueError('total_matches must be a positive integer')
+            if self.reward_objective != 'match-win':
+                raise ValueError('total_matches is a match budget; it requires reward_objective match-win '
+                                 '(hand-marks training is budgeted by total_hands)')
         if self.reward_objective not in REWARD_OBJECTIVES:
             raise ValueError('reward_objective must be ' + ' or '.join(REWARD_OBJECTIVES))
         if type(self.target_marks) is not int or self.target_marks < 1:
@@ -193,6 +211,65 @@ def bid_summary(rows):
     for row in rows:
         for learner_declared, category in row['bids']:
             summary['learner' if learner_declared else 'opponent'][category] += 1
+    return summary
+
+
+def _rate(numerator, denominator):
+    return numerator / denominator if denominator else None
+
+
+def bidding_summary(rows):
+    """Aggregated per-decision auction statistics for each partnership.
+
+    Separates (1) how often high bids are attempted, (2) how often an attempt
+    is overbid (auction lost), (3) how often won contracts are made, and (4)
+    how calls change with the match score. Per-decision records stay in the
+    rollout; only these aggregates are logged.
+    """
+    from .selfplay_rollout import CALL_CATEGORIES, BID_CATEGORIES
+    high = ('42', '2+ marks')
+    summary = {}
+    for team in ('learner', 'opponent'):
+        calls = [d for r in rows for d in r['bid_decisions'] if d['learner'] == (team == 'learner')]
+        n = len(calls)
+        counts = {k: sum(d['call'] == k for d in calls) for k in CALL_CATEGORIES}
+        voluntary = [d for d in calls if d['pass_legal']]
+        by_state = {}
+        for state in ('leading', 'tied', 'trailing'):
+            group = [d for d in calls if d['score_state'] == state]
+            bids = sum(d['call'] != 'pass' for d in group)
+            by_state[state] = dict(decisions=len(group), bid_rate=_rate(bids, len(group)),
+                                   high_bid_rate=_rate(sum(d['call'] in high for d in group), len(group)))
+        by_score = {}
+        for d in calls:
+            stats = by_score.setdefault(f'{d["own_marks"]}-{d["opponent_marks"]}', [0, 0, 0])
+            stats[0] += 1
+            stats[1] += d['call'] != 'pass'
+            stats[2] += d['call'] in high
+        attempts = {}
+        for category in BID_CATEGORIES:
+            made = [d for d in calls if d['call'] == category]
+            attempts[category] = dict(calls=len(made), auction_won=sum(d['auction_won'] for d in made),
+                                      overbid_rate=_rate(sum(not d['auction_won'] for d in made), len(made)))
+        contracts = [c for r in rows for c in r['contracts'] if c[0] == (team == 'learner')]
+        by_contract = {}
+        for category in BID_CATEGORIES:
+            won = [c for c in contracts if c[1] == category]
+            by_contract[category] = dict(contracts=len(won), made=sum(c[2] for c in won),
+                                         success_rate=_rate(sum(c[2] for c in won), len(won)))
+        summary[team] = dict(
+            decisions=n, calls=counts, call_rates={k: _rate(v, n) for k, v in counts.items()},
+            pass_rate=_rate(counts['pass'], n),
+            voluntary_pass_rate=_rate(sum(d['call'] == 'pass' for d in voluntary), len(voluntary)),
+            forced_calls=sum(d['forced'] for d in calls),
+            high_bid_rate=_rate(sum(d['call'] in high for d in calls), n),
+            high_bid_available_rate=_rate(sum(d['call'] in high for d in calls
+                                              if set(high) & set(d['alternatives'])),
+                                          sum(bool(set(high) & set(d['alternatives'])) for d in calls)),
+            by_score_state=by_state,
+            by_match_score={k: dict(decisions=v[0], bid_rate=v[1] / v[0], high_bid_rate=v[2] / v[0])
+                            for k, v in sorted(by_score.items())},
+            bid_attempts=attempts, contracts=dict(total=len(contracts), by_category=by_contract))
     return summary
 
 
@@ -317,8 +394,9 @@ class SelfPlayTrainer(Trainer):
         self.matches = 0  # Completed match episodes (match-win objective only).
         self.match_metrics = None  # Last rollout's match statistics (match-win only).
         self.bid_metrics = None  # Last rollout's resolved-contract bid buckets by team.
+        self.bidding_metrics = None  # Last rollout's per-decision auction aggregates (bidding_summary).
         minimum = self.minimum_decisions
-        self.workers = resolve_workers(config.threads, min(config.total_hands,
+        self.workers = resolve_workers(config.threads, min(config.budget_target,
                                 math.ceil(config.rollout_decisions / max(1, minimum))))
         self.snapshots = []
         self.last_snapshot = 0
@@ -337,6 +415,16 @@ class SelfPlayTrainer(Trainer):
         self.phase_counts = {}
         self.bc_metrics = None
         self.forgetting_data = None
+
+    @property
+    def budget_completed(self):
+        """Completed work in the budget's unit: hands, or completed matches."""
+        return self.matches if self.config.budget_unit == 'matches' else self.hands
+
+    @property
+    def budget_exhausted(self):
+        """The training loop's single stopping condition."""
+        return self.budget_completed >= self.config.budget_target
 
     @property
     def minimum_decisions(self):
@@ -371,7 +459,7 @@ class SelfPlayTrainer(Trainer):
         sample counters, because the paired trainer splits them by partner.
         """
         c, started = self.config, perf_counter()
-        if self.hands >= c.total_hands:
+        if self.budget_exhausted:
             raise ValueError('Training budget exhausted')
         models = self.learner_models()
         weights, pool = tuple(snapshot(m) for m in models), self.opponent_pool()
@@ -392,16 +480,10 @@ class SelfPlayTrainer(Trainer):
         rows, pids, indices, actual, hands = [], set(), [], 0, 0
         previous = torch.get_num_threads()
         try:
-            while actual < c.rollout_decisions and self.hands + hands < c.total_hands:
-                remaining = c.total_hands - self.hands - hands
-                if not self.minimum_decisions:
-                    remaining = min(remaining, c.max_rollout_hands - hands)
-                    if remaining <= 0:
-                        break
-                if match:
-                    count = self._match_wave(actual, remaining)
-                else:
-                    count = min(math.ceil((c.rollout_decisions - actual) / max(1, self.minimum_decisions)), remaining)
+            while actual < c.rollout_decisions:
+                count = self._wave(actual, hands, len(indices))
+                if count <= 0:
+                    break
                 # Neural trump produces a variable extra sample. Fixed-size waves
                 # keep boundaries independent of worker scheduling and use actual
                 # accumulated decisions. At most one eight-hand wave overshoots.
@@ -481,6 +563,7 @@ class SelfPlayTrainer(Trainer):
         if not expected <= total <= expected + hands * int('trump' in c.learn_phases):
             raise RuntimeError('Incorrect enabled-phase rollout count')
         self.bid_metrics = bid_summary(rows)
+        self.bidding_metrics = bidding_summary(rows)
         self.match_metrics = match_summary(rows) if match else None
         self.rollout_performance = {k: sum(r[k] for r in rows)
                                    for k in ('inference_seconds', 'neural_inference_seconds', 'opponent_loading_seconds')}
@@ -495,20 +578,44 @@ class SelfPlayTrainer(Trainer):
         # Mean terminal learner-team reward per episode (hand or match).
         return buffers, sum(r['reward'] for r in rows) / count
 
-    def _match_wave(self, actual, remaining):
-        """Matches in the next collection wave (match-win objective).
+    def _wave(self, actual, hands, matches):
+        """Episodes (hands, or complete matches) in the next collection wave; 0 stops.
 
-        Depends only on accumulated decisions and hands, never on worker
-        scheduling. A match lasts at most 2*target_marks-1 hands, so a wave
-        never launches more matches than the remaining hand budget can hold
-        except for a single final match: the completed-hand budget is exceeded
-        by at most 2*target_marks-2 hands, and unfinished matches never occur.
+        actual, hands and matches are this rollout's accumulated trainable
+        decisions, simulated hands and launched matches. The result depends only
+        on them, never on worker scheduling, so episode indices are identical
+        for any worker count. Every launched match is played to completion.
+
+        hands budget (hand-marks): the original hand waves, unchanged.
+        hands budget (match-win): never more matches than the remaining hand
+          budget can hold, except one final match, so a run overshoots
+          total_hands by at most 2*target_marks-2 hands.
+        matches budget: never more matches than remain, so a run ends with
+          exactly total_matches completed matches; total_hands is ignored.
         """
         c = self.config
+        if c.budget_unit == 'matches':
+            remaining = c.total_matches - self.matches - matches
+        else:
+            remaining = c.total_hands - self.hands - hands
+        if not self.minimum_decisions:
+            # A zero-sample-capable (trump-only) rollout is bounded by hands simulated.
+            room = c.max_rollout_hands - hands
+            if room <= 0:
+                return 0
+            if c.budget_unit == 'hands':
+                remaining = min(remaining, room)
+        if remaining <= 0:
+            return 0
+        if not c.match_objective:
+            return min(math.ceil((c.rollout_decisions - actual) / max(1, self.minimum_decisions)), remaining)
         longest = 2 * c.target_marks - 1
         # A neutral estimate of trainable decisions per match (target hands).
-        per_match = max(1, self.minimum_decisions * c.target_marks)
-        count = math.ceil((c.rollout_decisions - actual) / per_match)
+        count = math.ceil((c.rollout_decisions - actual) / max(1, self.minimum_decisions * c.target_marks))
+        if c.budget_unit == 'matches':
+            if not self.minimum_decisions:
+                count = min(count, max(1, room // longest))  # Same per-rollout hand cap as below.
+            return min(count, remaining)
         return max(1, min(count, remaining // longest))
 
     def auxiliary_loss(self):

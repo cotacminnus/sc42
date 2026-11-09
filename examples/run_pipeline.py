@@ -501,7 +501,8 @@ def resume_argv(step, args):
     latest = output_paths(step)['directory'] / 'checkpoints' / 'latest.pt'
     if step.command == 'train_selfplay_ppo':
         kept = {k: v for k, v in args.items()
-                if k in ('total-hands', 'threads', 'eval-threads', 'device', 'output-dir', 'log-dir')}
+                if k in ('total-hands', 'total-matches', 'threads', 'eval-threads', 'device', 'output-dir',
+                         'log-dir')}
     else:
         kept = {k: v for k, v in args.items() if k not in ('resume', 'warm-start')}
     kept['resume'] = str(latest)

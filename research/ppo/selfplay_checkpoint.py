@@ -135,6 +135,8 @@ def save(path, trainer):
     from .selfplay_trainer import SELECTION_METRICS
     data['metadata'].update(reward_objective=trainer.config.reward_objective,
                             target_marks=trainer.config.target_marks,
+                            budget_unit=trainer.config.budget_unit,
+                            budget_target=trainer.config.budget_target,
                             checkpoint_selection_metric=SELECTION_METRICS[trainer.config.reward_objective],
                             initial_reward_objective=trainer.initial_objective,
                             value_initialization=trainer.value_initialization)
@@ -167,14 +169,22 @@ def resume(path, trainer):
         raise ValueError('Play-only checkpoints initialize a new stage; they cannot exactly resume multi-phase training')
     saved = asdict(config_from_dict(data['config']))
     current = asdict(trainer.config)
+    # Budgets may grow on exact resume, but never switch unit (hands <-> matches).
+    if (saved.get('total_matches') is None) != (current['total_matches'] is None):
+        raise ValueError('Exact resume cannot switch between a hand budget (total_hands) and a match budget '
+                         '(total_matches); initialize a new stage instead')
     for key, value in saved.items():
-        if key not in ('total_hands', 'device', 'threads') and current[key] != value:
+        if key not in ('total_hands', 'total_matches', 'device', 'threads') and current[key] != value:
             raise ValueError(f'Exact resume configuration mismatch: {key}; initialize a new stage instead')
     if tuple(data['metadata']['neural_phases']) != trainer.model.neural_phases:
         raise ValueError('Exact resume neural phase architecture mismatch')
     if trainer.device.type != data['sampling_device']:
         raise ValueError('Exact resume requires the same optimizer device type')
-    if trainer.config.total_hands < data['progress']['hands']:
+    if trainer.config.budget_unit == 'matches':
+        # total_hands is ignored under a match budget, so only completed matches bound it.
+        if trainer.config.total_matches < data['progress'].get('matches', 0):
+            raise ValueError('total_matches precedes saved progress')
+    elif trainer.config.total_hands < data['progress']['hands']:
         raise ValueError('total_hands precedes saved progress')
     membership = optimizer_parameters(trainer)
     if data['metadata'].get('optimizer_parameters', membership) != membership:
