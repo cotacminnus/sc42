@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "name": "research-overview",
+  "description": "Every figure family on a completed pipeline; replace the pipeline path. Omitted figures state which data to add.",
+  "pipelines": [
+    "runs/pipelines/critic-comparison-v1"
+  ],
+  "plots": "all",
+  "formats": [
+    "html",
+    "png"
+  ],
+  "x_axis": "hands",
+  "output_dir": "runs/visualizations/research-overview"
+}

@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "name": "critic-study-figures",
+  "description": "Figures for configs/pipelines/critic_comparison.json after that pipeline completes.",
+  "runs": {
+    "none": "runs/pipelines/critic-comparison-v1/no-critic",
+    "local": "runs/pipelines/critic-comparison-v1/local-critic",
+    "centralized": "runs/pipelines/critic-comparison-v1/centralized-critic"
+  },
+  "evaluations": {
+    "evaluate-none": "runs/pipelines/critic-comparison-v1/evaluate-no-critic/result.json",
+    "evaluate-local": "runs/pipelines/critic-comparison-v1/evaluate-local-critic/result.json",
+    "evaluate-centralized": "runs/pipelines/critic-comparison-v1/evaluate-centralized-critic/result.json"
+  },
+  "plots": [
+    "learning",
+    "ppo",
+    "critic",
+    "evaluation",
+    "resources"
+  ],
+  "formats": [
+    "html",
+    "png",
+    "pdf"
+  ],
+  "x_axis": "hands",
+  "output_dir": "runs/visualizations/critic-study"
+}

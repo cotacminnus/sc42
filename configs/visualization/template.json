@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "name": "my-figures",
+  "description": "Copy and edit. See docs/visualization.md for every key. Paths are relative to the directory where you run the command.",
+  "runs": {
+    "baseline": "runs/ppo-baseline"
+  },
+  "pipelines": [],
+  "evaluations": {},
+  "search_accuracy": {},
+  "plots": [
+    "learning",
+    "ppo"
+  ],
+  "metrics": [],
+  "formats": [
+    "png"
+  ],
+  "x_axis": "hands",
+  "smooth": 0,
+  "aggregate_seeds": false,
+  "annotate": "value",
+  "report": false,
+  "output_dir": "runs/visualizations/my-figures"
+}

@@ -38,6 +38,7 @@ Python 3.11 or newer is required. Run all commands from the repository root.
 python -m pip install -e .               # engine, console, heuristic agents, arena
 python -m pip install -e '.[rl]'         # + PyTorch/NumPy: training, neural evaluation, pipelines
 python -m pip install -e '.[openspiel]'  # + optional OpenSpiel adapter
+python -m pip install -e '.[viz]'        # + figures and reports from completed experiments
 ```
 
 | Install | Needed for |
@@ -45,6 +46,7 @@ python -m pip install -e '.[openspiel]'  # + optional OpenSpiel adapter
 | `.` | Console game, rules engine, heuristic/random/PIMC agents, pure-heuristic evaluation |
 | `.[rl]` | Every training command, neural evaluation and any pipeline with training or neural steps |
 | `.[openspiel]` | `texas42.openspiel` only |
+| `.[viz]` | `examples.visualize_experiments` only; not needed for training |
 
 On Windows PowerShell, use double quotes: `python -m pip install -e ".[rl]"`.
 
@@ -226,6 +228,7 @@ take are in the [command reference](docs/command_reference.md).
 | Composing agents from phases and phase ablations | [Phase-composable evaluation](docs/phase_composable_evaluation.md) |
 | Comparing models against baselines; round robins with a summary table | [Model comparisons](docs/command_reference.md#model-comparisons-and-round-robins) |
 | Duplicate deals, metrics, bootstrap uncertainty | [Arena methodology](docs/arena.md) |
+| Figures and offline reports from completed experiments | [Visualization](docs/visualization.md) |
 | Heuristic and random/conservative variants | [Heuristic V1](docs/simpleheuristic.md), [policy ablations](docs/policy_ablation.md) |
 | Bid-versus-pass replay experiments | [Counterfactual bidding](docs/counterfactual_bidding.md) |
 | Exact open-hand endgames and complete-deal bid benchmarks | [Endgame oracle](docs/endgame_oracle.md) |
@@ -251,9 +254,11 @@ take are in the [command reference](docs/command_reference.md).
 | `texas42/belief.py` | Hidden-deal constraints, exact counting/sampling, rollouts, expected action values |
 | `texas42/training.py`, `encoding.py`, `actions.py` | Versioned ID-based views, 387 features, legal global actions |
 | `texas42/openspiel.py` | Optional OpenSpiel adapter over the native engine |
+| `research/analysis/` | Optional read-only loading, normalization, figures and reports for completed experiments |
 | `research/ppo/` | Optional PPO training (local, centralized or no critic; hand-marks or match-win objective), oracle label datasets, checkpoints, frozen-policy composition, model-guided search |
 | `examples/` | Runnable training, evaluation and benchmark commands, including `run_pipeline.py` |
 | `configs/pipelines/` | Example pipeline JSON files (other files in this directory are git-ignored) |
+| `configs/visualization/` | Reusable visualization selections |
 | `tests/`, `docs/` | Deterministic `unittest` coverage and technical documentation |
 | `runs/`, `logs/` | Generated checkpoints, results and logs (git-ignored) |
 

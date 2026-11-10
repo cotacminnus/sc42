@@ -78,6 +78,7 @@ same time can double or triple that.
 | Heuristic and baseline agents | `test_agents`, `test_simpleheuristic`, `test_policy_ablation` | — |
 | Arena, statistics, parallel execution | `test_arena`, `test_bootstrap`, `test_parallel`, `test_counterfactual_bidding` | — |
 | Console and experiment pipelines | `test_cli`, `test_experiment_pipeline` | pipelines: `rl` |
+| Read-only experiment visualization (loading, normalization, figures, CLI, reports) | `test_visualization` | `viz` |
 | Endgame oracle | `test_oracle`, `test_oracle_optimizations`, `test_oracle_parallel`, `test_oracle_points`, `test_oracle_positions` ([oracle tests](endgame_oracle.md)) | — |
 | Beliefs and Monte Carlo search | `test_belief`, `test_pimc_agent`, `test_model_guided_pimc` | model-guided: `rl` |
 | PPO models, buffers, legacy trainer | `test_ppo_model`, `test_ppo_buffer`, `test_ppo_agent`, `test_ppo_training`, `test_ppo_opponents`, `test_parallel_ppo` | `rl` |
@@ -132,6 +133,7 @@ Any other failure is a real one.
 | Agent API demo (no arguments) | `python -m examples.agent_selfplay` | — | [Self-play examples](#self-play-examples) |
 | OpenSpiel rollouts | `python -m examples.openspiel_selfplay` | `openspiel` | [Self-play examples](#self-play-examples) |
 | Run a JSON-defined sequence of training/evaluation steps | `python -m examples.run_pipeline` | as the steps need | [Experiment pipelines](#experiment-pipelines) |
+| Figures and an offline report from completed experiments | `python -m examples.visualize_experiments` | `viz` | [Visualization guide](visualization.md) |
 | Worker scaling, bootstrap, validation and arena profiles | `python -m examples.parallel_benchmark` and others | varies | [Performance benchmarks](#performance-benchmarks) |
 
 ## Shared conventions
