@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 from examples.endgame_oracle import generate_endgame, main
 from texas42.models import Bid, Contract, ContractKind
-from texas42.oracle import (SearchLimits, _Flag, _Search, _child,
+from texas42.oracle import (SearchLimits, _Search, _child,
                             _state_key, exhaustive_minimax, solve)
 from texas42.phases import Phase
 
@@ -197,19 +197,42 @@ class OracleTests(unittest.TestCase):
             self.assertIsNone(result.optimal_actions)
             self.assertTrue(all(not a.exact and not a.searched for a in result.action_values))
 
-    def test_table_bound_flags_window_tightening_and_full_window_research(self):
-        for seed, window, flag in ((7, (-2, -1), _Flag.LOWER_BOUND),
-                                   (42, (1, 2), _Flag.UPPER_BOUND)):
+    def test_table_window_bounds_and_full_window_research(self):
+        for seed, window in ((7, (-2, -1)), (42, (1, 2))):
+            # Windows outside the +/-1 domain prove nothing new and store nothing.
             state = generate_endgame(seed, 2)
             search = _Search(SearchLimits(), monotonic())
-            bounds = search.search(state, *window)
-            self.assertFalse(bounds.exact)
-            self.assertEqual(search.cache[_state_key(state)].flag, flag)
+            self.assertFalse(search.search(state, *window).exact)
+            self.assertNotIn(_state_key(state), search.cache)
+        for seed in (7, 42):
+            state = generate_endgame(seed, 3)
+            expected = exhaustive_minimax(state, objective='final_points')
+            for threshold, side in ((expected, 'lower'), (expected + 1, 'upper')):
+                search = _Search(SearchLimits(), monotonic(), objective='final_points')
+                bounds = search.search(state, threshold - 1, threshold)
+                self.assertEqual(bounds.reaches(threshold), side == 'lower')
+                key = _state_key(state, 'final_points')
+                prior = search.initial_bounds(state)
+                if bounds.reaches(threshold) == prior.reaches(threshold):
+                    # Awarded points alone settled the window: one node, no entry.
+                    self.assertEqual((search.nodes, bounds), (1, prior))
+                    self.assertNotIn(key, search.cache)
+                    continue
+                stored = search.table_bounds(state, search.cache[key].bounds, to_table=False)
+                self.assertTrue(stored.lower <= expected <= stored.upper)
+                # A fail-high proves the lower side; a fail-low proves the upper side.
+                if side == 'lower':
+                    self.assertEqual(stored.lower, expected)
+                else:
+                    self.assertLessEqual(stored.upper, threshold - 1)
+                self.assertEqual(search.search(state).value, expected)
+                self.assertGreater(search.cache_hits, 0)
+                self.assertTrue(search.cache[key].bounds.exact)
+        for seed in (7, 42):
+            state = generate_endgame(seed, 2)
+            search = _Search(SearchLimits(), monotonic())
             expected = exhaustive_minimax(state)
-            exact = search.search(state)
-            self.assertEqual(exact.value, expected)
-            self.assertGreater(search.cache_hits, 0)
-            self.assertEqual(search.cache[_state_key(state)].flag, _Flag.EXACT)
+            self.assertEqual(search.search(state).value, expected)
             before = search.cache_hits
             self.assertEqual(search.search(state).value, expected)
             self.assertEqual(search.cache_hits, before + 1)

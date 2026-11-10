@@ -58,7 +58,7 @@ class OrderingTests(unittest.TestCase):
         for hint in (*state.legal_action_ids(), 99):
             search = oracle._Search(oracle.SearchLimits(), monotonic(), objective='final_points', move_ordering='combined')
             key = oracle._state_key(state, 'final_points')
-            search.cache[key] = oracle._Entry(0, oracle._Flag.LOWER_BOUND, oracle.ValueBounds(0, 42), hint)
+            search.cache[key] = oracle._Entry(0, 42, hint)  # Uninformative bounds: only a hint.
             self.assertEqual(search.search(state).value, truth)
             self.assertGreater(search.statistics.tt_cutoffs, 0)
         for cap in (0, 1, 7):

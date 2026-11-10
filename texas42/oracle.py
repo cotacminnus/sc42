@@ -8,7 +8,6 @@ from __future__ import annotations
 
 from copy import copy, deepcopy
 from dataclasses import dataclass, field, replace
-from enum import StrEnum
 import atexit
 import math
 from multiprocessing.shared_memory import SharedMemory
@@ -59,6 +58,17 @@ class ValueBounds:
     @property
     def value(self) -> int | None:
         return self.lower if self.exact else None
+
+    def reaches(self, threshold: int) -> bool | None:
+        """Proven threshold answer: True if lower >= threshold, False if upper < threshold.
+
+        None means the bounds do not settle the question (unresolved, never a guess).
+        """
+        if self.lower >= threshold:
+            return True
+        if self.upper < threshold:
+            return False
+        return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -190,9 +200,14 @@ class DealAnalysis:
     output: Literal['all_action_values', 'maximum_contract'] = 'all_action_values'
     statistics: SearchStatistics = field(default=SearchStatistics(), compare=False)
     task_status_counts: tuple[tuple[str, int], ...] = ()
+    # Set when only "can the bidding team reach this many points?" was asked.
+    threshold: int | None = None
 
     @property
     def requested_output_complete(self) -> bool:
+        if self.threshold is not None:
+            return all(row.reaches(self.threshold) is not None for b in self.bidders
+                       for t in b.trumps for row in t.action_values)
         if self.output == 'maximum_contract':
             return all(b.contract_exact for b in self.bidders)
         return self.all_alternative_values_complete
@@ -206,26 +221,20 @@ class DealAnalysis:
         return all(b.all_action_values_complete for b in self.bidders)
 
 
-class _Flag(StrEnum):
-    EXACT = 'exact'
-    LOWER_BOUND = 'lower_bound'
-    UPPER_BOUND = 'upper_bound'
-
-
 @dataclass(frozen=True, slots=True)
 class _Entry:
-    value: int
-    flag: _Flag
-    domain: ValueBounds = ValueBounds()
+    """Certified bounds in table units (see _Search.table_bounds) and an ordering hint.
+
+    Every search result is a valid interval whatever window produced it, so the
+    table stores both bounds. The hint is never a proof.
+    """
+    lower: int
+    upper: int
     preferred_action: int | None = None
 
     @property
     def bounds(self) -> ValueBounds:
-        if self.flag == _Flag.EXACT:
-            return ValueBounds(self.value, self.value)
-        if self.flag == _Flag.LOWER_BOUND:
-            return ValueBounds(self.value, self.domain.upper)
-        return ValueBounds(self.domain.lower, self.value)
+        return ValueBounds(self.lower, self.upper)
 
 
 def _state_key(state: HandState, objective: str = 'contract_success',
@@ -235,7 +244,17 @@ def _state_key(state: HandState, objective: str = 'contract_success',
     Completed trick *count* affects engine termination. Their contents/order
     cannot affect future legality or scoring once points have been awarded.
     Auction history, shaker and match marks likewise cannot affect this objective.
+
+    The final-point key describes only the remaining play: team 0's points still
+    to come do not depend on the bid, the bidder, the reference team or how the
+    awarded points were split. Entries for that key are stored in those units, so
+    all four bidders of one trump and both reference teams share subtrees.
+    reference_team is accepted for compatibility and ignored by that key.
     """
+    if objective == 'final_points':
+        return ('ordinary_future_points_v2', state.ruleset_id, state.phase, state.trump, state.seat,
+                tuple(tuple(sorted(d.id for d in hand)) for hand in state.hands),
+                tuple((seat, d.id) for seat, d in state.trick), len(state.completed))
     return (f'ordinary_{objective}_v1', state.ruleset_id,
             state.contract.bidder % 2 if reference_team is None else reference_team,
             state.phase, state.contract, state.bidder,
@@ -459,22 +478,37 @@ class _Search:
         self.nodes += 1
         return True
 
-    def store(self, key: tuple, bounds: ValueBounds, alpha: int, beta: int,
+    def table_bounds(self, state: HandState, bounds: ValueBounds, *, to_table: bool) -> ValueBounds:
+        """Convert search-unit bounds to table units (to_table) or back.
+
+        Contract success is stored unchanged. Final points are stored as team 0's
+        points still to come, F0, given team 0's awarded points p0. Team 0's final
+        total is p0 + F0. Team 1's is 42 - p0 - F0, because final totals sum to 42.
+        """
+        if self.objective != 'final_points':
+            return bounds
+        captured = state.points[0]
+        if self.team(state) == 0:
+            shift = -captured if to_table else captured
+            return ValueBounds(bounds.lower + shift, bounds.upper + shift)
+        return ValueBounds(42 - captured - bounds.upper, 42 - captured - bounds.lower)
+
+    def store(self, state: HandState, key: tuple, bounds: ValueBounds,
               preferred_action: int | None = None) -> None:
         if self.exhausted or not self.limits.max_cache_entries:
             return
-        # Classify against the caller's original window, before TT tightening.
-        if bounds.exact:
-            entry = _Entry(bounds.lower, _Flag.EXACT, self.domain, preferred_action)
-        elif bounds.lower >= beta:
-            entry = _Entry(bounds.lower, _Flag.LOWER_BOUND, self.domain, preferred_action)
-        elif bounds.upper <= alpha:
-            entry = _Entry(bounds.upper, _Flag.UPPER_BOUND, self.domain, preferred_action)
-        else:
+        # Any completed search result is a valid interval, whatever its window.
+        # Store it only when it says more than the awarded points already do.
+        if bounds == self.initial_bounds(state):
             return
-        if key not in self.cache and len(self.cache) >= self.limits.max_cache_entries:
+        table = self.table_bounds(state, bounds, to_table=True)
+        previous = self.cache.get(key)
+        if previous is not None:
+            # Both are certified bounds on the same value, so they intersect.
+            table = ValueBounds(max(table.lower, previous.lower), min(table.upper, previous.upper))
+        elif len(self.cache) >= self.limits.max_cache_entries:
             del self.cache[next(iter(self.cache))]
-        self.cache[key] = entry
+        self.cache[key] = _Entry(table.lower, table.upper, preferred_action)
 
     def search(self, state: HandState, alpha: int | None = None, beta: int | None = None) -> ValueBounds:
         prior = self.initial_bounds(state)
@@ -486,17 +520,21 @@ class _Search:
         if decided is not None:
             self.score_bound_cutoffs += 1
             return decided
-        original_alpha, original_beta = alpha, beta
+        # Awarded points alone can settle the caller's window, e.g. a threshold
+        # already reached or already out of reach, before any key or table work.
+        if prior.lower >= beta or prior.upper <= alpha:
+            self.score_bound_cutoffs += 1
+            return prior
         key = _state_key(state, self.objective, self.reference_team)
         entry = self.cache.get(key)
         if entry is not None:
             self.cache_hits += 1
-            cached = entry.bounds
+            cached = self.table_bounds(state, entry.bounds, to_table=False)
             prior = ValueBounds(max(prior.lower, cached.lower), min(prior.upper, cached.upper))
-            alpha, beta = max(alpha, prior.lower), min(beta, prior.upper)
-            if prior.exact or alpha >= beta:
+            if prior.exact or prior.lower >= beta or prior.upper <= alpha:
                 self.tt_cutoffs += 1
                 return prior
+        alpha, beta = max(alpha, prior.lower), min(beta, prior.upper)
         maximizing = state.seat % 2 == self.team(state)
         actions = self.ordered_actions(state, entry.preferred_action if entry is not None else None)
         values = []
@@ -523,7 +561,7 @@ class _Search:
                     elif alpha >= beta:
                         self.alpha_beta_cutoffs += 1
                 break
-        self.store(key, bounds, original_alpha, original_beta, preferred)
+        self.store(state, key, bounds, preferred)
         return bounds
 
 
@@ -684,7 +722,7 @@ class DealProgress:
     bidder: int
     trump: Trump
     action_id: int
-    status: Literal['exact', 'contract_proven', 'node_limit', 'time_limit', 'not_started',
+    status: Literal['exact', 'contract_proven', 'threshold_proven', 'node_limit', 'time_limit', 'not_started',
                     'cancelled', 'skipped_proven', 'cancelled_proven', 'cancelled_deadline']
     nodes: int
     cache_hits: int
@@ -710,7 +748,7 @@ def analyze_deal(hands: Sequence[Sequence[Domino]], *, ruleset_id: str = RULESET
                  progress: Callable[[DealProgress], None] | None = None,
                  move_ordering: MoveOrdering = 'none',
                  output: Literal['all_action_values', 'maximum_contract'] = 'all_action_values',
-                 proof_cancellation: bool = True) -> DealAnalysis:
+                 proof_cancellation: bool = True, threshold: int | None = None) -> DealAnalysis:
     """Analyze 252 independent opening-lead continuations, silently by default.
 
     Each lead receives max_nodes; time_seconds is one global cooperative limit,
@@ -719,12 +757,23 @@ def analyze_deal(hands: Sequence[Sequence[Domino]], *, ruleset_id: str = RULESET
     Progress runs in the coordinator as tasks settle; final ordering is canonical.
     maximum_contract uses threshold proofs and optional bidder-level stopping;
     requested_output_complete distinguishes that goal from legacy exact status.
+
+    threshold asks only whether the bidding team can force at least that many
+    final points (0-42) after each lead: every lead is searched with that one
+    null window, and row.reaches(threshold) reads the proven answer. All 252
+    leads are classified; a bidder's remaining leads are never skipped once
+    one lead reaches the threshold. Requires output='all_action_values'.
     """
     start = monotonic()
     if output not in ('all_action_values', 'maximum_contract'):
         raise ValueError('output must be all_action_values or maximum_contract')
     if type(proof_cancellation) is not bool:
         raise ValueError('proof_cancellation must be a boolean')
+    if threshold is not None:
+        if type(threshold) is not int or not 0 <= threshold <= 42:
+            raise ValueError('threshold must be an integer from 0 to 42 points')
+        if output != 'all_action_values':
+            raise ValueError('threshold requires output=all_action_values')
     session = EpisodeState('hand', 7, 0, ruleset_id)
     try:
         detached = [list(hand) for hand in hands]
@@ -739,7 +788,7 @@ def analyze_deal(hands: Sequence[Sequence[Domino]], *, ruleset_id: str = RULESET
     count = min(AUTO_WORKER_CAP, resolve_workers(workers, len(keys)))
     config = _WorkerConfig(deal, 'deal', 'final_points', None, start,
                            search.limits.time_seconds, search.limits.max_cache_entries // count,
-                           move_ordering, output)
+                           move_ordering, output, threshold=threshold)
     tasks = [(key, search.limits.max_nodes) for key in keys]
     results = {}
     statistics = SearchStatistics()
@@ -834,7 +883,8 @@ def analyze_deal(hands: Sequence[Sequence[Domino]], *, ruleset_id: str = RULESET
                                         rows, all(row.exact for row in rows)))
         bidders.append(_bidder_analysis(seat, trumps))
     return DealAnalysis(tuple(bidders), search.nodes, search.cache_hits, monotonic() - start,
-                        output=output, statistics=statistics, task_status_counts=tuple(sorted(status_counts.items())))
+                        output=output, statistics=statistics, task_status_counts=tuple(sorted(status_counts.items())),
+                        threshold=threshold)
 
 
 def _budget_available(search: _Search) -> bool:
@@ -856,6 +906,7 @@ class _WorkerConfig:
     move_ordering: MoveOrdering = 'none'
     output: Literal['all_action_values', 'maximum_contract'] = 'all_action_values'
     stop_name: str | None = None
+    threshold: int | None = None
 
 
 _WORKER_CONFIG: _WorkerConfig | None = None
@@ -891,11 +942,17 @@ def _search_task(config: _WorkerConfig, task: tuple, cache: dict, *, stop_flags=
         if stop_flags is not None and stop_flags[seat]:
             return _LeadResult(ActionValue(0, 42, action), status='skipped_proven')
         state = _child(_play_start(config.state, seat, trump), action)
-        bounds = (_contract_search(state, search) if config.output == 'maximum_contract'
-                  else search.search(state))
+        if config.output == 'maximum_contract':
+            bounds = _contract_search(state, search)
+        elif config.threshold is not None:
+            bounds = search.search(state, alpha=config.threshold - 1, beta=config.threshold)
+        else:
+            bounds = search.search(state)
         row = ActionValue(bounds.lower, bounds.upper, action, search.nodes > 0)
         if bounds.exact:
             status = 'exact'
+        elif config.threshold is not None and bounds.reaches(config.threshold) is not None:
+            status = 'threshold_proven'
         elif config.output == 'maximum_contract' and _makeable_bid(bounds.lower) == _makeable_bid(bounds.upper):
             status = 'contract_proven'
         elif search.cancelled:
@@ -1162,8 +1219,8 @@ def evaluate_position(position: PlayPosition, *, objective: PositionObjective = 
     lower bound >= threshold proves makeable, an upper bound < threshold proves
     unmakeable. Its reference team is always the bidders. Both objectives use
     the same alpha-beta search, transposition entries and final-total units;
-    `cache` may be shared across calls because keys include the ruleset,
-    objective and reference team.
+    `cache` may be shared across calls and reference teams: entries are keyed by
+    the remaining play and stored as team 0's points still to come.
     """
     start = monotonic()
     if objective not in ('final_points', 'contract'):

@@ -126,13 +126,52 @@ class PointSearchTests(unittest.TestCase):
         cache = binary.cache
         for team in (0, 1):
             points = _Search(SearchLimits(), monotonic(), objective='final_points', reference_team=team)
-            points.cache = cache  # Deliberately share entries across objectives.
+            points.cache = cache  # Deliberately share entries across objectives and teams.
             expected = exhaustive_minimax(state, objective='final_points', reference_team=team)
             self.assertEqual(points.search(state).value, expected)
             self.assertIn(_state_key(state, 'final_points', team), cache)
             self.assertNotEqual(_state_key(state), _state_key(state, 'final_points', team))
-        self.assertNotEqual(_state_key(state, 'final_points', 0), _state_key(state, 'final_points', 1))
+            if team == 1:
+                # Team 0's entries answer team 1 directly: final totals sum to 42.
+                self.assertEqual(points.nodes, 1)
+                self.assertEqual(points.statistics.tt_cutoffs, 1)
+        self.assertEqual(_state_key(state, 'final_points', 0), _state_key(state, 'final_points', 1))
         self.assertEqual(binary.search(state), expected_binary)
+
+    def test_point_keys_ignore_bid_bidder_and_awarded_split(self):
+        state = generate_endgame(7, 3)
+        key = _state_key(state, 'final_points')
+        same = deepcopy(state)
+        same.contract = replace(same.contract, bidder=(state.contract.bidder + 1) % 4, bid=Bid(points=35))
+        same.bidder = same.contract.bidder
+        same.points = [state.points[1], state.points[0]]
+        self.assertEqual(key, _state_key(same, 'final_points'))
+        for field, value in (('seat', (state.seat + 1) % 4), ('hands', list(reversed(state.hands))),
+                             ('trump', None if state.trump is not None else 'doubles'),
+                             ('completed', state.completed[:-1])):
+            changed = deepcopy(state)
+            setattr(changed, field, value)
+            with self.subTest(field=field):
+                self.assertNotEqual(key, _state_key(changed, 'final_points'))
+
+    def test_shared_point_table_across_bidders_and_teams_matches_exhaustive(self):
+        # One table serves every reference team and contract of the same remaining play.
+        for seed in range(6):
+            state = generate_endgame(seed, 3, partial_plays=seed % 4)
+            cache = {}
+            for team in (0, 1, 1, 0):
+                search = _Search(SearchLimits(), monotonic(), objective='final_points', reference_team=team)
+                search.cache = cache
+                for window in ((None, None), (20, 21), (29, 30), (5, 6)):
+                    bounds = search.search(state, *window)
+                    truth = exhaustive_minimax(state, objective='final_points', reference_team=team)
+                    with self.subTest(seed=seed, team=team, window=window):
+                        self.assertLessEqual(bounds.lower, truth)
+                        self.assertGreaterEqual(bounds.upper, truth)
+                        if window == (None, None):
+                            self.assertEqual(bounds.value, truth)
+                        else:
+                            self.assertEqual(bounds.reaches(window[1]), truth >= window[1])
 
     def test_point_table_windows_and_research(self):
         state = generate_endgame(42, 3)
@@ -287,6 +326,55 @@ class DealAnalysisTests(unittest.TestCase):
         timed = analyze_deal(hands, limits=SearchLimits(time_seconds=0))
         self.assertEqual(timed.nodes, 0)
         self.assertEqual(hands, before)
+
+    def test_threshold_deal_classifies_every_lead_without_cancellation(self):
+        hands = full_hands()
+        limits = SearchLimits(max_nodes=400)
+        values = analyze_deal(hands, limits=limits, move_ordering='combined')
+        for threshold in (0, 30, 42):
+            events = []
+            result = analyze_deal(hands, limits=limits, move_ordering='combined',
+                                  threshold=threshold, progress=events.append)
+            with self.subTest(threshold=threshold):
+                self.assertEqual(result.threshold, threshold)
+                self.assertEqual(len(events), 252)
+                statuses = dict(result.task_status_counts)
+                self.assertEqual(sum(statuses.values()), 252)
+                self.assertFalse({'skipped_proven', 'cancelled_proven'} & set(statuses))
+                self.assertLessEqual(set(statuses), {'exact', 'threshold_proven', 'node_limit'})
+                pairs = zip((r for b in values.bidders for t in b.trumps for r in t.action_values),
+                            (r for b in result.bidders for t in b.trumps for r in t.action_values))
+                for full, query in pairs:
+                    self.assertEqual(full.action_id, query.action_id)
+                    # Both are certified intervals of one value, so they must overlap.
+                    self.assertLessEqual(max(full.lower, query.lower), min(full.upper, query.upper))
+                    if query.reaches(threshold) is not None:
+                        self.assertIn(full.reaches(threshold), (None, query.reaches(threshold)))
+                complete = all(r.reaches(threshold) is not None
+                               for b in result.bidders for t in b.trumps for r in t.action_values)
+                self.assertEqual(result.requested_output_complete, complete)
+        # Every lead captures at least the first trick point, so 0 is decided at the root.
+        trivial = analyze_deal(hands, threshold=0, limits=limits)
+        self.assertTrue(trivial.requested_output_complete)
+        self.assertEqual(trivial.nodes, 252)
+        self.assertTrue(all(b.reaches(0) for b in trivial.bidders))
+        for kwargs in ({'threshold': 43}, {'threshold': -1}, {'threshold': True}, {'threshold': 30.0},
+                       {'threshold': 30, 'output': 'maximum_contract'}):
+            with self.subTest(kwargs=kwargs), self.assertRaisesRegex(ValueError, 'threshold'):
+                analyze_deal(hands, limits=SearchLimits(max_nodes=0), **kwargs)
+
+    def test_threshold_cli_smoke(self):
+        with redirect_stdout(io.StringIO()) as out:
+            main(['--mode', 'deal', '--seed', '42', '--threshold', '30', '--max-nodes', '50',
+                  '--time-seconds', '20'])
+        for text in ('Threshold query: at least 30', 'Threshold 30:', 'no proof cancellation',
+                     'Bidder seat 3:', '[252/252]'):
+            self.assertIn(text, out.getvalue())
+        for argv in (['--threshold', '30'], ['--mode', 'deal', '--threshold', '43'],
+                     ['--mode', 'deal', '--threshold', '30', '--output', 'maximum_contract']):
+            with self.subTest(argv=argv), redirect_stdout(io.StringIO()), \
+                    patch('sys.stderr', io.StringIO()), self.assertRaises(SystemExit):
+                main(argv)
 
     def test_invalid_deals_and_rules(self):
         hands = full_hands()
