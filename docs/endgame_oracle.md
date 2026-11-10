@@ -926,6 +926,14 @@ The same deal with `threshold=T` and the same budget classified 212/252 leads at
 at `T=42` (171,806 nodes, 6.0 s). In every case all four bidders were proven able to
 reach `T`. These are single timings on a few samples, not statistical speedup claims.
 
+`HandState.legal_action_ids()` now derives play-phase legality directly from
+`legality.play_action_ids` (the same `rules.legal_plays` path used for `PlayView`
+legality) instead of first building an immutable view. On the same machine, the
+60 endgames plus the two 7-trick samples above (`solve_points`, `combined`) took
+9.30/9.76 s before and 7.04/6.84 s after, over two runs. Node counts (310,912)
+and every value were identical. A regression test checks that both legality paths
+agree at every decision of seeded random hands.
+
 ## Interpretation and limitations
 
 An open-hand optimal action need not be optimal when hands are hidden. Its proof
