@@ -902,6 +902,30 @@ single-entry and normal caches, both reference teams, partial tricks and
 none/combined ordering. No pre-existing correctness failure was observed or
 silently repaired.
 
+### Shared point table and threshold queries
+
+Measured on one 4-core Linux cloud container, one process, sequentially, nothing else
+running. The comparison is against the previous commit, whose final-point keys
+included the bidder, reference team and awarded points and whose entries were
+window-classified flags. Positions come from random legal play, not HHR.
+
+| Workload | Before nodes / s | After nodes / s | Values |
+| --- | --- | --- | --- |
+| 60 endgames, 3–5 dominoes/player, `solve` (contract) | 49,383 | 49,383 | identical |
+| Same 60, `solve_points`, `combined` ordering | 229,203 | 151,897 | identical |
+| Full 7-trick deal, one trump, bidder to lead, all leads (sample 1) | 184,869 / 5.9 | 71,508 / 2.1 | identical (3) |
+| Same (sample 2) | 261,022 / 8.7 | 87,507 / 2.8 | identical (36) |
+| `analyze_deal`, seed-42 deal, 5,000 nodes/lead, `combined` | 985,281 / 33.2 | 803,942 / 25.4 | 71 → 110 exact leads; every row overlaps its old bounds |
+
+Contract-success keys are unchanged, so `solve` searches identical trees. The
+deal row is budget-limited: both runs certify valid bounds, and the new bounds are
+narrower in total (bound width 6,114 → 4,467 points across 252 leads).
+
+The same deal with `threshold=T` and the same budget classified 212/252 leads at
+`T=30` (351,127 nodes, 11.7 s), 226/252 at `T=34` (253,919 nodes, 9.0 s) and 235/252
+at `T=42` (171,806 nodes, 6.0 s). In every case all four bidders were proven able to
+reach `T`. These are single timings on a few samples, not statistical speedup claims.
+
 ## Interpretation and limitations
 
 An open-hand optimal action need not be optimal when hands are hidden. Its proof
