@@ -87,8 +87,26 @@ def print_deal(hands, result: DealAnalysis) -> None:
         print(f'Proven optimal trump/lead: {proven}; complete optimal pairs: {choices}')
         print(f'Bidder proof: {bidder.status}; all trump values exact: {bidder.all_trump_values_complete}; '
               f'all action values exact: {bidder.all_action_values_complete}')
+    if result.threshold is not None:
+        print_threshold(result)
     print(f'\nStatus: {result.status}; all alternative values complete: {result.all_alternative_values_complete}')
     print(f'Nodes: {result.nodes}; cache hits: {result.cache_hits}; runtime: {result.elapsed_seconds:.6f}s')
+
+
+def print_threshold(result: DealAnalysis) -> None:
+    """Proven answers to: can the bidding team force at least this many points?"""
+    threshold = result.threshold
+    answer = {True: 'yes', False: 'no', None: 'unresolved'}
+    print(f'\nThreshold {threshold}: can the bidding team force at least {threshold} points? '
+          '(every lead classified; no proof cancellation)')
+    for bidder in result.bidders:
+        print(f'Bidder seat {bidder.seat}: {answer[bidder.reaches(threshold)]}')
+        for trump in bidder.trumps:
+            reaching = [str(PLAY_ACTIONS[row.action_id]) for row in trump.action_values
+                        if row.reaches(threshold)]
+            unresolved = sum(row.reaches(threshold) is None for row in trump.action_values)
+            print(f'  {trump_name(trump.trump)}: {answer[trump.reaches(threshold)]}; '
+                  f'reaching leads: {" ".join(reaching) or "none"}; unresolved leads: {unresolved}')
 
 
 def print_progress(event: DealProgress) -> None:
@@ -120,6 +138,9 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument('--move-ordering', choices=('none', 'heuristic', 'tt', 'combined'), default='none')
     parser.add_argument('--no-proof-cancellation', action='store_false', dest='proof_cancellation',
                         help='Deal maximum_contract ablation: classify every lead without bidder cancellation')
+    parser.add_argument('--threshold', type=int, default=None,
+                        help='Deal mode: only ask whether the bidding team can force at least this many '
+                             'final points (0-42) after each of the 252 leads')
     parser.add_argument('--max-nodes', type=int, default=defaults.max_nodes,
                         help='Nodes per opening lead in deal mode, per position otherwise (default: 1048576)')
     parser.add_argument('--time-seconds', type=float, default=defaults.time_seconds,
@@ -133,8 +154,14 @@ def main(argv: list[str] | None = None) -> None:
     if args.mode == 'deal':
         if args.samples != 1:
             parser.error('deal mode analyzes one complete deal; --samples must be 1')
+        if args.threshold is not None and not 0 <= args.threshold <= 42:
+            parser.error('--threshold must be 0-42 points')
+        if args.threshold is not None and args.output == 'maximum_contract':
+            parser.error('--threshold cannot be combined with maximum_contract output')
     elif args.output == 'maximum_contract':
         parser.error('maximum_contract output requires --mode deal')
+    elif args.threshold is not None:
+        parser.error('--threshold requires --mode deal')
     try:
         resolve_workers(args.workers)
         limits = SearchLimits(args.time_seconds, args.max_nodes, args.max_cache_entries)
@@ -148,6 +175,8 @@ def main(argv: list[str] | None = None) -> None:
         count = min(AUTO_WORKER_CAP, resolve_workers(args.workers, 252))
         output = 'maximum_contract' if args.output == 'maximum_contract' else 'all_action_values'
         print(f'Starting oracle analysis: {output}\nSearch trees: 252')
+        if args.threshold is not None:
+            print(f'Threshold query: at least {args.threshold} bidding-team points')
         print(f'Move ordering: {args.move_ordering}; proof cancellation: '
               f'{output == "maximum_contract" and args.proof_cancellation}')
         print(f'Workers: {count}\nMaximum nodes per tree: {limits.max_nodes}\n'
@@ -157,7 +186,7 @@ def main(argv: list[str] | None = None) -> None:
               'independent search tasks: 252', flush=True)
         result = analyze_deal(hands, limits=limits, workers=args.workers, progress=print_progress,
                               move_ordering=args.move_ordering, output=output,
-                              proof_cancellation=args.proof_cancellation)
+                              proof_cancellation=args.proof_cancellation, threshold=args.threshold)
         print_deal(hands, result)
         print(f'Requested output complete: {result.requested_output_complete}; '
               f'maximum contracts proven: {sum(b.contract_exact for b in result.bidders)}/4')

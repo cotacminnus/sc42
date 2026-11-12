@@ -5,6 +5,14 @@ from .players import BidView, PlayView, TrumpView
 from .rules import is_legal_bid, legal_plays
 
 
+def play_action_ids(hand, lead, trump) -> tuple[int, ...]:
+    """Sorted global IDs of the legal plays for one hand, lead domino and trump.
+
+    The single play-legality path: PlayView legality and HandState both use it.
+    """
+    return tuple(sorted(d.id for d in legal_plays(hand, lead, trump)))
+
+
 def legal_action_ids(view: BidView | TrumpView | PlayView) -> tuple[int, ...]:
     if isinstance(view, BidView):
         return tuple(entry.action_id for entry in ACTION_REGISTRY.implemented_for_phase('bid')
@@ -16,6 +24,5 @@ def legal_action_ids(view: BidView | TrumpView | PlayView) -> tuple[int, ...]:
         return tuple(entry.action_id for entry in ACTION_REGISTRY.implemented_for_phase('trump'))
     if isinstance(view, PlayView):
         # Derive from hand/lead/trump, not a potentially stale legal_plays field.
-        return tuple(sorted(d.id for d in legal_plays(
-            view.hand, view.trick[0][1] if view.trick else None, view.trump)))
+        return play_action_ids(view.hand, view.trick[0][1] if view.trick else None, view.trump)
     raise TypeError('Expected a BidView, TrumpView or PlayView')

@@ -397,6 +397,9 @@ python -m examples.endgame_oracle --mode deal --seed 42 --workers 4 \
 python -m examples.endgame_oracle --mode deal --seed 42 --workers 4 \
   --output maximum_contract --move-ordering combined --no-proof-cancellation \
   --max-nodes 2000 --time-seconds 10
+# Threshold query: can each bidder's team force at least 30 points after each lead?
+python -m examples.endgame_oracle --mode deal --seed 42 --workers 4 \
+  --threshold 30 --move-ordering combined --max-nodes 200000 --time-seconds 60
 ```
 
 `--mode deal` uses the seeded arena deal directly, with no preliminary policy play.
@@ -417,7 +420,7 @@ shutdown can cause a small overrun. Worker-local caches together stay within
 
 **Progress.** The CLI flushes a live `[completed/252]` line as each task settles,
 with bidder, trump, opening domino, status (`exact`, `contract_proven`,
-`node_limit`, `time_limit`, `skipped_proven`, `cancelled_proven`,
+`threshold_proven`, `node_limit`, `time_limit`, `skipped_proven`, `cancelled_proven`,
 `cancelled_deadline`), actual nodes, task runtime and global elapsed time. Explicitly
 skipped tasks count as settled without implying they were searched. Progress can
 arrive out of order; final tables retain canonical seat/trump/action-ID order. The
@@ -433,7 +436,12 @@ alternative analysis subject to budgets and never skips work after a bid proof. 
 are different completion obligations: the `Requested output complete` line
 distinguishes them from the legacy status requiring exact points and the complete
 optimal-pair set. Proven bid classes, exact point values and identified ties are
-reported separately. `--move-ordering combined` can help larger positions but remains
+reported separately. `--threshold T` (0–42, deal mode, all-action output only)
+asks instead whether the bidding team can force at least `T` final points after
+each of the 252 leads. Every lead is classified with no bidder-level cancellation,
+and a `Threshold T:` table lists yes/no/unresolved per bidder and trump, with the
+reaching leads ([threshold semantics](endgame_oracle.md#threshold-queries)).
+`--move-ordering combined` can help larger positions but remains
 opt-in because some workloads slow down. See
 [proof and ordering semantics](endgame_oracle.md#maximum-contract-proof-mode) and the
 [optimization ablations](endgame_oracle.md#ordering-and-proof-search-ablations).

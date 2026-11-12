@@ -83,18 +83,39 @@ the bidders have their target, failure once defenders have more than
 valid even when a trick is partly played. The engine itself still plays all
 seven tricks in ordinary games.
 
-The per-call transposition table stores `EXACT`, `LOWER_BOUND`, and `UPPER_BOUND`
-entries. Lookups tighten windows; stores classify against the original incoming
-window. Bounds propagate through interrupted searches, but interrupted nodes are
-not stored. FIFO eviction bounds the entry count; eviction changes work, not
-answers. `max_cache_entries=0` disables caching.
+Awarded points also settle a caller's search window directly. Before any key or
+table work, a node returns its awarded-point bounds when they already lie at or
+above the window's upper edge or at or below its lower edge. For the point
+objective this is what makes threshold queries cheap: once the reference team
+has the threshold, or the opponents have taken enough that it is out of reach,
+the subtree is not searched. Full-window searches are unaffected. These cutoffs
+are counted in `score_bound_cutoffs`.
 
-Readable immutable keys include objective version, reference team, ruleset,
+The per-call transposition table stores certified **intervals** (`lower`, `upper`)
+plus an ordering hint. Every completed search result is a valid interval whatever
+window produced it, so a fail-high keeps its lower bound, a fail-low its upper
+bound, and a repeated store intersects the new interval with the old one. Lookups
+intersect the entry with the awarded-point bounds and tighten the window. Results
+that say nothing beyond the awarded points are not stored. Bounds propagate
+through interrupted searches, but interrupted nodes are not stored. FIFO eviction
+bounds the entry count; eviction changes work, not answers. `max_cache_entries=0`
+disables caching.
+
+Contract-success keys include objective version, reference team, ruleset,
 phase, contract, bidder, trump, actor, sorted remaining domino IDs by absolute
 seat, ordered partial trick, completed trick count, awarded team scores, and
 terminal result. Completed trick contents cannot affect future play once their
 points are awarded; their count matters for engine termination. Auction history,
 shaker and match marks cannot affect this fixed hand objective.
+
+Final-point keys (`ordinary_future_points_v2`) describe only the remaining play:
+ruleset, phase, trump, actor, remaining hands, partial trick and completed trick
+count. Their entries are stored as **team 0's points still to come**. Team 0's
+final total is its awarded points plus that value, and team 1's is 42 minus
+team 0's awarded points minus it, because final totals sum to 42. The value
+therefore does not depend on the bid, the bidder, the reference team or how the
+awarded points were split. One table serves all four bidders of a trump and both
+reference teams, and positions reached with a different point split share entries.
 
 `SearchLimits(time_seconds=1800.0, max_nodes=1_048_576, max_cache_entries=100_000)`
 defaults to 1,800 seconds (30 minutes) and 1,048,576 nodes **per endgame position**.
@@ -133,9 +154,9 @@ TT entries append an optional `preferred_action`. It is the best bound-producing
 child seen in that traversal, which may be a cutoff move rather than a proven
 optimum. The action is checked against engine legal IDs before ordering. It is
 never returned directly as a proven optimal action or principal variation.
-EXACT/LOWER_BOUND/UPPER_BOUND classification still uses the original window;
-interrupted or cancelled ancestors are not stored. Objective/reference-team/rule
-key namespaces are unchanged. Ordering/output mode need not enter the key because
+Stored intervals do not depend on the window that produced them;
+interrupted or cancelled ancestors are not stored. Objective and ruleset key
+namespaces stay separate. Ordering/output mode need not enter the key because
 the cached utility is still the same point or binary minimax value/bound.
 Externally reported root rows and optimal sets retain canonical ordering.
 
@@ -174,9 +195,10 @@ does not fix the final point total. Instead, the awarded reference-team points
 are a lower bound, and `42 - opposing_team_points` is an upper bound. These
 bounds remain valid during partial tricks because unawarded trick points are
 still available. Terminal scores make them coincide. Interrupted nodes retain
-these bounds without heuristic evaluation. Objective, reference team and ruleset
-are explicit in cache keys, so binary and point values cannot contaminate each
-other even if tables are shared.
+these bounds without heuristic evaluation. Objective and ruleset are explicit in
+cache keys, so binary and point values cannot contaminate each other even if
+tables are shared. Point entries are reference-team neutral (team 0's points
+still to come), so both teams can share them safely.
 
 The existing `solve` API and its binary results are unchanged. Point results
 can additionally prove a choice optimal while its precise value remains
@@ -216,15 +238,17 @@ for the call. Every row reports nodes and a termination reason (`exact`, `decide
 `threshold_proven`, `node_limit`, `time_limit`, or `not_started` after the global
 deadline). Exhausted searches keep valid bounds and are never relabelled exact;
 `proven_optimal_actions` is given only when every legal action was evaluated and
-the bounds prove the choice. A `cache` dictionary can be shared across calls because
-keys include the ruleset, objective and reference team. This API feeds the
+the bounds prove the choice. A `cache` dictionary can be shared across calls,
+bidders and reference teams: point entries are keyed by the remaining play and
+stored as team 0's points still to come. This API feeds the
 [offline critic labels](command_reference.md#oracle-training-labels); training never
 calls it synchronously.
 
 ## Complete-deal bidding benchmark
 
 `analyze_deal(hands, *, ruleset_id=RULESET_ID, limits=None, workers=1, progress=None,
-move_ordering="none", output="all_action_values", proof_cancellation=True) -> DealAnalysis`
+move_ordering="none", output="all_action_values", proof_cancellation=True,
+threshold=None) -> DealAnalysis`
 accepts four complete seven-domino hands of `Domino` values in absolute-seat
 order. The native `EpisodeState.deal` validates the complete double-six set once,
 including uniqueness, without mutating the input. Internally constructed states
@@ -340,6 +364,24 @@ ablation, while retaining each task's threshold/classification search and proof
 mode priorities. It has no effect on exhaustive mode, which never sets proof
 stop flags. No task needed by `all_action_values` is cancelled after a bid proof.
 
+### Threshold queries
+
+`threshold=T` (an integer 0–42, with the default `output="all_action_values"`)
+asks only: **after this lead, can the bidding team force at least `T` final
+points?** Each of the 252 leads is searched once with the null window
+`[T-1, T]`. The awarded-point window cutoff stops a branch as soon as `T` is
+reached or out of reach. Read the proven answer with `row.reaches(T)`: `True`
+when `lower >= T`, `False` when `upper < T`, `None` when the budget ran out first.
+The same method works on `TrumpAnalysis` (best lead for that trump) and
+`BidderAnalysis` (best trump and lead).
+
+Every lead is classified. There is no bidder-level skipping or cancellation:
+a bidder's remaining leads are still searched after one lead reaches `T`.
+`DealAnalysis.threshold` records the query. `requested_output_complete` means
+every lead's answer is proven, and task statuses include `threshold_proven` for
+leads answered without an exact value. A threshold cannot be combined with
+`output="maximum_contract"`. The CLI exposes it as `--threshold T` in deal mode.
+
 ### Scheduling, node budgets and the global deadline
 
 Complete-deal analysis creates **252 logical tasks**: four bidder seats × nine
@@ -437,7 +479,8 @@ Each worker retains a local transposition table between assigned tasks.
 `max_cache_entries` remains an **aggregate entry cap**, each process receiving
 `floor(max_cache_entries / resolved_workers)` entries. Remainders are unused;
 zero disables caching. The cap does not bound interpreter/serialization memory
-or bytes per entry. Objective/reference-team namespaces remain explicit in keys.
+or bytes per entry. Objective namespaces remain explicit in keys; point entries
+are shared by every bidder and reference team the same worker searches.
 Cache eviction cannot change correctness. Process-local tables lose cross-worker
 reuse, and independent full-window leads lose incumbent sharing, so aggregate
 work may increase. Additional futures/IPC also cost time.
@@ -858,6 +901,38 @@ searches matched terminal-only exhaustive minimax with caching disabled,
 single-entry and normal caches, both reference teams, partial tricks and
 none/combined ordering. No pre-existing correctness failure was observed or
 silently repaired.
+
+### Shared point table and threshold queries
+
+Measured on one 4-core Linux cloud container, one process, sequentially, nothing else
+running. The comparison is against the previous commit, whose final-point keys
+included the bidder, reference team and awarded points and whose entries were
+window-classified flags. Positions come from random legal play, not HHR.
+
+| Workload | Before nodes / s | After nodes / s | Values |
+| --- | --- | --- | --- |
+| 60 endgames, 3–5 dominoes/player, `solve` (contract) | 49,383 | 49,383 | identical |
+| Same 60, `solve_points`, `combined` ordering | 229,203 | 151,897 | identical |
+| Full 7-trick deal, one trump, bidder to lead, all leads (sample 1) | 184,869 / 5.9 | 71,508 / 2.1 | identical (3) |
+| Same (sample 2) | 261,022 / 8.7 | 87,507 / 2.8 | identical (36) |
+| `analyze_deal`, seed-42 deal, 5,000 nodes/lead, `combined` | 985,281 / 33.2 | 803,942 / 25.4 | 71 → 110 exact leads; every row overlaps its old bounds |
+
+Contract-success keys are unchanged, so `solve` searches identical trees. The
+deal row is budget-limited: both runs certify valid bounds, and the new bounds are
+narrower in total (bound width 6,114 → 4,467 points across 252 leads).
+
+The same deal with `threshold=T` and the same budget classified 212/252 leads at
+`T=30` (351,127 nodes, 11.7 s), 226/252 at `T=34` (253,919 nodes, 9.0 s) and 235/252
+at `T=42` (171,806 nodes, 6.0 s). In every case all four bidders were proven able to
+reach `T`. These are single timings on a few samples, not statistical speedup claims.
+
+`HandState.legal_action_ids()` now derives play-phase legality directly from
+`legality.play_action_ids` (the same `rules.legal_plays` path used for `PlayView`
+legality) instead of first building an immutable view. On the same machine, the
+60 endgames plus the two 7-trick samples above (`solve_points`, `combined`) took
+9.30/9.76 s before and 7.04/6.84 s after, over two runs. Node counts (310,912)
+and every value were identical. A regression test checks that both legality paths
+agree at every decision of seeded random hands.
 
 ## Interpretation and limitations
 

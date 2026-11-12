@@ -12,7 +12,7 @@ from .models import AuctionCall, Bid, Contract, ContractKind, Domino, Trump
 from .rulesets import RULESET_ID, validate_ruleset
 from .players import BidView, PlayView, TrumpView
 from .rules import legal_plays, trick_points, trick_winner
-from .legality import legal_action_ids
+from .legality import legal_action_ids, play_action_ids
 
 
 # Re-export decoded tables for existing imports; permanent IDs live in actions.
@@ -107,6 +107,11 @@ class HandState:
         """Return sorted global IDs, with future declarations masked out."""
         if self.result is not None:
             return ()
+        if self.phase == Phase.PLAY:
+            # Same rule path as PlayView legality, without first copying the
+            # hand, auction and completed tricks into an immutable view.
+            return play_action_ids(self.hands[self.seat],
+                                   self.trick[0][1] if self.trick else None, self.trump)
         return legal_action_ids(self.view())
 
     def apply(self, action_id: int) -> None:

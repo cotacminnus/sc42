@@ -90,9 +90,11 @@ class MatchTestCase(unittest.TestCase):
     def pool(self, *names):
         return HistoricalPool(tuple((n, '1') for n in names), self.variants, None, snapshot_fallback='current')
 
-    def model(self, neural=PHASES):
+    def model(self, neural=None):
+        # PHASES is imported only with the rl extra; a default of PHASES would be
+        # evaluated at class definition and break import even when skipped.
         torch.manual_seed(0)
-        return PhaseActorCritic(8, neural).eval()
+        return PhaseActorCritic(8, PHASES if neural is None else neural).eval()
 
     def cli(self, name, *extra, total='24'):
         args = ['--from-scratch', '--reward-objective', 'match-win', '--total-hands', total,

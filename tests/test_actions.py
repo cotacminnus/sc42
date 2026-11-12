@@ -55,6 +55,33 @@ class ActionTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 upgrade_selfplay_record(bad)
 
+    def test_hand_state_play_legality_matches_view_legality(self):
+        import random
+        from texas42.legality import legal_action_ids
+        from texas42.models import double_six_set
+        from texas42.state import HandState
+        decisions = 0
+        for seed in range(40):
+            rng = random.Random(seed)
+            deck = list(double_six_set())
+            rng.shuffle(deck)
+            state = HandState([deck[i * 7:(i + 1) * 7] for i in range(4)], seed % 4, (0, 0), 7)
+            while True:
+                if state.result is not None:
+                    self.assertEqual(state.legal_action_ids(), ())
+                    break
+                legal = state.legal_action_ids()
+                with self.subTest(seed=seed, phase=state.phase, decision=decisions):
+                    # The direct play path must agree with immutable-view legality.
+                    self.assertEqual(legal, legal_action_ids(state.view()))
+                    if state.phase == "play":
+                        for action_id in set(range(28)) - set(legal):
+                            with self.assertRaises(ValueError):
+                                state.apply(action_id)
+                decisions += 1
+                state.apply(rng.choice(legal))
+        self.assertGreater(decisions, 40 * 28)
+
     def test_future_contracts_never_become_legal_without_rules(self):
         reserved = (NIL_ACTION_ID, SPLASH_ACTION_ID, PLUNGE_ACTION_ID)
         self.assertEqual(reserved, (55, 56, 57))
